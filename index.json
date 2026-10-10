@@ -1,0 +1,637 @@
+{
+  "format": 1,
+  "generated": "2026-10-10T18:26:43Z",
+  "plugins": [
+    {
+      "id": "flux.css",
+      "name": "CSS",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "CSS and SCSS: highlighting, and the CSS language server with errors, completion, color and hover information, and formatting.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# CSS for Flux (stage 8.3): a language of the catalog. The grammar is the upstream\n# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query\n# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.\nid = \"flux.css\"\nname = \"CSS\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"CSS and SCSS: highlighting, and the CSS language server with errors, completion, color and hover information, and formatting.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/css.svg\"\n\n[[languages]]\nid = \"css\"\nname = \"CSS\"\nextensions = [\"css\"]\ngrammar = \"css\"\nhighlights = \"languages/css/highlights.scm\"\nicon = \"icons/css.svg\"\nicon-color = \"violet\"\n\n# The CSS query first, then the SCSS one: SCSS is CSS with more.\n[[languages]]\nid = \"scss\"\nname = \"SCSS\"\nextensions = [\"scss\"]\ngrammar = \"scss\"\nhighlights = [\"languages/css/highlights.scm\", \"languages/scss/highlights.scm\"]\nicon = \"icons/css.svg\"\nicon-color = \"violet\"\n\n[[grammars]]\nid = \"css\"\nwasm = \"grammars/css.wasm\"\n\n[[grammars]]\nid = \"scss\"\nwasm = \"grammars/scss.wasm\"\n\n# Formatting is off unless asked for.\n[[language-servers]]\nid = \"vscode-css-language-server\"\ncommand = \"vscode-css-language-server\"\nargs = [\"--stdio\"]\nlanguages = [\"css\", \"scss\"]\ninitialization-options = { provideFormatter = true }\ninstall = { npm = [\"vscode-langservers-extracted\"], bin = \"vscode-css-language-server\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.css-v0.1.0/flux.css-0.1.0.tar.gz",
+      "sha256": "2b4ee2417adcd6b1e8f371d2b44f772ffc9fd2e6b4bb7028f964706fc64fa420",
+      "size": 62049,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M6.75 2.75 5.5 13.25M10.75 2.75 9.5 13.25M3 5.75h10.5M2.5 10.25H13\"/>\n</svg>\n",
+      "readme": "# CSS\n\nCSS and SCSS: highlighting, and the CSS language server with errors, completion, color and hover information, and formatting.\n\n## Files\n\n- **CSS**: `*.css`.\n- **SCSS**: `*.scss`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **vscode-css-language-server** (the npm package `vscode-langservers-extracted`) — with a Node.js of Flux's own; for CSS and SCSS.\n\n## Highlighting\n\n- [tree-sitter-css](https://github.com/tree-sitter/tree-sitter-css) v0.25.0, MIT — the grammar and its highlighting query, adapted to Flux's theme scopes (`licenses/`).\n- [tree-sitter-scss](https://github.com/savetheclocktower/tree-sitter-scss) `f5dfc3b`, MIT — the grammar and its highlighting query, adapted to Flux's theme scopes (`licenses/`).\n- Less isn't here yet: there is no maintained tree-sitter grammar for it.\n",
+      "languages": [
+        {
+          "id": "css",
+          "name": "CSS",
+          "extensions": [
+            "css"
+          ],
+          "file_names": []
+        },
+        {
+          "id": "scss",
+          "name": "SCSS",
+          "extensions": [
+            "scss"
+          ],
+          "file_names": []
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "CSS and SCSS: highlighting, and the CSS language server with errors, completion, color and hover information, and formatting.": "CSS и SCSS: подсветка и языковой сервер CSS — ошибки, подсказки, цвета, описания свойств и форматирование."
+        }
+      }
+    },
+    {
+      "id": "flux.dockerfile",
+      "name": "Dockerfile",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Dockerfiles: highlighting, and the Dockerfile language server with errors, completion, hover and formatting.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# Dockerfile for Flux (stage 8.3): a language of the catalog. The grammar is the upstream\n# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query\n# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.\nid = \"flux.dockerfile\"\nname = \"Dockerfile\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Dockerfiles: highlighting, and the Dockerfile language server with errors, completion, hover and formatting.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/docker.svg\"\n\n# Names like `Dockerfile.<anything>` can't be matched by a pattern: the common ones.\n[[languages]]\nid = \"dockerfile\"\nname = \"Dockerfile\"\nextensions = [\"dockerfile\"]\nfile-names = [\"Dockerfile\", \"dockerfile\", \"Containerfile\", \"Dockerfile.dev\", \"Dockerfile.prod\", \"Dockerfile.production\", \"Dockerfile.test\", \"Dockerfile.local\", \"Dockerfile.ci\", \"Dockerfile.base\", \"Dockerfile.build\", \"Dockerfile.debug\", \"Dockerfile.release\"]\naliases = [\"docker\", \"containerfile\"]\ngrammar = \"dockerfile\"\nhighlights = \"languages/dockerfile/highlights.scm\"\nicon = \"icons/docker.svg\"\nicon-color = \"blue\"\n\n[[grammars]]\nid = \"dockerfile\"\nwasm = \"grammars/dockerfile.wasm\"\n\n[[language-servers]]\nid = \"docker-langserver\"\ncommand = \"docker-langserver\"\nargs = [\"--stdio\"]\nlanguages = [\"dockerfile\"]\ninstall = { npm = [\"dockerfile-language-server-nodejs\"], bin = \"docker-langserver\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.dockerfile-v0.1.0/flux.dockerfile-0.1.0.tar.gz",
+      "sha256": "c97dd384a8ec8234ca62988cb8c6e0be59a0d8c2ec977cc6d82dadce483b14d1",
+      "size": 20288,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"#000\">\n<path d=\"M3.25 6.25h2v2h-2zM5.75 6.25h2v2h-2zM8.25 6.25h2v2h-2zM5.75 3.75h2v2h-2zM8.25 3.75h2v2h-2zM8.25 1.25h2v2h-2z\"/><path d=\"M1.25 9h11.5c.7-1.05 1.85-1.4 2.75-1.05-.3 1-1.1 1.7-2.1 1.8-.95 2.6-3.35 4.5-6.9 4.5-3 0-4.75-1.85-5.25-5.25z\"/>\n</svg>\n",
+      "readme": "# Dockerfile\n\nDockerfiles: highlighting, and the Dockerfile language server with errors, completion, hover and formatting.\n\n## Files\n\n- **Dockerfile**: `*.dockerfile`, `Dockerfile`, `dockerfile`, `Containerfile`, `Dockerfile.dev`, `Dockerfile.prod`, `Dockerfile.production`, `Dockerfile.test`, `Dockerfile.local`, `Dockerfile.ci`, `Dockerfile.base`, `Dockerfile.build`, `Dockerfile.debug`, `Dockerfile.release`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **docker-langserver** (the npm package `dockerfile-language-server-nodejs`) — with a Node.js of Flux's own.\n\n## Highlighting\n\n- [tree-sitter-dockerfile](https://github.com/camdencheek/tree-sitter-dockerfile) v0.2.0, MIT — the grammar and its highlighting query, adapted to Flux's theme scopes (`licenses/`).\n- Flux has no language injections yet: the shell commands of `RUN` are not highlighted.\n",
+      "languages": [
+        {
+          "id": "dockerfile",
+          "name": "Dockerfile",
+          "extensions": [
+            "dockerfile"
+          ],
+          "file_names": [
+            "Dockerfile",
+            "dockerfile",
+            "Containerfile",
+            "Dockerfile.dev",
+            "Dockerfile.prod",
+            "Dockerfile.production",
+            "Dockerfile.test",
+            "Dockerfile.local",
+            "Dockerfile.ci",
+            "Dockerfile.base",
+            "Dockerfile.build",
+            "Dockerfile.debug",
+            "Dockerfile.release"
+          ]
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Dockerfiles: highlighting, and the Dockerfile language server with errors, completion, hover and formatting.": "Dockerfile: подсветка и языковой сервер Dockerfile — ошибки, подсказки, описание инструкций и форматирование."
+        }
+      }
+    },
+    {
+      "id": "flux.icons-tiles",
+      "name": "Flux Tiles",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "File icons as colored tiles: Flux's glyphs in white on the colors of their file types, readable on light and dark themes.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "icons"
+      ],
+      "manifest": "# Flux Tiles (stage 8.3): a full-color set of file icons for the catalog — Flux's own glyphs in white\n# on rounded tiles of the file types' colors. Generated by `src/gen-tiles.py` from Flux Icons (the\n# bundled `flux.icons`), so both sets know the same files.\nid = \"flux.icons-tiles\"\nname = \"Flux Tiles\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"File icons as colored tiles: Flux's glyphs in white on the colors of their file types, readable on light and dark themes.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/tiles.svg\"\n\n[[icon-themes]]\nfile = \"icon-themes/tiles.toml\"\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.icons-tiles-v0.1.0/flux.icons-tiles-0.1.0.tar.gz",
+      "sha256": "bd1236dc79f391c3678a12e4cec3c2e6644e0d7318d0f61181ec1ed654bd803d",
+      "size": 5402,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"1.75\" y=\"1.75\" width=\"5.25\" height=\"5.25\" rx=\"1.5\"/><rect x=\"9\" y=\"1.75\" width=\"5.25\" height=\"5.25\" rx=\"1.5\"/><rect x=\"1.75\" y=\"9\" width=\"5.25\" height=\"5.25\" rx=\"1.5\"/><rect x=\"9\" y=\"9\" width=\"5.25\" height=\"5.25\" rx=\"1.5\"/></svg>\n",
+      "readme": "# Flux Tiles\n\nFile icons as colored tiles: each kind of file gets Flux's own glyph in white (near-black where\nwhite wouldn't read) on a rounded tile of its color — Rust orange, TypeScript blue, Python blue\nwith a yellow snake, Go cyan, Docker blue, licenses gold. The tiles are full-color, so they look the\nsame on light and dark themes.\n\nThe set knows the same files as Flux Icons, the set Flux comes with. Folders keep Flux's own icons;\na file the set doesn't know gets a gray tile, unless its language plugin brings an icon of its own.\n\nChoose it in **Settings → Appearance → File Icons**.\n\nThe icons are generated: `python3 src/gen-tiles.py <flux>/plugins/icons` reads Flux Icons and writes\n`icons/` and `icon-themes/tiles.toml` (edit the script, not the generated files).\n",
+      "languages": [],
+      "themes": [],
+      "icon_themes": [
+        "Flux Tiles"
+      ],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Flux Tiles": "Плитки Flux",
+          "File icons as colored tiles: Flux's glyphs in white on the colors of their file types, readable on light and dark themes.": "Значки файлов цветными плитками: значки Flux белым на цвете вида файла — читаются и в светлой, и в тёмной теме."
+        }
+      }
+    },
+    {
+      "id": "flux.go",
+      "name": "Go",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Go: highlighting, and gopls with errors, completion, navigation and refactoring.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# Go for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the\n# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting\n# query is the grammar's own (MIT).\nid = \"flux.go\"\nname = \"Go\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Go: highlighting, and gopls with errors, completion, navigation and refactoring.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/go.svg\"\n\n# The Go query puts `(identifier) @variable` and `(field_identifier) @property` after function and\n# method calls: the earlier pattern wins.\n[[languages]]\nid = \"go\"\nname = \"Go\"\nextensions = [\"go\"]\naliases = [\"golang\"]\ngrammar = \"go\"\nhighlights = \"languages/go/highlights.scm\"\nprecedence = \"first-pattern\"\nicon = \"icons/go.svg\"\nicon-color = \"cyan\"\n\n[[grammars]]\nid = \"go\"\nwasm = \"grammars/go.wasm\"\n\n[[language-servers]]\nid = \"gopls\"\ncommand = \"gopls\"\nlanguages = [\"go\"]\ninstall = { go = \"golang.org/x/tools/gopls\", bin = \"gopls\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.go-v0.1.0/flux.go-0.1.0.tar.gz",
+      "sha256": "0c6372fd5c992cabcaaa6622ac0e1c0483715f4dcdfd9f9bd321c1e403cee9f9",
+      "size": 40973,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M7.1 5.9A2.75 2.75 0 0 0 4.75 4.75a3.25 3.25 0 0 0 0 6.5c1.65 0 2.6-1.1 2.6-2.85H5.1\"/><circle cx=\"11.6\" cy=\"8\" r=\"2.75\"/>\n</svg>\n",
+      "readme": "# Go\n\nGo: highlighting, and gopls with errors, completion, navigation and refactoring.\n\n## Files\n\n- **Go**: `*.go`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **gopls** — `go install golang.org/x/tools/gopls@latest`: it needs Go on the machine.\n\n## Highlighting\n\n- The grammar and its highlighting query: [tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) v0.25.0, MIT — `licenses/`.\n",
+      "languages": [
+        {
+          "id": "go",
+          "name": "Go",
+          "extensions": [
+            "go"
+          ],
+          "file_names": []
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Go: highlighting, and gopls with errors, completion, navigation and refactoring.": "Go: подсветка и gopls — ошибки, подсказки, навигация и рефакторинг."
+        }
+      }
+    },
+    {
+      "id": "flux.html",
+      "name": "HTML",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "HTML: highlighting, and the HTML language server with errors, completion, hover and formatting.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# HTML for Flux (stage 8.3): a language of the catalog. The grammar is the upstream\n# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query\n# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.\nid = \"flux.html\"\nname = \"HTML\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"HTML: highlighting, and the HTML language server with errors, completion, hover and formatting.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/html.svg\"\n\n[[languages]]\nid = \"html\"\nname = \"HTML\"\nextensions = [\"html\", \"htm\", \"xhtml\"]\naliases = [\"htm\", \"xhtml\"]\ngrammar = \"html\"\nhighlights = \"languages/html/highlights.scm\"\nicon = \"icons/html.svg\"\nicon-color = \"orange\"\n\n[[grammars]]\nid = \"html\"\nwasm = \"grammars/html.wasm\"\n\n# Formatting is off unless asked for; CSS in <style> and JavaScript in <script> get\n# completion and errors from the server itself.\n[[language-servers]]\nid = \"vscode-html-language-server\"\ncommand = \"vscode-html-language-server\"\nargs = [\"--stdio\"]\nlanguages = [\"html\"]\ninitialization-options = { provideFormatter = true, embeddedLanguages = { css = true, javascript = true } }\ninstall = { npm = [\"vscode-langservers-extracted\"], bin = \"vscode-html-language-server\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.html-v0.1.0/flux.html-0.1.0.tar.gz",
+      "sha256": "c1c6d4a441d74f4251b4f4757fd9e2e3e7668c30cc893560d6a369e00b2f1905",
+      "size": 9590,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M4.75 4.5 1.5 8l3.25 3.5M11.25 4.5 14.5 8l-3.25 3.5M9.25 3 6.75 13\"/>\n</svg>\n",
+      "readme": "# HTML\n\nHTML: highlighting, and the HTML language server with errors, completion, hover and formatting.\n\n## Files\n\n- **HTML**: `*.html`, `*.htm`, `*.xhtml`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **vscode-html-language-server** (the npm package `vscode-langservers-extracted`) — with a Node.js of Flux's own. It also completes and checks the CSS of `<style>` and the JavaScript of `<script>`.\n\n## Highlighting\n\n- [tree-sitter-html](https://github.com/tree-sitter/tree-sitter-html) v0.23.2, MIT — the grammar and its highlighting query, adapted to Flux's theme scopes (`licenses/`).\n- Flux has no language injections yet: the CSS of `<style>` and the JavaScript of `<script>` are not highlighted (the language server still understands them).\n",
+      "languages": [
+        {
+          "id": "html",
+          "name": "HTML",
+          "extensions": [
+            "html",
+            "htm",
+            "xhtml"
+          ],
+          "file_names": []
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "HTML: highlighting, and the HTML language server with errors, completion, hover and formatting.": "HTML: подсветка и языковой сервер HTML — ошибки, подсказки, описание тегов и форматирование."
+        }
+      }
+    },
+    {
+      "id": "flux.json",
+      "name": "JSON",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "JSON and JSON with Comments: highlighting, and the JSON language server with errors, completion and formatting.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# JSON for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the\n# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting\n# query is the grammar's own (MIT).\nid = \"flux.json\"\nname = \"JSON\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"JSON and JSON with Comments: highlighting, and the JSON language server with errors, completion and formatting.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/json.svg\"\n\n# The JSON query puts the keys `(pair key: …)` before the generic `(string)`: the earlier pattern\n# wins.\n[[languages]]\nid = \"json\"\nname = \"JSON\"\nextensions = [\"json\"]\nfile-names = [\"flake.lock\"]\ngrammar = \"json\"\nhighlights = \"languages/json/highlights.scm\"\nprecedence = \"first-pattern\"\nicon = \"icons/json.svg\"\nicon-color = \"amber\"\n\n# Its own language: language servers know `.jsonc` files as `jsonc`.\n[[languages]]\nid = \"jsonc\"\nname = \"JSON with Comments\"\nextensions = [\"jsonc\"]\ngrammar = \"json\"\nhighlights = \"languages/json/highlights.scm\"\nprecedence = \"first-pattern\"\nicon = \"icons/json.svg\"\nicon-color = \"amber\"\n\n[[grammars]]\nid = \"json\"\nwasm = \"grammars/json.wasm\"\n\n[[language-servers]]\nid = \"vscode-json-language-server\"\ncommand = \"vscode-json-language-server\"\nargs = [\"--stdio\"]\nlanguages = [\"json\", \"jsonc\"]\n# Formatting is off unless asked for.\ninitialization-options = { provideFormatter = true }\ninstall = { npm = [\"vscode-langservers-extracted\"], bin = \"vscode-json-language-server\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.json-v0.1.0/flux.json-0.1.0.tar.gz",
+      "sha256": "2d1fe45d27cef92956b4cbb07373b1b86c5bfcc2242a1274a1b00f86d270ee12",
+      "size": 4902,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M5.5 2.25c-1.25 0-1.9.6-1.9 1.75v1.6c0 .95-.5 1.6-1.6 2.4 1.1.8 1.6 1.45 1.6 2.4V12c0 1.15.65 1.75 1.9 1.75M10.5 2.25c1.25 0 1.9.6 1.9 1.75v1.6c0 .95.5 1.6 1.6 2.4-1.1.8-1.6 1.45-1.6 2.4V12c0 1.15-.65 1.75-1.9 1.75\"/><circle cx=\"8\" cy=\"8\" r=\".85\" fill=\"#000\" stroke=\"none\"/>\n</svg>\n",
+      "readme": "# JSON\n\nJSON and JSON with Comments: highlighting, and the JSON language server with errors, completion and formatting.\n\n## Files\n\n- **JSON**: `*.json`, `flake.lock`.\n- **JSON with Comments**: `*.jsonc`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **vscode-json-language-server** (the npm package `vscode-langservers-extracted`) — with a Node.js of Flux's own.\n\n## Highlighting\n\n- The grammar and its highlighting query: [tree-sitter-json](https://github.com/tree-sitter/tree-sitter-json) v0.24.8, MIT — `licenses/`.\n",
+      "languages": [
+        {
+          "id": "json",
+          "name": "JSON",
+          "extensions": [
+            "json"
+          ],
+          "file_names": [
+            "flake.lock"
+          ]
+        },
+        {
+          "id": "jsonc",
+          "name": "JSON with Comments",
+          "extensions": [
+            "jsonc"
+          ],
+          "file_names": []
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "JSON and JSON with Comments: highlighting, and the JSON language server with errors, completion and formatting.": "JSON и JSON с комментариями: подсветка и языковой сервер JSON — ошибки, подсказки и форматирование.",
+          "JSON with Comments": "JSON с комментариями"
+        }
+      }
+    },
+    {
+      "id": "flux.makefile",
+      "name": "Makefile",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Makefiles: highlighting of targets, variables, functions and directives.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# Makefile for Flux (stage 8.3): a language of the catalog. The grammar is the upstream\n# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query\n# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.\nid = \"flux.makefile\"\nname = \"Makefile\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Makefiles: highlighting of targets, variables, functions and directives.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/makefile.svg\"\n\n[[languages]]\nid = \"makefile\"\nname = \"Makefile\"\nextensions = [\"mk\", \"mak\"]\nfile-names = [\"Makefile\", \"makefile\", \"GNUmakefile\"]\naliases = [\"make\", \"mk\"]\ngrammar = \"make\"\nhighlights = \"languages/makefile/highlights.scm\"\nicon = \"icons/makefile.svg\"\nicon-color = \"green\"\n\n[[grammars]]\nid = \"make\"\nwasm = \"grammars/make.wasm\"\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.makefile-v0.1.0/flux.makefile-0.1.0.tar.gz",
+      "sha256": "bbc69deff1b988af3047e29c9d91561f4b6706a275978890c83307ff8d96c92b",
+      "size": 36560,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M2.75 4.25 6.5 8l-3.75 3.75M8.75 12h4.5\"/>\n</svg>\n",
+      "readme": "# Makefile\n\nMakefiles: highlighting of targets, variables, functions and directives.\n\n## Files\n\n- **Makefile**: `*.mk`, `*.mak`, `Makefile`, `makefile`, `GNUmakefile`.\n\n## Language servers\n\nNo language server: none is maintained for Makefiles.\n\n## Highlighting\n\n- [tree-sitter-make](https://github.com/tree-sitter-grammars/tree-sitter-make) `70613f3`, MIT — the grammar and its highlighting query, adapted to Flux's theme scopes (`licenses/`).\n- Flux has no language injections yet: the shell commands of recipes are not highlighted.\n",
+      "languages": [
+        {
+          "id": "makefile",
+          "name": "Makefile",
+          "extensions": [
+            "mk",
+            "mak"
+          ],
+          "file_names": [
+            "Makefile",
+            "makefile",
+            "GNUmakefile"
+          ]
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Makefiles: highlighting of targets, variables, functions and directives.": "Makefile: подсветка целей, переменных, функций и директив."
+        }
+      }
+    },
+    {
+      "id": "flux.markdown",
+      "name": "Markdown",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Markdown: highlighting of the document's structure, and Marksman with links between files, headings and completion.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# Markdown for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the\n# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting\n# query is the grammar's own (MIT).\nid = \"flux.markdown\"\nname = \"Markdown\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Markdown: highlighting of the document's structure, and Marksman with links between files, headings and completion.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/markdown.svg\"\n\n# The block grammar only: inline markup and code in blocks would be injections.\n[[languages]]\nid = \"markdown\"\nname = \"Markdown\"\nextensions = [\"md\", \"markdown\"]\naliases = [\"md\"]\ngrammar = \"markdown\"\nhighlights = \"languages/markdown/highlights.scm\"\nicon = \"icons/markdown.svg\"\nicon-color = \"indigo\"\n\n[[grammars]]\nid = \"markdown\"\nwasm = \"grammars/markdown.wasm\"\n\n[[language-servers]]\nid = \"marksman\"\ncommand = \"marksman\"\nargs = [\"server\"]\nlanguages = [\"markdown\"]\ninstall = { github = \"artempyanykh/marksman\", asset = \"marksman-macos\", bin = \"marksman\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.markdown-v0.1.0/flux.markdown-0.1.0.tar.gz",
+      "sha256": "7bafa5ecf46d94aad37fd767317a9685b666d23c194a7e9aa4b4d6d5d00b5c44",
+      "size": 63337,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<rect x=\"1\" y=\"3.25\" width=\"14\" height=\"9.5\" rx=\"2\" stroke-width=\"1.3\"/><path d=\"M3.75 10.25v-4.5l2 2.25 2-2.25v4.5M11.5 5.75v4.5M9.75 8.75l1.75 1.75 1.75-1.75\"/>\n</svg>\n",
+      "readme": "# Markdown\n\nMarkdown: highlighting of the document's structure, and Marksman with links between files, headings and completion.\n\n## Files\n\n- **Markdown**: `*.md`, `*.markdown`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **Marksman** — the latest release from GitHub. Links between files resolve in a Git repository or with a `.marksman.toml`.\n\n## Highlighting\n\n- The grammar and its highlighting query: [tree-sitter-markdown](https://github.com/tree-sitter-grammars/tree-sitter-markdown) v0.5.3 (`tree-sitter-markdown`), MIT — `licenses/`.\n",
+      "languages": [
+        {
+          "id": "markdown",
+          "name": "Markdown",
+          "extensions": [
+            "md",
+            "markdown"
+          ],
+          "file_names": []
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Markdown: highlighting of the document's structure, and Marksman with links between files, headings and completion.": "Markdown: подсветка структуры документа и Marksman — ссылки между файлами, заголовки и подсказки."
+        }
+      }
+    },
+    {
+      "id": "flux.python",
+      "name": "Python",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Python: highlighting, Pyright (types, completion, navigation, the project's virtual environment) and Ruff (linting and formatting).",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# Python for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the\n# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting\n# query is the grammar's own (MIT).\nid = \"flux.python\"\nname = \"Python\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Python: highlighting, Pyright (types, completion, navigation, the project's virtual environment) and Ruff (linting and formatting).\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/python.svg\"\n\n[[languages]]\nid = \"python\"\nname = \"Python\"\nextensions = [\"py\", \"pyi\", \"pyw\"]\naliases = [\"py\", \"py3\", \"python3\"]\ngrammar = \"python\"\nhighlights = \"languages/python/highlights.scm\"\nicon = \"icons/python.svg\"\nicon-color = \"blue\"\n\n[[grammars]]\nid = \"python\"\nwasm = \"grammars/python.wasm\"\n\n[[language-servers]]\nid = \"pyright\"\ncommand = \"pyright-langserver\"\nargs = [\"--stdio\"]\nlanguages = [\"python\"]\ninstall = { npm = [\"pyright\"], bin = \"pyright-langserver\" }\n\n# After Pyright, which has no formatter: Ruff formats and lints.\n[[language-servers]]\nid = \"ruff\"\ncommand = \"ruff\"\nargs = [\"server\"]\nextensions = [\"py\", \"pyi\"]\ninstall = { github = \"astral-sh/ruff\", asset = \"ruff-{arch}-apple-darwin.tar.gz\", bin = \"ruff\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.python-v0.1.0/flux.python-0.1.0.tar.gz",
+      "sha256": "67336a20fd1b2883bdc2054d7d43ff517fa871085280b7f22d1b836dbb8a5959",
+      "size": 67857,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"#000\"><path fill-rule=\"evenodd\" d=\"M7.85 1.25c-2.6 0-3.35 1.05-3.35 2.4V5.4h3.6v.6H3.15C1.9 6 1.25 6.95 1.25 8.6c0 1.7.75 2.6 1.9 2.6h1.2V9.6c0-1.25.95-2.2 2.2-2.2h3.4c1.05 0 1.85-.85 1.85-1.9V3.65c0-1.3-1.2-2.4-3.95-2.4zM6.35 2.4a.65.65 0 1 1 0 1.3.65.65 0 0 1 0-1.3z\"/><path fill-rule=\"evenodd\" d=\"M8.15 14.75c2.6 0 3.35-1.05 3.35-2.4V10.6H7.9V10h4.95c1.25 0 1.9-.95 1.9-2.6 0-1.7-.75-2.6-1.9-2.6h-1.2v1.6c0 1.25-.95 2.2-2.2 2.2H6.05c-1.05 0-1.85.85-1.85 1.9v1.85c0 1.3 1.2 2.4 3.95 2.4zM9.65 13.6a.65.65 0 1 1 0-1.3.65.65 0 0 1 0 1.3z\"/>\n</svg>\n",
+      "readme": "# Python\n\nPython: highlighting, Pyright (types, completion, navigation, the project's virtual environment) and Ruff (linting and formatting).\n\n## Files\n\n- **Python**: `*.py`, `*.pyi`, `*.pyw`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **Pyright** — from npm, with a Node.js of Flux's own. It uses the project's virtual environment (`.venv`, `venv` or `env` with a `pyvenv.cfg`, otherwise `$VIRTUAL_ENV`).\n- **Ruff** — the latest release from GitHub (checked by its `.sha256`): linting and formatting (⌥⌘L).\n\n## Highlighting\n\n- The grammar and its highlighting query: [tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python) v0.25.0, MIT — `licenses/`.\n",
+      "languages": [
+        {
+          "id": "python",
+          "name": "Python",
+          "extensions": [
+            "py",
+            "pyi",
+            "pyw"
+          ],
+          "file_names": []
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Python: highlighting, Pyright (types, completion, navigation, the project's virtual environment) and Ruff (linting and formatting).": "Python: подсветка, Pyright (типы, подсказки, навигация, виртуальное окружение проекта) и Ruff (линтер и форматирование)."
+        }
+      }
+    },
+    {
+      "id": "flux.rust",
+      "name": "Rust",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Rust: highlighting, and rust-analyzer with errors, completion, navigation and refactoring.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# Rust for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the\n# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting\n# query is the grammar's own (MIT).\nid = \"flux.rust\"\nname = \"Rust\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Rust: highlighting, and rust-analyzer with errors, completion, navigation and refactoring.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/rust.svg\"\n\n[[languages]]\nid = \"rust\"\nname = \"Rust\"\nextensions = [\"rs\"]\naliases = [\"rs\"]\ngrammar = \"rust\"\nhighlights = \"languages/rust/highlights.scm\"\nicon = \"icons/rust.svg\"\nicon-color = \"orange\"\n\n[[grammars]]\nid = \"rust\"\nwasm = \"grammars/rust.wasm\"\n\n[[language-servers]]\nid = \"rust-analyzer\"\ncommand = \"rust-analyzer\"\nlanguages = [\"rust\"]\ninstall = { rustup = \"rust-analyzer\", fallback = { github = \"rust-lang/rust-analyzer\", asset = \"rust-analyzer-{arch}-apple-darwin.gz\", bin = \"rust-analyzer\" } }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.rust-v0.1.0/flux.rust-0.1.0.tar.gz",
+      "sha256": "4ac0910696ddc4a81fafb8956c5434abe38ff9488e8ed265c9bda67515956513",
+      "size": 117373,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><defs><mask id=\"k\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"16\" height=\"16\"><rect width=\"16\" height=\"16\" fill=\"#fff\"/><g fill=\"none\" stroke=\"#000\" stroke-width=\"1.45\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M6.1 11V5.1h2.4a1.6 1.6 0 0 1 0 3.2H6.1M8.3 8.3 10.1 11\"/></g></mask></defs><g mask=\"url(#k)\" fill=\"#000\"><path d=\"M7.1 1.1h1.8l.33 1.53 1.13.47 1.32-.86 1.27 1.27-.86 1.32.47 1.13 1.54.33v1.8l-1.54.33-.47 1.13.86 1.32-1.27 1.27-1.32-.86-1.13.47-.33 1.53H7.1l-.33-1.53-1.13-.47-1.32.86-1.27-1.27.86-1.32-.47-1.13L1.1 8.9V7.1l1.54-.33.47-1.13-.86-1.32 1.27-1.27 1.32.86 1.13-.47z\"/></g>\n</svg>\n",
+      "readme": "# Rust\n\nRust: highlighting, and rust-analyzer with errors, completion, navigation and refactoring.\n\n## Files\n\n- **Rust**: `*.rs`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **rust-analyzer** — `rustup component add rust-analyzer` when rustup is there, otherwise the latest release from GitHub.\n\n## Highlighting\n\n- The grammar and its highlighting query: [tree-sitter-rust](https://github.com/tree-sitter/tree-sitter-rust) v0.24.2, MIT — `licenses/`.\n",
+      "languages": [
+        {
+          "id": "rust",
+          "name": "Rust",
+          "extensions": [
+            "rs"
+          ],
+          "file_names": []
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Rust: highlighting, and rust-analyzer with errors, completion, navigation and refactoring.": "Rust: подсветка и rust-analyzer — ошибки, подсказки, навигация и рефакторинг."
+        }
+      }
+    },
+    {
+      "id": "flux.shell",
+      "name": "Shell Script",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Shell scripts (sh, bash, zsh): highlighting, and the Bash language server with ShellCheck.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# Shell Script for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the\n# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting\n# query is the grammar's own (MIT).\nid = \"flux.shell\"\nname = \"Shell Script\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Shell scripts (sh, bash, zsh): highlighting, and the Bash language server with ShellCheck.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/shell.svg\"\n\n[[languages]]\nid = \"bash\"\nname = \"Shell\"\nextensions = [\"sh\", \"bash\", \"zsh\"]\nfile-names = [\".bashrc\", \".bash_profile\", \".bash_aliases\", \".bash_logout\", \".profile\", \".zshrc\", \".zshenv\", \".zprofile\", \".zlogin\", \".zlogout\", \"PKGBUILD\"]\naliases = [\"sh\", \"shell\", \"shellscript\", \"zsh\", \"console\"]\ngrammar = \"bash\"\nhighlights = \"languages/bash/highlights.scm\"\nlsp-id = \"shellscript\"\nicon = \"icons/shell.svg\"\nicon-color = \"green\"\n\n[[grammars]]\nid = \"bash\"\nwasm = \"grammars/bash.wasm\"\n\n# Not zsh: the Bash language server would flag zsh's own syntax.\n[[language-servers]]\nid = \"bash-language-server\"\ncommand = \"bash-language-server\"\nargs = [\"start\"]\nextensions = [\"sh\", \"bash\"]\nfile-names = [\".bashrc\", \".bash_profile\", \".bash_aliases\", \".bash_logout\", \".profile\", \"PKGBUILD\"]\ninstall = { npm = [\"bash-language-server\"], bin = \"bash-language-server\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.shell-v0.1.0/flux.shell-0.1.0.tar.gz",
+      "sha256": "b1054ff060346c9d7ea2b2dedb1f680de3c3bc2243fdf5c06b0cbbbdda6ba0dc",
+      "size": 179515,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M2.75 4.25 6.5 8l-3.75 3.75M8.75 12h4.5\"/>\n</svg>\n",
+      "readme": "# Shell Script\n\nShell scripts (sh, bash, zsh): highlighting, and the Bash language server with ShellCheck.\n\n## Files\n\n- **Shell**: `*.sh`, `*.bash`, `*.zsh`, `.bashrc`, `.bash_profile`, `.bash_aliases`, `.bash_logout`, `.profile`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin`, `.zlogout`, `PKGBUILD`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **bash-language-server** — from npm, with a Node.js of Flux's own; Flux adds ShellCheck (a release from GitHub) for its diagnostics. Zsh files are highlighted, but the Bash server doesn't check them.\n\n## Highlighting\n\n- The grammar and its highlighting query: [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) v0.25.1, MIT — `licenses/`.\n",
+      "languages": [
+        {
+          "id": "bash",
+          "name": "Shell",
+          "extensions": [
+            "sh",
+            "bash",
+            "zsh"
+          ],
+          "file_names": [
+            ".bashrc",
+            ".bash_profile",
+            ".bash_aliases",
+            ".bash_logout",
+            ".profile",
+            ".zshrc",
+            ".zshenv",
+            ".zprofile",
+            ".zlogin",
+            ".zlogout",
+            "PKGBUILD"
+          ]
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Shell Script": "Скрипты оболочки",
+          "Shell scripts (sh, bash, zsh): highlighting, and the Bash language server with ShellCheck.": "Скрипты оболочки (sh, bash, zsh): подсветка и языковой сервер Bash с ShellCheck."
+        }
+      }
+    },
+    {
+      "id": "flux.solarized",
+      "name": "Solarized",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Solarized Light and Solarized Dark: Ethan Schoonover's precise, low-contrast palette on Flux's frosted glass. A light and a dark theme — a pair for Sync with OS.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "themes"
+      ],
+      "manifest": "# Solarized for Flux: Ethan Schoonover's palette (MIT), light and dark, on Flux's glass. Tokens the\n# themes don't name come from Flux Night (dark) and Flux Day (light): `docs/themes.md` in Flux.\nid = \"flux.solarized\"\nname = \"Solarized\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Solarized Light and Solarized Dark: Ethan Schoonover's precise, low-contrast palette on Flux's frosted glass. A light and a dark theme — a pair for Sync with OS.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/solarized.svg\"\n\n[[themes]]\nfile = \"themes/solarized-dark.toml\"\n\n[[themes]]\nfile = \"themes/solarized-light.toml\"\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.solarized-v0.1.0/flux.solarized-0.1.0.tar.gz",
+      "sha256": "7bfcb59708d651df6bb38864c7b5a3d47c84bec5605068520a09ef24f77473e8",
+      "size": 3208,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<circle cx=\"8\" cy=\"8\" r=\"5.75\"/>\n<path d=\"M8 2.25a5.75 5.75 0 0 1 0 11.5z\" fill=\"#000\" stroke=\"none\"/>\n</svg>\n",
+      "readme": "# Solarized\n\nSolarized Light and Solarized Dark for Flux: Ethan Schoonover's palette of sixteen colors with\nfixed lightness relationships, on Flux's frosted glass. The two themes are a pair: choose them as\nthe light and the dark theme of **Settings → Appearance → Theme → Sync with OS**, and Flux follows\nmacOS between them.\n\n- Code: keywords green, functions blue, types yellow, strings cyan, numbers magenta, comments in\n  the quiet base tone.\n- The terminal uses the classic Solarized ANSI table.\n\nThe palette is © Ethan Schoonover, MIT licence (`licenses/LICENSE-solarized`).\n",
+      "languages": [],
+      "themes": [
+        {
+          "name": "Solarized Dark",
+          "appearance": "dark"
+        },
+        {
+          "name": "Solarized Light",
+          "appearance": "light"
+        }
+      ],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Solarized Light and Solarized Dark: Ethan Schoonover's precise, low-contrast palette on Flux's frosted glass. A light and a dark theme — a pair for Sync with OS.": "Solarized Light и Solarized Dark: точная мягкая палитра Итана Шунховера на матовом стекле Flux. Светлая и тёмная тема — пара для синхронизации с macOS."
+        }
+      }
+    },
+    {
+      "id": "flux.sql",
+      "name": "SQL",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "SQL: highlighting of PostgreSQL, MySQL, SQLite and other dialects.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# SQL for Flux (stage 8.3): a language of the catalog. The grammar is the upstream\n# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query\n# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.\nid = \"flux.sql\"\nname = \"SQL\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"SQL: highlighting of PostgreSQL, MySQL, SQLite and other dialects.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/sql.svg\"\n\n[[languages]]\nid = \"sql\"\nname = \"SQL\"\nextensions = [\"sql\"]\naliases = [\"pgsql\", \"postgres\", \"postgresql\", \"mysql\", \"sqlite\", \"plsql\", \"tsql\"]\ngrammar = \"sql\"\nhighlights = \"languages/sql/highlights.scm\"\nicon = \"icons/sql.svg\"\nicon-color = \"amber\"\n\n[[grammars]]\nid = \"sql\"\nwasm = \"grammars/sql.wasm\"\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.sql-v0.1.0/flux.sql-0.1.0.tar.gz",
+      "sha256": "21616f17b77aa4b2b41195d799b513f8ad04a4d49241fa41be9abb3aa0982637",
+      "size": 805943,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M2.75 3.75c0-1.1 2.35-2 5.25-2s5.25.9 5.25 2-2.35 2-5.25 2-5.25-.9-5.25-2z\"/><path d=\"M2.75 3.75v8.5c0 1.1 2.35 2 5.25 2s5.25-.9 5.25-2v-8.5\"/><path d=\"M2.75 8c0 1.1 2.35 2 5.25 2s5.25-.9 5.25-2\"/>\n</svg>\n",
+      "readme": "# SQL\n\nSQL: highlighting of PostgreSQL, MySQL, SQLite and other dialects.\n\n## Files\n\n- **SQL**: `*.sql`.\n\n## Language servers\n\nNo language server: the SQL servers there are need a connection to a database and a dialect to be useful; that's for a plugin of its own.\n\n## Highlighting\n\n- [tree-sitter-sql](https://github.com/DerekStride/tree-sitter-sql) `39fdb00`, MIT — the grammar and its highlighting query, adapted to Flux's theme scopes (`licenses/`).\n- The grammar knows many dialects at once, so it is large (11 MB): Flux compiles it once, the first time an `.sql` file opens, and keeps it in its cache.\n",
+      "languages": [
+        {
+          "id": "sql",
+          "name": "SQL",
+          "extensions": [
+            "sql"
+          ],
+          "file_names": []
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "SQL: highlighting of PostgreSQL, MySQL, SQLite and other dialects.": "SQL: подсветка PostgreSQL, MySQL, SQLite и других диалектов."
+        }
+      }
+    },
+    {
+      "id": "flux.toml",
+      "name": "TOML",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "TOML: highlighting, and Taplo with errors, completion and formatting.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# TOML for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the\n# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting\n# query is the grammar's own (MIT).\nid = \"flux.toml\"\nname = \"TOML\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"TOML: highlighting, and Taplo with errors, completion and formatting.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/toml.svg\"\n\n[[languages]]\nid = \"toml\"\nname = \"TOML\"\nextensions = [\"toml\"]\nfile-names = [\"Cargo.lock\", \"Pipfile\", \"poetry.lock\", \"uv.lock\"]\ngrammar = \"toml\"\nhighlights = \"languages/toml/highlights.scm\"\nicon = \"icons/toml.svg\"\nicon-color = \"text-muted\"\n\n[[grammars]]\nid = \"toml\"\nwasm = \"grammars/toml.wasm\"\n\n[[language-servers]]\nid = \"taplo\"\ncommand = \"taplo\"\nargs = [\"lsp\", \"stdio\"]\nlanguages = [\"toml\"]\ninstall = { github = \"tamasfe/taplo\", asset = \"taplo-darwin-{arch}.gz\", bin = \"taplo\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.toml-v0.1.0/flux.toml-0.1.0.tar.gz",
+      "sha256": "b0ad1f7897733b34e5e1d9c5ca8d70d417928863294b25ed42c1f261dd320220",
+      "size": 9954,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M4.25 2.5h-2v11h2M11.75 2.5h2v11h-2M5.25 5.5h5.5M8 5.5v6\"/>\n</svg>\n",
+      "readme": "# TOML\n\nTOML: highlighting, and Taplo with errors, completion and formatting.\n\n## Files\n\n- **TOML**: `*.toml`, `Cargo.lock`, `Pipfile`, `poetry.lock`, `uv.lock`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **Taplo** — the latest release from GitHub.\n\n## Highlighting\n\n- The grammar and its highlighting query: [tree-sitter-toml](https://github.com/tree-sitter-grammars/tree-sitter-toml) v0.7.0, MIT — `licenses/`.\n",
+      "languages": [
+        {
+          "id": "toml",
+          "name": "TOML",
+          "extensions": [
+            "toml"
+          ],
+          "file_names": [
+            "Cargo.lock",
+            "Pipfile",
+            "poetry.lock",
+            "uv.lock"
+          ]
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "TOML: highlighting, and Taplo with errors, completion and formatting.": "TOML: подсветка и Taplo — ошибки, подсказки и форматирование."
+        }
+      }
+    },
+    {
+      "id": "flux.yaml",
+      "name": "YAML",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "YAML: highlighting, and the YAML language server with errors, completion and schemas of well-known files.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "languages"
+      ],
+      "manifest": "# YAML for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the\n# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting\n# query is the grammar's own (MIT).\nid = \"flux.yaml\"\nname = \"YAML\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"YAML: highlighting, and the YAML language server with errors, completion and schemas of well-known files.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/yaml.svg\"\n\n[[languages]]\nid = \"yaml\"\nname = \"YAML\"\nextensions = [\"yaml\", \"yml\"]\nfile-names = [\".clang-format\", \".clang-tidy\"]\naliases = [\"yml\"]\ngrammar = \"yaml\"\nhighlights = \"languages/yaml/highlights.scm\"\nicon = \"icons/yaml.svg\"\nicon-color = \"pink\"\n\n[[grammars]]\nid = \"yaml\"\nwasm = \"grammars/yaml.wasm\"\n\n[[language-servers]]\nid = \"yaml-language-server\"\ncommand = \"yaml-language-server\"\nargs = [\"--stdio\"]\nlanguages = [\"yaml\"]\ninstall = { npm = [\"yaml-language-server\"], bin = \"yaml-language-server\" }\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.yaml-v0.1.0/flux.yaml-0.1.0.tar.gz",
+      "sha256": "e17ff580b14d293218c5c95640539879f9ae2b8701859876b4d47fca322a54f5",
+      "size": 36932,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M2.5 3.75h7M5.25 8h8.25M5.25 12.25h5.5\"/><path d=\"M2.5 8h.25M2.5 12.25h.25\"/>\n</svg>\n",
+      "readme": "# YAML\n\nYAML: highlighting, and the YAML language server with errors, completion and schemas of well-known files.\n\n## Files\n\n- **YAML**: `*.yaml`, `*.yml`, `.clang-format`, `.clang-tidy`.\n\n## Language servers\n\nFlux starts the server when a file of the language opens. If it isn't on the machine, Flux\ninstalls it into `~/Library/Application Support/flux/servers` (Settings → Language Servers shows\nwhere each one comes from, and installs, updates or removes it).\n\n- **yaml-language-server** — from npm, with a Node.js of Flux's own.\n\n## Highlighting\n\n- The grammar and its highlighting query: [tree-sitter-yaml](https://github.com/tree-sitter-grammars/tree-sitter-yaml) v0.7.2, MIT — `licenses/`.\n",
+      "languages": [
+        {
+          "id": "yaml",
+          "name": "YAML",
+          "extensions": [
+            "yaml",
+            "yml"
+          ],
+          "file_names": [
+            ".clang-format",
+            ".clang-tidy"
+          ]
+        }
+      ],
+      "themes": [],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "YAML: highlighting, and the YAML language server with errors, completion and schemas of well-known files.": "YAML: подсветка и языковой сервер YAML — ошибки, подсказки и схемы известных файлов."
+        }
+      }
+    }
+  ]
+}
