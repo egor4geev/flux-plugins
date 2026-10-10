@@ -1,0 +1,113 @@
+# The catalog's build. A pull request is checked: every manifest, every file it names, every
+# grammar builds. A push to main publishes: a plugin whose version has no release yet gets one
+# (tag `<id>-v<version>`, its package as the asset), and the index (`index.json` at the root of
+# main, the address Flux reads) is rebuilt with the URLs of the releases.
+name: Catalog
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: catalog-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TREE_SITTER_VERSION: "0.27.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The tree-sitter CLI compiles the grammars to WebAssembly (it downloads wasi-sdk itself).
+      - name: tree-sitter CLI
+        run: |
+          curl -fsSL -o tree-sitter.gz \
+            "https://github.com/tree-sitter/tree-sitter/releases/download/v${TREE_SITTER_VERSION}/tree-sitter-linux-x64.gz"
+          gunzip tree-sitter.gz
+          chmod +x tree-sitter
+          echo "TREE_SITTER=$PWD/tree-sitter" >> "$GITHUB_ENV"
+
+      - name: Cache of grammar sources and toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/sources
+            ~/.cache/tree-sitter
+          key: catalog-${{ hashFiles('plugins/*/grammars.toml') }}
+          restore-keys: catalog-
+
+      # Plugins with code are built for wasm32-wasip2.
+      - name: Rust for plugins with code
+        if: hashFiles('plugins/*/Cargo.toml') != ''
+        run: rustup target add wasm32-wasip2
+
+      - name: Check
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/build.py --check
+
+      - name: Build
+        if: github.event_name != 'pull_request'
+        run: python3 scripts/build.py
+
+      # A release per new plugin version: the package is its asset. Versions already released are
+      # left as they are (a plugin's package never changes under the same version).
+      - name: Releases
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'EOF'
+          import json, subprocess
+          index = json.load(open("dist/index.json"))
+          for plugin in index["plugins"]:
+              tag = f"{plugin['id']}-v{plugin['version']}"
+              exists = subprocess.run(["gh", "release", "view", tag], capture_output=True).returncode == 0
+              if exists:
+                  continue
+              asset = f"dist/{plugin['id']}-{plugin['version']}.tar.gz"
+              notes = f"{plugin['name']} {plugin['version']}\n\n{plugin['description']}"
+              subprocess.run(["gh", "release", "create", tag, asset, "--title", f"{plugin['name']} {plugin['version']}", "--notes", notes], check=True)
+          EOF
+
+      # The released package is what Flux downloads: the index takes its checksum and size, so a
+      # rebuild that differs by a byte doesn't break installs of a published version.
+      - name: Index
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, os, subprocess, tempfile
+          index = json.load(open("dist/index.json"))
+          for plugin in index["plugins"]:
+              tag = f"{plugin['id']}-v{plugin['version']}"
+              name = f"{plugin['id']}-{plugin['version']}.tar.gz"
+              with tempfile.TemporaryDirectory() as folder:
+                  subprocess.run(["gh", "release", "download", tag, "--pattern", name, "--dir", folder], check=True)
+                  data = open(os.path.join(folder, name), "rb").read()
+              plugin["sha256"] = hashlib.sha256(data).hexdigest()
+              plugin["size"] = len(data)
+          json.dump(index, open("index.json", "w"), indent=2, ensure_ascii=False)
+          open("index.json", "a").write("\n")
+          EOF
+          if ! git diff --quiet -- index.json || [ -n "$(git status --porcelain index.json)" ]; then
+            git config user.name "flux-catalog-bot"
+            git config user.email "flux-catalog-bot@users.noreply.github.com"
+            git add index.json
+            git commit -m "Index: $(date -u +%Y-%m-%dT%H:%MZ) [skip ci]"
+            git push
+          fi

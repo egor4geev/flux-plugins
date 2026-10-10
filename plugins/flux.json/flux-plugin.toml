@@ -1,0 +1,48 @@
+# JSON for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the
+# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting
+# query is the grammar's own (MIT).
+id = "flux.json"
+name = "JSON"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "JSON and JSON with Comments: highlighting, and the JSON language server with errors, completion and formatting."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/json.svg"
+
+# The JSON query puts the keys `(pair key: …)` before the generic `(string)`: the earlier pattern
+# wins.
+[[languages]]
+id = "json"
+name = "JSON"
+extensions = ["json"]
+file-names = ["flake.lock"]
+grammar = "json"
+highlights = "languages/json/highlights.scm"
+precedence = "first-pattern"
+icon = "icons/json.svg"
+icon-color = "amber"
+
+# Its own language: language servers know `.jsonc` files as `jsonc`.
+[[languages]]
+id = "jsonc"
+name = "JSON with Comments"
+extensions = ["jsonc"]
+grammar = "json"
+highlights = "languages/json/highlights.scm"
+precedence = "first-pattern"
+icon = "icons/json.svg"
+icon-color = "amber"
+
+[[grammars]]
+id = "json"
+wasm = "grammars/json.wasm"
+
+[[language-servers]]
+id = "vscode-json-language-server"
+command = "vscode-json-language-server"
+args = ["--stdio"]
+languages = ["json", "jsonc"]
+# Formatting is off unless asked for.
+initialization-options = { provideFormatter = true }
+install = { npm = ["vscode-langservers-extracted"], bin = "vscode-json-language-server" }

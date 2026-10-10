@@ -1,0 +1,8 @@
+# Build outputs: packages and the index (CI publishes them), grammar sources, compiled grammars,
+# plugins with code built by cargo.
+/dist/
+/.build/
+/plugins/*/grammars/*.wasm
+/plugins/*/target/
+__pycache__/
+.DS_Store

@@ -1,0 +1,47 @@
+# CSS for Flux (stage 8.3): a language of the catalog. The grammar is the upstream
+# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query
+# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.
+id = "flux.css"
+name = "CSS"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "CSS and SCSS: highlighting, and the CSS language server with errors, completion, color and hover information, and formatting."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/css.svg"
+
+[[languages]]
+id = "css"
+name = "CSS"
+extensions = ["css"]
+grammar = "css"
+highlights = "languages/css/highlights.scm"
+icon = "icons/css.svg"
+icon-color = "violet"
+
+# The CSS query first, then the SCSS one: SCSS is CSS with more.
+[[languages]]
+id = "scss"
+name = "SCSS"
+extensions = ["scss"]
+grammar = "scss"
+highlights = ["languages/css/highlights.scm", "languages/scss/highlights.scm"]
+icon = "icons/css.svg"
+icon-color = "violet"
+
+[[grammars]]
+id = "css"
+wasm = "grammars/css.wasm"
+
+[[grammars]]
+id = "scss"
+wasm = "grammars/scss.wasm"
+
+# Formatting is off unless asked for.
+[[language-servers]]
+id = "vscode-css-language-server"
+command = "vscode-css-language-server"
+args = ["--stdio"]
+languages = ["css", "scss"]
+initialization-options = { provideFormatter = true }
+install = { npm = ["vscode-langservers-extracted"], bin = "vscode-css-language-server" }

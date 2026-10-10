@@ -1,0 +1,9 @@
+# Where the grammars come from: the build compiles each into grammars/<id>.wasm
+# (tree-sitter CLI 0.27.1, `tree-sitter build --wasm`).
+
+[[grammars]]
+id = "make"
+repo = "https://github.com/tree-sitter-grammars/tree-sitter-make"
+# main, 2026-02-26: after v1.1.1, with fixes for comments after assignments, parentheses in recipes and GNU Make's functions
+rev = "70613f3d812cbabbd7f38d104d60a409c4008b43"
+path = "."

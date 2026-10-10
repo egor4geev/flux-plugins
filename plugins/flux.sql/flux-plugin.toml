@@ -1,0 +1,25 @@
+# SQL for Flux (stage 8.3): a language of the catalog. The grammar is the upstream
+# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query
+# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.
+id = "flux.sql"
+name = "SQL"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "SQL: highlighting of PostgreSQL, MySQL, SQLite and other dialects."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/sql.svg"
+
+[[languages]]
+id = "sql"
+name = "SQL"
+extensions = ["sql"]
+aliases = ["pgsql", "postgres", "postgresql", "mysql", "sqlite", "plsql", "tsql"]
+grammar = "sql"
+highlights = "languages/sql/highlights.scm"
+icon = "icons/sql.svg"
+icon-color = "amber"
+
+[[grammars]]
+id = "sql"
+wasm = "grammars/sql.wasm"

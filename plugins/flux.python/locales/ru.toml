@@ -1,0 +1,2 @@
+# The Russian interface of the plugin: English text = translation (the manifest's strings).
+"Python: highlighting, Pyright (types, completion, navigation, the project's virtual environment) and Ruff (linting and formatting)." = "Python: подсветка, Pyright (типы, подсказки, навигация, виртуальное окружение проекта) и Ruff (линтер и форматирование)."

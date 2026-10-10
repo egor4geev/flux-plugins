@@ -1,0 +1,34 @@
+# Go for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the
+# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting
+# query is the grammar's own (MIT).
+id = "flux.go"
+name = "Go"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "Go: highlighting, and gopls with errors, completion, navigation and refactoring."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/go.svg"
+
+# The Go query puts `(identifier) @variable` and `(field_identifier) @property` after function and
+# method calls: the earlier pattern wins.
+[[languages]]
+id = "go"
+name = "Go"
+extensions = ["go"]
+aliases = ["golang"]
+grammar = "go"
+highlights = "languages/go/highlights.scm"
+precedence = "first-pattern"
+icon = "icons/go.svg"
+icon-color = "cyan"
+
+[[grammars]]
+id = "go"
+wasm = "grammars/go.wasm"
+
+[[language-servers]]
+id = "gopls"
+command = "gopls"
+languages = ["go"]
+install = { go = "golang.org/x/tools/gopls", bin = "gopls" }

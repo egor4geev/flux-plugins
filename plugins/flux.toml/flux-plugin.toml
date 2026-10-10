@@ -1,0 +1,32 @@
+# TOML for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the
+# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting
+# query is the grammar's own (MIT).
+id = "flux.toml"
+name = "TOML"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "TOML: highlighting, and Taplo with errors, completion and formatting."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/toml.svg"
+
+[[languages]]
+id = "toml"
+name = "TOML"
+extensions = ["toml"]
+file-names = ["Cargo.lock", "Pipfile", "poetry.lock", "uv.lock"]
+grammar = "toml"
+highlights = "languages/toml/highlights.scm"
+icon = "icons/toml.svg"
+icon-color = "text-muted"
+
+[[grammars]]
+id = "toml"
+wasm = "grammars/toml.wasm"
+
+[[language-servers]]
+id = "taplo"
+command = "taplo"
+args = ["lsp", "stdio"]
+languages = ["toml"]
+install = { github = "tamasfe/taplo", asset = "taplo-darwin-{arch}.gz", bin = "taplo" }

@@ -1,0 +1,36 @@
+# Shell Script for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the
+# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting
+# query is the grammar's own (MIT).
+id = "flux.shell"
+name = "Shell Script"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "Shell scripts (sh, bash, zsh): highlighting, and the Bash language server with ShellCheck."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/shell.svg"
+
+[[languages]]
+id = "bash"
+name = "Shell"
+extensions = ["sh", "bash", "zsh"]
+file-names = [".bashrc", ".bash_profile", ".bash_aliases", ".bash_logout", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", "PKGBUILD"]
+aliases = ["sh", "shell", "shellscript", "zsh", "console"]
+grammar = "bash"
+highlights = "languages/bash/highlights.scm"
+lsp-id = "shellscript"
+icon = "icons/shell.svg"
+icon-color = "green"
+
+[[grammars]]
+id = "bash"
+wasm = "grammars/bash.wasm"
+
+# Not zsh: the Bash language server would flag zsh's own syntax.
+[[language-servers]]
+id = "bash-language-server"
+command = "bash-language-server"
+args = ["start"]
+extensions = ["sh", "bash"]
+file-names = [".bashrc", ".bash_profile", ".bash_aliases", ".bash_logout", ".profile", "PKGBUILD"]
+install = { npm = ["bash-language-server"], bin = "bash-language-server" }

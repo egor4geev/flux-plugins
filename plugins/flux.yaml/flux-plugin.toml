@@ -1,0 +1,33 @@
+# YAML for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the
+# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting
+# query is the grammar's own (MIT).
+id = "flux.yaml"
+name = "YAML"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "YAML: highlighting, and the YAML language server with errors, completion and schemas of well-known files."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/yaml.svg"
+
+[[languages]]
+id = "yaml"
+name = "YAML"
+extensions = ["yaml", "yml"]
+file-names = [".clang-format", ".clang-tidy"]
+aliases = ["yml"]
+grammar = "yaml"
+highlights = "languages/yaml/highlights.scm"
+icon = "icons/yaml.svg"
+icon-color = "pink"
+
+[[grammars]]
+id = "yaml"
+wasm = "grammars/yaml.wasm"
+
+[[language-servers]]
+id = "yaml-language-server"
+command = "yaml-language-server"
+args = ["--stdio"]
+languages = ["yaml"]
+install = { npm = ["yaml-language-server"], bin = "yaml-language-server" }

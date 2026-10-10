@@ -1,0 +1,16 @@
+# Solarized for Flux: Ethan Schoonover's palette (MIT), light and dark, on Flux's glass. Tokens the
+# themes don't name come from Flux Night (dark) and Flux Day (light): `docs/themes.md` in Flux.
+id = "flux.solarized"
+name = "Solarized"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "Solarized Light and Solarized Dark: Ethan Schoonover's precise, low-contrast palette on Flux's frosted glass. A light and a dark theme — a pair for Sync with OS."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/solarized.svg"
+
+[[themes]]
+file = "themes/solarized-dark.toml"
+
+[[themes]]
+file = "themes/solarized-light.toml"

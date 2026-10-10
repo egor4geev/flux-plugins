@@ -1,0 +1,34 @@
+# Dockerfile for Flux (stage 8.3): a language of the catalog. The grammar is the upstream
+# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query
+# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.
+id = "flux.dockerfile"
+name = "Dockerfile"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "Dockerfiles: highlighting, and the Dockerfile language server with errors, completion, hover and formatting."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/docker.svg"
+
+# Names like `Dockerfile.<anything>` can't be matched by a pattern: the common ones.
+[[languages]]
+id = "dockerfile"
+name = "Dockerfile"
+extensions = ["dockerfile"]
+file-names = ["Dockerfile", "dockerfile", "Containerfile", "Dockerfile.dev", "Dockerfile.prod", "Dockerfile.production", "Dockerfile.test", "Dockerfile.local", "Dockerfile.ci", "Dockerfile.base", "Dockerfile.build", "Dockerfile.debug", "Dockerfile.release"]
+aliases = ["docker", "containerfile"]
+grammar = "dockerfile"
+highlights = "languages/dockerfile/highlights.scm"
+icon = "icons/docker.svg"
+icon-color = "blue"
+
+[[grammars]]
+id = "dockerfile"
+wasm = "grammars/dockerfile.wasm"
+
+[[language-servers]]
+id = "docker-langserver"
+command = "docker-langserver"
+args = ["--stdio"]
+languages = ["dockerfile"]
+install = { npm = ["dockerfile-language-server-nodejs"], bin = "docker-langserver" }

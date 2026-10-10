@@ -1,0 +1,9 @@
+# Where the grammars come from: the build compiles each into grammars/<id>.wasm
+# (tree-sitter CLI 0.27.1, `tree-sitter build --wasm`).
+
+[[grammars]]
+id = "sql"
+repo = "https://github.com/DerekStride/tree-sitter-sql"
+# gh-pages: the generated parser of main (main carries no parser.c), 2026-09-19
+rev = "39fdb006403747241244326e8af3b3e96b85381c"
+path = "."

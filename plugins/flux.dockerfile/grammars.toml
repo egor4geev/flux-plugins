@@ -1,0 +1,8 @@
+# Where the grammars come from: the build compiles each into grammars/<id>.wasm
+# (tree-sitter CLI 0.27.1, `tree-sitter build --wasm`).
+
+[[grammars]]
+id = "dockerfile"
+repo = "https://github.com/camdencheek/tree-sitter-dockerfile"
+rev = "v0.2.0"  # 868e44ce378deb68aac902a9db68ff82d2299dd0
+path = "."

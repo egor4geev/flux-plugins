@@ -1,0 +1,26 @@
+# Makefile for Flux (stage 8.3): a language of the catalog. The grammar is the upstream
+# tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query
+# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.
+id = "flux.makefile"
+name = "Makefile"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "Makefiles: highlighting of targets, variables, functions and directives."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/makefile.svg"
+
+[[languages]]
+id = "makefile"
+name = "Makefile"
+extensions = ["mk", "mak"]
+file-names = ["Makefile", "makefile", "GNUmakefile"]
+aliases = ["make", "mk"]
+grammar = "make"
+highlights = "languages/makefile/highlights.scm"
+icon = "icons/makefile.svg"
+icon-color = "green"
+
+[[grammars]]
+id = "make"
+wasm = "grammars/make.wasm"

@@ -1,0 +1,40 @@
+# Python for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the
+# upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting
+# query is the grammar's own (MIT).
+id = "flux.python"
+name = "Python"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "Python: highlighting, Pyright (types, completion, navigation, the project's virtual environment) and Ruff (linting and formatting)."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/python.svg"
+
+[[languages]]
+id = "python"
+name = "Python"
+extensions = ["py", "pyi", "pyw"]
+aliases = ["py", "py3", "python3"]
+grammar = "python"
+highlights = "languages/python/highlights.scm"
+icon = "icons/python.svg"
+icon-color = "blue"
+
+[[grammars]]
+id = "python"
+wasm = "grammars/python.wasm"
+
+[[language-servers]]
+id = "pyright"
+command = "pyright-langserver"
+args = ["--stdio"]
+languages = ["python"]
+install = { npm = ["pyright"], bin = "pyright-langserver" }
+
+# After Pyright, which has no formatter: Ruff formats and lints.
+[[language-servers]]
+id = "ruff"
+command = "ruff"
+args = ["server"]
+extensions = ["py", "pyi"]
+install = { github = "astral-sh/ruff", asset = "ruff-{arch}-apple-darwin.tar.gz", bin = "ruff" }
