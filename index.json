@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "generated": "2026-10-10T18:26:43Z",
+  "generated": "2026-10-10T19:00:06Z",
   "plugins": [
     {
       "id": "flux.css",
@@ -45,6 +45,44 @@
       "locales": {
         "ru": {
           "CSS and SCSS: highlighting, and the CSS language server with errors, completion, color and hover information, and formatting.": "CSS и SCSS: подсветка и языковой сервер CSS — ошибки, подсказки, цвета, описания свойств и форматирование."
+        }
+      }
+    },
+    {
+      "id": "flux.darcula",
+      "name": "Darcula & IntelliJ Light",
+      "version": "0.1.0",
+      "api": "0.2",
+      "description": "Darcula and IntelliJ Light: the classic dark and light schemes of JetBrains IDEs on Flux's frosted glass. A dark and a light theme — a pair for Sync with OS.",
+      "authors": [
+        "Egor Ageev"
+      ],
+      "repository": "https://github.com/egor4geev/flux-plugins",
+      "categories": [
+        "themes"
+      ],
+      "manifest": "# Darcula and IntelliJ Light for Flux: the dark and light schemes of JetBrains IDEs, on Flux's glass.\n# Tokens the themes don't name come from Flux Night (dark) and Flux Day (light): `docs/themes.md` in Flux.\nid = \"flux.darcula\"\nname = \"Darcula & IntelliJ Light\"\nversion = \"0.1.0\"\napi = \"0.2\"\nauthors = [\"Egor Ageev\"]\ndescription = \"Darcula and IntelliJ Light: the classic dark and light schemes of JetBrains IDEs on Flux's frosted glass. A dark and a light theme — a pair for Sync with OS.\"\nrepository = \"https://github.com/egor4geev/flux-plugins\"\nicon = \"icons/darcula.svg\"\n\n[[themes]]\nfile = \"themes/darcula.toml\"\n\n[[themes]]\nfile = \"themes/intellij-light.toml\"\n",
+      "download": "https://github.com/egor4geev/flux-plugins/releases/download/flux.darcula-v0.1.0/flux.darcula-0.1.0.tar.gz",
+      "sha256": "684551b1524fbf3933c45924990ed3235da6f6e6a821713845a76ffb6161316f",
+      "size": 3739,
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#000\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"M13.25 9.5A5.75 5.75 0 1 1 6.5 2.75a4.5 4.5 0 0 0 6.75 6.75z\"/>\n</svg>\n",
+      "readme": "# Darcula & IntelliJ Light\n\nDarcula and IntelliJ Light for Flux: the classic dark and light color schemes of JetBrains IDEs, on\nFlux's frosted glass. The two themes are a pair: choose them as the dark and the light theme of\n**Settings → Appearance → Theme → Sync with OS**, and Flux follows macOS between them.\n\n- **Darcula** — warm gray neutrals. Code: keywords, commas and semicolons orange, strings green,\n  numbers blue, functions yellow, fields and constants purple (constants in italics), annotations\n  olive, doc comments green italic.\n- **IntelliJ Light** — white islands on pale gray. Code: keywords dark blue, strings green, numbers\n  blue, function declarations teal, fields and constants purple, annotations olive, comments gray\n  italic.\n- In both, plain identifiers and types keep the text color, as IntelliJ IDEA draws them; selection,\n  focus, changed files and diffs use the IDE's colors, and the terminal has a matching ANSI table.\n",
+      "languages": [],
+      "themes": [
+        {
+          "name": "Darcula",
+          "appearance": "dark"
+        },
+        {
+          "name": "IntelliJ Light",
+          "appearance": "light"
+        }
+      ],
+      "icon_themes": [],
+      "updated": "2026-10-10",
+      "locales": {
+        "ru": {
+          "Darcula and IntelliJ Light: the classic dark and light schemes of JetBrains IDEs on Flux's frosted glass. A dark and a light theme — a pair for Sync with OS.": "Darcula и IntelliJ Light — классические тёмная и светлая схемы IDE JetBrains на матовом стекле Flux. Тёмная и светлая тема — пара для синхронизации с macOS."
         }
       }
     },
