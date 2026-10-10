@@ -1,0 +1,136 @@
+# IntelliJ Light: the light scheme of JetBrains IDEs, Darcula's pair. White islands on a pale gray
+# glass frame, the IDE's blue for selection and focus. Code as IntelliJ IDEA draws it: keywords dark
+# blue, strings green, numbers blue, function declarations teal, fields and constants purple,
+# annotations olive, comments gray italic; plain names keep the text color. What isn't named here
+# comes from Flux Day.
+name = "IntelliJ Light"
+appearance = "light"
+
+[ui]
+# Surfaces (glass)
+frame = "#ebecf0cc"
+frame_glow = "#3574f01a"
+island = "#fffffff0"
+island_border = "#1e1f221a"
+sheen = "#ffffffd9"
+elevated = "#ffffffff"
+elevated_border = "#1e1f2224"
+shadow = "#1e1f2238"
+backdrop = "#1e1f222e"
+divider = "#1e1f2214"
+# Text
+foreground = "#1e1f22"
+text_muted = "#6c707e"
+dim = "#8c90a0"
+text_disabled = "#b4b8c4"
+# Interaction
+accent = "#3574f0"
+accent_text = "#2e62d0"
+accent_soft = "#3574f024"
+on_accent = "#ffffff"
+hover = "#1e1f220d"
+pressed = "#1e1f2217"
+list_selected = "#3574f02e"
+list_selected_inactive = "#1e1f2214"
+input_background = "#ffffffe6"
+input_border = "#1e1f2224"
+focus_border = "#3574f0"
+focus_ring = "#3574f040"
+drop_target = "#3574f02e"
+keycap = "#1e1f220d"
+keycap_border = "#1e1f2226"
+# States
+success = "#208a3c"
+warning = "#a46704"
+error = "#db3b4b"
+info = "#3574f0"
+modified = "#c27d04"
+# Editor
+current_line = "#fcfaed"
+selection = "#a6d2ff"
+cursor = "#000000"
+match_text = "#2e62d0"
+search_match = "#ffd96a59"
+search_match_active = "#ffc533b3"
+# Version control: JetBrains' light file statuses
+vcs_modified = "#0032a0"
+vcs_added = "#067d17"
+vcs_deleted = "#6c707e"
+vcs_renamed = "#007878"
+vcs_untracked = "#993300"
+vcs_conflict = "#d1342e"
+# Diffs: gutter markers, blocks, changed words; the merge tool
+diff_added = "#5fb865"
+diff_modified = "#6c9ff0"
+diff_deleted = "#a8adbd"
+diff_added_bg = "#3cb44b24"
+diff_modified_bg = "#3574f01f"
+diff_deleted_bg = "#6c707e1f"
+diff_added_word = "#3cb44b52"
+diff_modified_word = "#3574f047"
+diff_deleted_word = "#6c707e40"
+diff_conflict = "#db3b4b"
+diff_conflict_bg = "#db3b4b1f"
+diff_conflict_word = "#db3b4b4d"
+diff_resolved_bg = "#6c707e14"
+# Git history
+graph_lanes = ["#3574f0", "#208a3c", "#871094", "#c27d04", "#00838a", "#c13a83", "#9e880d", "#db3b4b"]
+blame_recent = "#3574f02e"
+# Shades: meaning, not decoration (file types, categories, counters)
+blue = "#3574f0"
+indigo = "#5a5fd6"
+violet = "#8c4fd6"
+pink = "#c13a83"
+red = "#db3b4b"
+orange = "#c95f0a"
+amber = "#c27d04"
+lime = "#5f8f00"
+green = "#208a3c"
+teal = "#00838a"
+cyan = "#1a8fb3"
+folder = "#6f8fb8"
+
+[syntax]
+attribute = "#9e880d"
+boolean = "#0033b3"
+comment = { color = "#8c8c8c", italic = true }
+"comment.documentation" = { color = "#8c8c8c", italic = true }
+constant = { color = "#871094", italic = true }
+"constant.builtin" = "#0033b3"
+constructor = "#080808"
+embedded = "#080808"
+escape = "#0037a6"
+function = "#00627a"
+"function.builtin" = "#000080"
+"function.macro" = "#1f542e"
+keyword = "#0033b3"
+label = "#20999d"
+number = "#1750eb"
+operator = "#080808"
+property = "#871094"
+punctuation = "#080808"
+"punctuation.delimiter" = "#080808"
+"punctuation.special" = "#0033b3"
+string = "#067d17"
+"string.escape" = "#0037a6"
+"string.special" = "#174ad4"
+tag = "#0033b3"
+"text.literal" = "#067d17"
+"text.reference" = "#174ad4"
+"text.title" = { color = "#0033b3", bold = true }
+"text.uri" = "#2a55e5"
+type = "#080808"
+"type.builtin" = "#0033b3"
+variable = "#080808"
+"variable.builtin" = "#94558d"
+"variable.parameter" = "#080808"
+
+# An IntelliJ-Light-tuned ANSI table. `background` is what programs assume: the island without its alpha.
+[terminal]
+foreground = "#080808"
+background = "#ffffff"
+cursor = "#000000"
+ansi = [
+    "#1e1f22", "#c4271c", "#067d17", "#8c6c00", "#0033b3", "#871094", "#00808a", "#6c707e",
+    "#5a5d6b", "#e2382c", "#1f9a32", "#a68200", "#2f64d1", "#a945c4", "#139ca6", "#a8adbd",
+]

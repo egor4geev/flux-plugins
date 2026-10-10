@@ -1,0 +1,136 @@
+# Darcula: the classic dark scheme of JetBrains IDEs. Warm gray islands (the editor's #2b2b2b) on a
+# darker glass frame, popups in the tool windows' #3c3f41, Darcula's blue for selection and focus.
+# Code as IntelliJ IDEA draws it: keywords and delimiters orange, strings green, numbers blue,
+# functions yellow, fields and constants purple, annotations olive; plain names keep the text color.
+# What isn't named here comes from Flux Night.
+name = "Darcula"
+appearance = "dark"
+
+[ui]
+# Surfaces (glass)
+frame = "#1e1f20cc"
+frame_glow = "#4b6eaf1f"
+island = "#2b2b2bed"
+island_border = "#ffffff12"
+sheen = "#ffffff1f"
+elevated = "#3c3f41fa"
+elevated_border = "#ffffff1c"
+shadow = "#00000080"
+backdrop = "#00000047"
+divider = "#ffffff10"
+# Text
+foreground = "#bbbbbb"
+text_muted = "#9a9da1"
+dim = "#606366"
+text_disabled = "#505354"
+# Interaction
+accent = "#4b6eaf"
+accent_text = "#589df6"
+accent_soft = "#4b6eaf33"
+on_accent = "#ffffff"
+hover = "#ffffff0d"
+pressed = "#ffffff17"
+list_selected = "#2f65ca59"
+list_selected_inactive = "#ffffff14"
+input_background = "#00000040"
+input_border = "#ffffff1a"
+focus_border = "#3d6185"
+focus_ring = "#3d618566"
+drop_target = "#4b6eaf33"
+keycap = "#ffffff0f"
+keycap_border = "#ffffff1a"
+# States
+success = "#5fa865"
+warning = "#be9117"
+error = "#c75450"
+info = "#3592c4"
+modified = "#d9a343"
+# Editor
+current_line = "#ffffff08"
+selection = "#214283"
+cursor = "#bbbbbb"
+match_text = "#589df6"
+search_match = "#32593dcc"
+search_match_active = "#3f8a4ee6"
+# Version control: JetBrains' Darcula file statuses
+vcs_modified = "#6897bb"
+vcs_added = "#629755"
+vcs_deleted = "#6c6c6c"
+vcs_renamed = "#3a9a9a"
+vcs_untracked = "#d1675a"
+vcs_conflict = "#d5756c"
+# Diffs: gutter markers, blocks, changed words; the merge tool
+diff_added = "#549159"
+diff_modified = "#43698d"
+diff_deleted = "#656e76"
+diff_added_bg = "#5491592e"
+diff_modified_bg = "#4a7fb233"
+diff_deleted_bg = "#8a8f9426"
+diff_added_word = "#54915966"
+diff_modified_word = "#4a7fb266"
+diff_deleted_word = "#8a8f9459"
+diff_conflict = "#c75450"
+diff_conflict_bg = "#c7545029"
+diff_conflict_word = "#c7545059"
+diff_resolved_bg = "#8a8f9414"
+# Git history
+graph_lanes = ["#589df6", "#629755", "#9876aa", "#cc7832", "#20999d", "#c77dbb", "#bbb529", "#d1675a"]
+blame_recent = "#4b6eaf38"
+# Shades: meaning, not decoration (file types, categories, counters)
+blue = "#589df6"
+indigo = "#6e82d6"
+violet = "#9876aa"
+pink = "#c77dbb"
+red = "#c75450"
+orange = "#cc7832"
+amber = "#e8bf6a"
+lime = "#a5c261"
+green = "#629755"
+teal = "#20999d"
+cyan = "#4fb8c2"
+folder = "#8fa4b8"
+
+[syntax]
+attribute = "#bbb529"
+boolean = "#cc7832"
+comment = "#808080"
+"comment.documentation" = { color = "#629755", italic = true }
+constant = { color = "#9876aa", italic = true }
+"constant.builtin" = "#cc7832"
+constructor = "#a9b7c6"
+embedded = "#a9b7c6"
+escape = "#cc7832"
+function = "#ffc66d"
+"function.builtin" = "#8888c6"
+"function.macro" = "#4eade5"
+keyword = "#cc7832"
+label = "#20999d"
+number = "#6897bb"
+operator = "#a9b7c6"
+property = "#9876aa"
+punctuation = "#a9b7c6"
+"punctuation.delimiter" = "#cc7832"
+"punctuation.special" = "#cc7832"
+string = "#6a8759"
+"string.escape" = "#cc7832"
+"string.special" = "#a5c261"
+tag = "#e8bf6a"
+"text.literal" = "#a5c261"
+"text.reference" = "#6897bb"
+"text.title" = { color = "#cc7832", bold = true }
+"text.uri" = "#287bde"
+type = "#a9b7c6"
+"type.builtin" = "#cc7832"
+variable = "#a9b7c6"
+"variable.builtin" = "#94558d"
+"variable.parameter" = "#a9b7c6"
+
+# A Darcula-tuned ANSI table. `background` is what programs assume: the island without its alpha.
+[terminal]
+foreground = "#a9b7c6"
+background = "#2b2b2b"
+cursor = "#bbbbbb"
+ansi = [
+    "#4e5254", "#d9675e", "#6a9f5a", "#d1a440", "#5394ec", "#a97bc4", "#2fa6a8", "#a9b7c6",
+    "#6e7276", "#f07d73", "#8fc27a", "#e8bf6a", "#6fa9f5", "#c89bd6", "#4fc4c6", "#e6e6e6",
+]
