@@ -1,6 +1,7 @@
 # Yandex Tracker & Calendar
 
-Yandex Tracker and Yandex Calendar in Flux, the way JetBrains IDEs do Tasks & Contexts.
+Yandex Tracker and Yandex Calendar in Flux: your tasks on a board, work on a task with its branch and
+its own tabs, and the day's meetings in the status bar.
 
 ## Signing in
 
