@@ -92,3 +92,9 @@ whose checksum doesn't match.
   install recipe Flux knows (npm, a GitHub release, `go install`, rustup).
 - The plugin API version (`api`) is the one Flux runs; plugins for an older API stay until they are
   updated, but aren't offered to new installs.
+
+## License
+
+The catalog's own files — the build, the scripts, the plugins written here — are under the MIT license
+([LICENSE](LICENSE)). The grammars, queries and palettes some plugins are built from keep their own
+licences: see the `licenses/` folder of each plugin.
