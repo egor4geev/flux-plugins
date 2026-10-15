@@ -9,6 +9,16 @@ Languages, color themes and icon sets are plugins without code: a manifest, a fe
 for a language its tree-sitter grammar, compiled to WebAssembly by the build. Plugins with code are
 WebAssembly components in Rust (see Flux's `docs/plugins.md`).
 
+## Reporting a problem
+
+- **A plugin doesn't work as it should**: in Flux, Settings → Plugins → the plugin → **Report an
+  Issue** opens [the plugins' bug form](https://github.com/egor4geev/flux-plugins/issues/new?template=plugin_bug.yml)
+  with the plugin, its version, Flux's version and macOS filled in.
+- **A problem with Flux itself** goes to [Flux's issues](https://github.com/egor4geev/flux/issues/new/choose);
+  **an idea, or a plugin you'd like to see** — to [Flux's Discussions](https://github.com/egor4geev/flux/discussions/categories/ideas).
+- **A security problem** in a plugin: [privately](https://github.com/egor4geev/flux-plugins/security/advisories/new),
+  not in a public issue.
+
 ## Adding a plugin
 
 1. Fork the repository and add a folder `plugins/<plugin id>/` — named exactly by the plugin's id
@@ -18,7 +28,8 @@ WebAssembly components in Rust (see Flux's `docs/plugins.md`).
    the formats.
 3. Check it builds: `python3 scripts/build.py --check --only <plugin id>`.
 4. Open a pull request. CI checks it the same way; a maintainer reviews what the plugin asks for —
-   the permissions of a plugin with code are read line by line — and merges.
+   the permissions of a plugin with code are read line by line — and merges. `main` takes changes
+   only through pull requests.
 5. On `main`, CI publishes: a release `<plugin id>-v<version>` with the package, and the index.
 
 To publish a new version, raise `version` in the manifest: a published version is never replaced,

@@ -1,0 +1,91 @@
+# The bug form of the catalog's plugins. Flux opens it from a plugin's page (Settings → Plugins → the
+# plugin → Report an Issue) with the fields filled in through the URL's query, by their ids: keep the
+# ids in step with `field` in Flux's crates/flux-app/src/feedback.rs.
+name: Plugin bug report
+description: A plugin from the Marketplace doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      # One line per paragraph: GitHub keeps line breaks inside a paragraph.
+      value: |
+        Thanks for the report! In Flux, **Settings → Plugins → the plugin → Report an Issue** opens this form with the plugin, its version, Flux's version and macOS already filled in.
+
+        A problem with Flux itself goes to [Flux's issues](https://github.com/egor4geev/flux/issues/new/choose); an idea or a plugin you'd like to see — to [Flux's Discussions](https://github.com/egor4geev/flux/discussions/new?category=ideas).
+
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin
+      description: Its name and id, as Settings → Plugins shows them.
+      placeholder: Yandex Tracker & Calendar (flux.yandex)
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw. Screenshots or a screen recording help — drag them in here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the Tracker window
+        2. …
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+
+  - type: input
+    id: version
+    attributes:
+      label: Flux version
+      description: Flux → About Flux → Copy takes it, along with macOS and the processor.
+      placeholder: 0.1.0 (ca086c2)
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS
+      description: Apple menu → About This Mac.
+      placeholder: macOS 26.1 (25B78)
+    validations:
+      required: true
+
+  - type: input
+    id: hardware
+    attributes:
+      label: Processor
+      placeholder: Apple M3 Pro, arm64
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log
+      description: "A plugin's log is `~/Library/Logs/Flux/plugins/<plugin id>.log` (Finder → Go → Go to Folder…); Flux's own — Help → Show Log in Finder. Paste the lines from around the problem, but nothing secret: no tokens or passwords."
+      render: text
+
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Before you send
+      options:
+        - label: I searched the [existing issues](https://github.com/egor4geev/flux-plugins/issues?q=is%3Aissue), and this one isn't there yet.
+          required: true

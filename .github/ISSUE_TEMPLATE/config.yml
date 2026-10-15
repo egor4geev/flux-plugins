@@ -1,0 +1,15 @@
+# The New issue page: the plugins' bug form, and links for everything else.
+blank_issues_enabled: false
+contact_links:
+  - name: A problem with Flux itself
+    url: https://github.com/egor4geev/flux/issues/new/choose
+    about: The editor, its built-in plugins (TODO, JavaScript and TypeScript, the Flux themes and icons), the Marketplace's window.
+  - name: Suggest a plugin or an idea
+    url: https://github.com/egor4geev/flux/discussions/new?category=ideas
+    about: Requests for languages, themes and plugins live in Flux's Discussions.
+  - name: Add your own plugin
+    url: https://github.com/egor4geev/flux-plugins#adding-a-plugin
+    about: A pull request with the plugin's folder — the README says how.
+  - name: Report a security vulnerability
+    url: https://github.com/egor4geev/flux-plugins/security/advisories/new
+    about: Privately, not in a public issue.
