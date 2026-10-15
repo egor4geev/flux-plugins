@@ -69,6 +69,11 @@ pub struct Issue {
     /// The boards the task is on: `[{"id": 85}]` — their sprints are the task's to choose from.
     #[serde(deserialize_with = "list_or_null")]
     pub boards: Vec<Named>,
+    /// Every other field the task has, by its id as Tracker returns it: the system fields the card
+    /// doesn't read by name (start, estimation, versions, the QA engineer…) and the queue's local
+    /// fields (`<queue's id>--<key>`). The card shows them all ([`super::fields`]).
+    #[serde(flatten)]
+    pub other: serde_json::Map<String, Value>,
 }
 
 /// A list that may come as `null` (or not at all: the struct's default).
@@ -134,6 +139,85 @@ impl StatusKind {
             StatusKind::New
         }
     }
+}
+
+/// A field of Tracker as `GET /v3/fields` (the system ones) and `GET /v3/queues/{key}/localFields`
+/// (a queue's own) describe it: its id in a task, its name in the interface language, what its
+/// values are, whether people may change it, the values a list offers, where it goes.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FieldMeta {
+    /// The key in a task: "start", "qaEngineer"; a local field's "<queue's id>--<key>".
+    pub id: String,
+    /// A local field's own key: "team".
+    pub key: Option<String>,
+    /// The name, in the language of `Accept-Language` (an object by language with
+    /// `localized=false`).
+    pub name: Value,
+    pub schema: FieldSchema,
+    pub readonly: bool,
+    /// A fixed list of values: `{"type": "FixedListOptionsProvider", "values": […]}`.
+    pub options_provider: Option<OptionsProvider>,
+    /// The field's place among the others.
+    pub order: Option<i64>,
+    /// The group the field belongs to: "Системные", "Agile", "Учёт времени".
+    pub category: Option<Named>,
+    /// "local" for a queue's own field.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+}
+
+impl FieldMeta {
+    /// The name to show: the localized one, else the Russian or the English one, else the id.
+    pub fn display(&self) -> String {
+        match &self.name {
+            Value::String(name) if !name.is_empty() => name.clone(),
+            Value::Object(names) => ["ru", "en"]
+                .iter()
+                .find_map(|language| names.get(*language)?.as_str().map(str::to_string))
+                .unwrap_or_else(|| self.id.clone()),
+            _ => self.id.clone(),
+        }
+    }
+
+    /// A queue's own field.
+    pub fn is_local(&self) -> bool {
+        self.kind.as_deref() == Some("local") || self.id.contains("--")
+    }
+
+    /// The values of a fixed list, as text; none when the field has no list.
+    pub fn options(&self) -> Vec<String> {
+        self.options_provider
+            .as_ref()
+            .map(|provider| {
+                provider
+                    .values
+                    .iter()
+                    .map(value_text)
+                    .filter(|value| !value.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// What a field's values are: `{"type": "date"}`, `{"type": "array", "items": "user"}`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FieldSchema {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub items: Option<String>,
+    pub required: bool,
+}
+
+/// The values a field offers.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OptionsProvider {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub values: Vec<Value>,
 }
 
 /// A transition of a task's workflow: `GET /v3/issues/{key}/transitions`.

@@ -1,10 +1,14 @@
-//! The board's view, built from what the board knows (pure, so tests read it): the toolbar in
-//! groups — the board (a menu badge) and ☆ · Only Mine · Refresh, Open in Browser — a line about
-//! the sprint, and the columns side by side: a heading "Name · N" over a list of cards — the key
-//! (the active task marked), the title, tags (the priority, the user's reply awaited, the
-//! deadline, story points, the task's tags), the type and the assignee unless it's the user, and
-//! the favorite action's button on the card itself; an empty column says so under its heading.
-//! Without a board — a message and what to do: sign in, try again, make a board.
+//! The board's view, built from what the board knows (pure, so tests read it): the toolbar — the
+//! board (a menu badge) and ☆, the field for words of the key or the title (part 10.5), Refresh,
+//! Open in Browser; the filters' bar (part 10.5) — Only mine, a menu badge per filter (the
+//! assignee, the type, the priority, the tags, the components: what's chosen in it, colored while
+//! it filters), the saved filters' badge and Clear; a line about the sprint, and the columns side
+//! by side, each as wide as a card even when it's empty: a heading
+//! "Name · N" ("2 of 5" while the filters hide some) over a list of cards — the key (the active
+//! task marked), the title, tags (the priority, the user's reply awaited, the deadline, story
+//! points, the task's tags), the type and the assignee unless it's the user, and the favorite
+//! action's button on the card itself; an empty column says so under its heading. Without a board
+//! — a message and what to do: sign in, try again, make a board.
 
 use flux_plugin_api::view::*;
 #[cfg(not(test))]
@@ -13,6 +17,7 @@ use flux_plugin_api::{tr, trf};
 use crate::tracker::facts::{self, Day};
 use crate::tracker::model::Issue;
 
+use super::filter::{self as filters, BoardFilter, Facet};
 use super::model::{Lane, Me};
 
 /// The translations are Flux's, asked of the host — in tests on this Mac there is no host: the
@@ -44,6 +49,12 @@ pub const CREATE_BOARD: &str = "create-board";
 pub const CARDS: &str = "cards-";
 /// The favorite action's button on a card (`row-action`).
 pub const TAKE: &str = "take";
+/// The field of words of the key or the title.
+pub const SEARCH: &str = "filter-text";
+/// The saved filters' menu badge.
+pub const SAVED: &str = "saved-filters";
+/// Clear Filters.
+pub const CLEAR: &str = "clear-filters";
 
 /// What the board shows under the toolbar.
 pub enum Content<'a> {
@@ -84,12 +95,28 @@ pub struct Screen<'a> {
     pub refreshing: bool,
     /// A refresh failed; the columns shown are the previous ones.
     pub stale: Option<&'a str>,
+    /// The board's filter.
+    pub filter: &'a BoardFilter,
+    /// The saved filter the board shows now, by its name.
+    pub saved: Option<&'a str>,
+    /// How many tasks each column has before the filters (and Only mine), by the column's key.
+    pub totals: &'a [(String, usize)],
     pub content: Content<'a>,
+}
+
+impl Screen<'_> {
+    /// The filters (or Only mine) hide some tasks.
+    fn filtered(&self) -> bool {
+        self.only_mine || !self.filter.is_empty()
+    }
 }
 
 /// The board's view.
 pub fn render(screen: &Screen) -> Element {
     let mut children = vec![toolbar_of(screen)];
+    if matches!(screen.content, Content::Lanes(_)) {
+        children.push(filters_of(screen));
+    }
     if screen.refreshing {
         children.push(progress("refreshing", None));
     }
@@ -109,6 +136,22 @@ pub fn render(screen: &Screen) -> Element {
         children.push(text(
             "truncated",
             [span(&trf("Showing the first {0} of {1} tasks", &[&shown, &all])).tone(Tone::Warning)],
+        ));
+    }
+    if let Content::Lanes(lanes) = &screen.content
+        && screen.filtered()
+        && !lanes.is_empty()
+        && lanes.iter().all(|lane| lane.tasks.is_empty())
+    {
+        children.push(row(
+            "nothing-found",
+            [
+                text(
+                    "nothing-found-text",
+                    [span(&tr("No tasks on the board match the filters")).tone(Tone::Dim)],
+                ),
+                button(CLEAR, &tr("Clear Filters")).into(),
+            ],
         ));
     }
     children.push(match &screen.content {
@@ -156,39 +199,60 @@ fn toolbar_of(screen: &Screen) -> Element {
             icon_button(STAR, "star", &tr("Add the Board to Favorites: First in the Menu"))
         });
     }
+    items.push(spacer("toolbar-gap"));
+    // The words' field shares the free room with the gap: a search box on the right, as wide as
+    // the board's name and star leave it.
+    if matches!(screen.content, Content::Lanes(_)) {
+        items.push(text_field(
+            SEARCH,
+            &screen.filter.text,
+            Some(&tr("Filter by key or title")),
+        ));
+    }
     items.extend([
-        divider("toolbar-board-end"),
-        checkbox(ONLY_MINE, &tr("Only mine"), screen.only_mine),
-        spacer("toolbar-gap"),
         icon_button(REFRESH, "refresh", &tr("Refresh the Board")),
         icon_button(BROWSER, "globe", &tr("Open the Board in Tracker")),
     ]);
     toolbar("toolbar", items)
 }
 
+/// The filters' bar: Only mine, a menu badge per filter (colored while it filters), the words'
+/// field, the saved filters, Clear.
+fn filters_of(screen: &Screen) -> Element {
+    let mut items = vec![checkbox(ONLY_MINE, &tr("Only mine"), screen.only_mine)];
+    for facet in Facet::ALL {
+        let on = !screen.filter.chosen(facet).is_empty();
+        let tone = if on { Tone::Accent } else { Tone::Normal };
+        items.push(menu_badge(facet.id(), &screen.filter.chip(facet), tone));
+    }
+    items.push(spacer("filters-gap"));
+    items.push(match screen.saved {
+        Some(name) => menu_badge(SAVED, name, Tone::Accent),
+        None => menu_badge(SAVED, &tr("Saved Filters"), Tone::Normal),
+    });
+    if !screen.filter.is_empty() {
+        items.push(icon_button(CLEAR, "close", &tr("Clear Filters")));
+    }
+    row("filters", items)
+}
+
 /// A column: its heading and its cards.
 fn lane_element(lane: &Lane, screen: &Screen) -> Element {
+    let all = screen
+        .totals
+        .iter()
+        .find(|(key, _)| *key == lane.key)
+        .map_or(lane.tasks.len(), |(_, all)| *all);
     let heading = text(
         &format!("lane-title-{}", lane.key),
         [
             span(&lane.name).bold(),
-            span(&format!(" · {}", lane.tasks.len())).tone(Tone::Dim),
+            span(&format!(" · {}", filters::count_text(lane.tasks.len(), all))).tone(Tone::Dim),
         ],
     );
-    // An empty column says so right under its heading, not in the middle of the board.
-    if lane.tasks.is_empty() {
-        return column(
-            &format!("lane-{}", lane.key),
-            [
-                heading,
-                text(
-                    &format!("lane-empty-{}", lane.key),
-                    [span(&tr("No tasks")).tone(Tone::Dim)],
-                ),
-            ],
-        );
-    }
-    let mut cards = Tree::new().cards();
+    // An empty column (the filters hide its tasks, or it has none) keeps its width and says so
+    // right under its heading, where its cards would start.
+    let mut cards = Tree::new().cards().empty_text(&tr("No tasks"));
     for task in &lane.tasks {
         cards.add(card(task, screen));
     }
@@ -306,9 +370,21 @@ mod tests {
             truncated: None,
             refreshing: false,
             stale: None,
+            filter: &NO_FILTER,
+            saved: None,
+            totals: &[],
             content: Content::Lanes(lanes),
         }
     }
+
+    static NO_FILTER: BoardFilter = BoardFilter {
+        assignees: Vec::new(),
+        types: Vec::new(),
+        priorities: Vec::new(),
+        tags: Vec::new(),
+        components: Vec::new(),
+        text: String::new(),
+    };
 
     fn find<'a>(view: &'a View, id: &str) -> &'a ElementKind {
         &view

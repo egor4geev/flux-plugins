@@ -2,8 +2,10 @@
 //! it (the assignee — the organization's people; the priority, the type, the sprint, the
 //! components — what Tracker offers; the deadline and story points — quick choices) or a form (the
 //! tags; a date or points of one's own; the title and the description), and the change goes to
-//! Tracker as `PATCH /v3/issues/{key}` in its formats. The card shows the task as Tracker returns
-//! it after the change; the board and the list hear of it.
+//! Tracker as `PATCH /v3/issues/{key}` in its formats. The other fields of the task
+//! ([`super::fields`]) change the same way by their type: a person — the people; a day — quick
+//! choices; one of a list — the list; a line, several lines or a number — a form. The card shows
+//! the task as Tracker returns it after the change; the board and the list hear of it.
 
 use flux_plugin_api::dialog::{Form, Values};
 use flux_plugin_api::picker::{self, Picker};
@@ -15,6 +17,7 @@ use serde_json::{Value, json};
 
 #[cfg(test)]
 use super::facts::{tr, trf};
+use super::fields::{self, EditKind};
 use super::model::{Component, Issue, Myself, Named, Priority, Sprint, User, id_text};
 use super::{Asked, PickerPurpose, Tracker, WINDOW, api, facts};
 use crate::auth::Auth;
@@ -218,22 +221,36 @@ pub fn parse_tags(text: &str) -> Vec<String> {
     tags
 }
 
-/// The assignee picker: you first, then No assignee, then the people; the assignee (by id; none —
-/// No assignee) checked.
-fn people_picker(me: Option<&Myself>, users: &[User], current: Option<&str>) -> Picker {
+/// A person's field: an id as Tracker gives it (`{"id": …}`), or a login.
+fn person_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(person) => person.get("id").map(id_text),
+        Value::String(login) if !login.is_empty() => Some(login.clone()),
+        _ => None,
+    }
+}
+
+/// The picker of a person's field (the assignee, a QA engineer): you first, then `nobody` (No
+/// assignee), then the people; the current one (by id; none — `nobody`) checked.
+fn people_picker(
+    me: Option<&Myself>,
+    users: &[User],
+    current: Option<&str>,
+    nobody: &str,
+) -> Picker {
     let check = |item: picker::Item, on: bool| if on { item.icon("check") } else { item };
     let mut picker = Picker::new(&tr("Find a person"));
     if let Some(me) = me {
-        let mine = current == Some(id_text(&me.uid).as_str());
+        let mine = current == Some(id_text(&me.uid).as_str()) || current == Some(me.login.as_str());
         picker = picker.item(check(person("me", &me.display, &me.login).detail(&tr("you")), mine));
     }
-    picker = picker.item(check(picker::item("none", &tr("No assignee")), current.is_none()));
+    picker = picker.item(check(picker::item("none", nobody), current.is_none()));
     let people = tr("People");
     for user in users {
         if me.is_some_and(|me| id_text(&me.uid) == id_text(&user.uid)) {
             continue;
         }
-        let on = current == Some(id_text(&user.uid).as_str());
+        let on = current == Some(id_text(&user.uid).as_str()) || current == Some(user.login.as_str());
         let key = format!("user:{}", user.handle());
         picker = picker.item(check(person(&key, &user.display, &user.login).group(&people), on));
     }
@@ -258,11 +275,14 @@ fn sprint_state(status: &str) -> String {
 impl Tracker {
     /// A click on an editable property of the card.
     pub(super) fn edit_field(&mut self, id: &str, auth: &Auth) {
-        let (Some(field), Some(key)) = (EditField::of(id), self.card_key()) else {
+        let Some(key) = self.card_key() else {
             return;
         };
         let Some(issue) = self.card.as_ref().and_then(|card| card.issue.clone()) else {
             return;
+        };
+        let Some(field) = EditField::of(id) else {
+            return self.edit_other_field(&key, &issue, id, auth);
         };
         match field {
             EditField::Assignee => self.assignee_picker(&key, &issue, auth),
@@ -292,7 +312,8 @@ impl Tracker {
         );
     }
 
-    fn assignee_picker(&mut self, key: &str, issue: &Issue, auth: &Auth) {
+    /// The organization's people, read once.
+    fn learn_users(&mut self, auth: &Auth) {
         if self.users.is_none() {
             match api::users(auth) {
                 Ok(mut users) => {
@@ -302,9 +323,13 @@ impl Tracker {
                 Err(err) => log::warn(&format!("Users: {}", err.message())),
             }
         }
+    }
+
+    fn assignee_picker(&mut self, key: &str, issue: &Issue, auth: &Auth) {
+        self.learn_users(auth);
         let current = issue.assignee.as_ref().map(|assignee| id_text(&assignee.id));
         let users = self.users.as_deref().unwrap_or_default();
-        let picker = people_picker(self.me.as_ref(), users, current.as_deref());
+        let picker = people_picker(self.me.as_ref(), users, current.as_deref(), &tr("No assignee"));
         self.open_field_picker(key, EditField::Assignee, picker);
     }
 
@@ -377,25 +402,8 @@ impl Tracker {
     }
 
     fn deadline_picker(&mut self, key: &str, issue: &Issue) {
-        let now = time::now();
-        let today = super::facts::today(now, time::offset_at(now));
-        let language = flux_plugin_api::host::i18n::language();
-        let day_text = |day: Day| time::day_month(day.0, day.1, day.2, today.0, &language);
-        let label = |choice: &str| match choice {
-            "today" => tr("Today"),
-            "tomorrow" => tr("Tomorrow"),
-            "friday" => tr("End of the week"),
-            "monday" => tr("Next week"),
-            _ => tr("In two weeks"),
-        };
         let current = issue.deadline.as_deref().and_then(time::parse_date);
-        let mut picker = Picker::menu();
-        for (choice, day) in deadline_choices(today) {
-            let item = picker::item(&format!("day:{}", date_text(day)), &label(choice))
-                .detail(&day_text(day));
-            picker = picker.item(if current == Some(day) { item.icon("check") } else { item });
-        }
-        picker = picker.item(picker::item("pick", &tr("Pick a Date…")));
+        let mut picker = date_menu(current);
         if current.is_some() {
             picker = picker.item(picker::item("clear", &tr("No Deadline")));
         }
@@ -496,6 +504,158 @@ impl Tracker {
             Picker::menu().items(items)
         };
         self.open_field_picker(key, EditField::Components, picker);
+    }
+
+    /// A click on one of the other fields of the card: a picker under it or a form, by its type.
+    fn edit_other_field(&mut self, key: &str, issue: &Issue, field: &str, auth: &Auth) {
+        let metas = self.metas_of(issue);
+        let Some(meta) = fields::find_meta(&metas, field) else {
+            return;
+        };
+        let Some(kind) = fields::edit_kind(meta) else {
+            return;
+        };
+        let name = meta.display();
+        let current = issue.other.get(field).cloned().unwrap_or(Value::Null);
+        let picker = match &kind {
+            EditKind::User => {
+                self.learn_users(auth);
+                let users = self.users.as_deref().unwrap_or_default();
+                let current = person_id(&current);
+                people_picker(self.me.as_ref(), users, current.as_deref(), &tr("No One"))
+            }
+            EditKind::Date => {
+                let current = current.as_str().and_then(time::parse_date);
+                let picker = date_menu(current);
+                if current.is_some() && !meta.schema.required {
+                    picker.item(picker::item("clear", &tr("No Date")))
+                } else {
+                    picker
+                }
+            }
+            EditKind::Choice(options) => {
+                let current = crate::tracker::model::value_text(&current);
+                let mut picker = Picker::menu();
+                for option in options {
+                    let item = picker::item(&format!("option:{option}"), option);
+                    picker = picker.item(if *option == current { item.icon("check") } else { item });
+                }
+                if !current.is_empty() && !meta.schema.required {
+                    picker = picker.item(picker::item("clear", &tr("None")));
+                }
+                picker
+            }
+            EditKind::Text | EditKind::Multiline | EditKind::Number { .. } => {
+                let text = match &current {
+                    Value::Number(number) => number.as_f64().map(facts::points).unwrap_or_default(),
+                    other => crate::tracker::model::value_text(other),
+                };
+                let id = value_form(&name, &kind, &text, None).send();
+                self.asked.insert(
+                    id,
+                    Asked::OtherField {
+                        task: key.to_string(),
+                        field: field.to_string(),
+                        kind,
+                    },
+                );
+                return;
+            }
+        };
+        let id = picker.under(WINDOW, &format!("fields/{field}")).open();
+        self.pickers.insert(
+            id,
+            PickerPurpose::OtherField {
+                task: key.to_string(),
+                field: field.to_string(),
+            },
+        );
+    }
+
+    /// What was chosen in the picker of one of the other fields.
+    pub(super) fn other_field_picked(&mut self, task: &str, field: &str, choice: &str, auth: &Auth) {
+        let value = match choice {
+            "me" => match &self.me {
+                Some(me) if !me.login.is_empty() => Value::String(me.login.clone()),
+                Some(me) => Value::String(id_text(&me.uid)),
+                None => return,
+            },
+            "none" | "clear" => Value::Null,
+            "pick" => {
+                let issue = self
+                    .card
+                    .as_ref()
+                    .filter(|card| card.key == task)
+                    .and_then(|card| card.issue.clone());
+                let current = issue
+                    .as_ref()
+                    .and_then(|issue| issue.other.get(field)?.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                let name = issue
+                    .as_ref()
+                    .and_then(|issue| {
+                        let metas = self.metas_of(issue);
+                        fields::find_meta(&metas, field).map(|meta| meta.display())
+                    })
+                    .unwrap_or_else(|| field.to_string());
+                let id = value_form(&name, &EditKind::Date, &current, None).send();
+                self.asked.insert(
+                    id,
+                    Asked::OtherField {
+                        task: task.to_string(),
+                        field: field.to_string(),
+                        kind: EditKind::Date,
+                    },
+                );
+                return;
+            }
+            choice => {
+                if let Some(handle) = choice.strip_prefix("user:") {
+                    Value::String(handle.to_string())
+                } else if let Some(day) = choice.strip_prefix("day:") {
+                    Value::String(day.to_string())
+                } else if let Some(option) = choice.strip_prefix("option:") {
+                    Value::String(option.to_string())
+                } else {
+                    return;
+                }
+            }
+        };
+        self.apply_change(task, &other_change(field, value), auth);
+    }
+
+    /// The answer to the form of one of the other fields: the value, or the form again with what
+    /// was wrong.
+    pub(super) fn other_field_answered(
+        &mut self,
+        task: String,
+        field: String,
+        kind: EditKind,
+        values: Values,
+        auth: &Auth,
+    ) {
+        let now = time::now();
+        let today = super::facts::today(now, time::offset_at(now));
+        let text = match kind {
+            EditKind::Multiline => values.get("value").unwrap_or_default().trim_end().to_string(),
+            _ => values.text("value"),
+        };
+        match parse_value(&kind, &text, today) {
+            Ok(value) => self.apply_change(&task, &other_change(&field, value), auth),
+            Err(error) => {
+                let name = self
+                    .card
+                    .as_ref()
+                    .and_then(|card| card.issue.as_ref())
+                    .and_then(|issue| {
+                        let metas = self.metas_of(issue);
+                        fields::find_meta(&metas, &field).map(|meta| meta.display())
+                    })
+                    .unwrap_or_else(|| field.clone());
+                let id = value_form(&name, &kind, &text, Some(&error)).send();
+                self.asked.insert(id, Asked::OtherField { task, field, kind });
+            }
+        }
     }
 
     /// What was chosen in a property's picker.
@@ -632,6 +792,9 @@ impl Tracker {
                     self.apply_change(&key, &change, auth);
                 }
             }
+            Asked::OtherField { task, field, kind } => {
+                self.other_field_answered(task, field, kind, values, auth)
+            }
             Asked::CustomQuery | Asked::Close(_) | Asked::LogTime(_) => {}
         }
     }
@@ -669,6 +832,92 @@ impl Tracker {
             }
         }
         self.render(auth);
+    }
+}
+
+/// The quick choices of a day, from today (the current one checked), and Pick a Date…; a field
+/// that can be emptied adds its own item.
+fn date_menu(current: Option<Day>) -> Picker {
+    let now = time::now();
+    let today = super::facts::today(now, time::offset_at(now));
+    let language = flux_plugin_api::host::i18n::language();
+    let day_text = |day: Day| time::day_month(day.0, day.1, day.2, today.0, &language);
+    let label = |choice: &str| match choice {
+        "today" => tr("Today"),
+        "tomorrow" => tr("Tomorrow"),
+        "friday" => tr("End of the week"),
+        "monday" => tr("Next week"),
+        _ => tr("In two weeks"),
+    };
+    let mut picker = Picker::menu();
+    for (choice, day) in deadline_choices(today) {
+        let item = picker::item(&format!("day:{}", date_text(day)), &label(choice))
+            .detail(&day_text(day));
+        picker = picker.item(if current == Some(day) { item.icon("check") } else { item });
+    }
+    picker.item(picker::item("pick", &tr("Pick a Date…")))
+}
+
+/// A change of one of the other fields: `{"<its key in the task>": value}` (a local field's key is
+/// `<queue's id>--<key>`, as the task has it); null empties it.
+pub fn other_change(field: &str, value: Value) -> Value {
+    let mut change = serde_json::Map::new();
+    change.insert(field.to_string(), value);
+    Value::Object(change)
+}
+
+/// A value typed for one of the other fields, as Tracker takes it; empty — null. A number or a day
+/// that isn't one says how to write it.
+pub fn parse_value(kind: &EditKind, text: &str, today: Day) -> Result<Value, String> {
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    match kind {
+        EditKind::Number { whole } => {
+            let wrong = || {
+                if *whole {
+                    tr("Write a whole number: 3")
+                } else {
+                    tr("Write a number: 3, 0.5")
+                }
+            };
+            let number: f64 = text.trim().replace(',', ".").parse().map_err(|_| wrong())?;
+            if !number.is_finite() || (*whole && number.fract() != 0.0) {
+                return Err(wrong());
+            }
+            Ok(if number.fract() == 0.0 && number.abs() < 1e15 {
+                json!(number as i64)
+            } else {
+                json!(number)
+            })
+        }
+        EditKind::Date => parse_day(text, today)
+            .map(|day| Value::String(date_text(day)))
+            .ok_or_else(|| tr("Write the date as 2026-10-20 or 20.10")),
+        _ => Ok(Value::String(text.to_string())),
+    }
+}
+
+/// The form of a value of one's own for one of the other fields, by its type.
+fn value_form(name: &str, kind: &EditKind, text: &str, error: Option<&str>) -> Form {
+    let form = Form::new(name, &tr("Set"));
+    let form = match kind {
+        EditKind::Multiline => form.multiline("value", name, text),
+        EditKind::Number { .. } => form
+            .text("value", name, text)
+            .placeholder("3")
+            .note("value-note", &tr("Empty — no value")),
+        EditKind::Date => form
+            .text("value", name, text)
+            .placeholder(&tr("2026-10-20 or 20.10"))
+            .note("value-note", &tr("Empty — no date")),
+        _ => form
+            .text("value", name, text)
+            .note("value-note", &tr("Empty — no value")),
+    };
+    match error {
+        Some(error) => form.error(error),
+        None => form,
     }
 }
 
@@ -835,6 +1084,25 @@ mod tests {
     }
 
     #[test]
+    fn other_fields_values_as_tracker_takes_them() {
+        let number = EditKind::Number { whole: false };
+        let whole = EditKind::Number { whole: true };
+        assert_eq!(parse_value(&number, "2,5", TODAY), Ok(json!(2.5)));
+        assert_eq!(parse_value(&whole, "120", TODAY), Ok(json!(120)));
+        assert!(parse_value(&whole, "2.5", TODAY).is_err());
+        assert!(parse_value(&number, "lots", TODAY).is_err());
+        assert_eq!(parse_value(&EditKind::Date, "20.10", TODAY), Ok(json!("2026-10-20")));
+        assert!(parse_value(&EditKind::Date, "31.06", TODAY).is_err());
+        assert_eq!(parse_value(&EditKind::Text, "stage", TODAY), Ok(json!("stage")));
+        // Empty empties the field.
+        assert_eq!(parse_value(&whole, "  ", TODAY), Ok(Value::Null));
+        assert_eq!(
+            other_change("64f1c0a2e4b0a1b2c3d4e5f6--team", json!("Платежи")),
+            json!({"64f1c0a2e4b0a1b2c3d4e5f6--team": "Платежи"})
+        );
+    }
+
+    #[test]
     fn properties_by_id() {
         for field in [
             EditField::Assignee,
@@ -866,7 +1134,7 @@ mod tests {
             ..Myself::default()
         };
         let users = [person(1, "egor", "Егор Агеев"), person(2, "anna.petrova", "Анна Петрова")];
-        let picker = people_picker(Some(&me), &users, Some("2"));
+        let picker = people_picker(Some(&me), &users, Some("2"), "No assignee");
         let items = &picker.spec().items;
         // You first, then No assignee, then the others — you aren't among them twice.
         let keys: Vec<&str> = items.iter().map(|item| item.key.as_str()).collect();
@@ -876,7 +1144,7 @@ mod tests {
         assert_eq!(label, "Анна Петрова  anna.petrova");
         let checked: Vec<bool> = items.iter().map(|item| item.icon.is_some()).collect();
         assert_eq!(checked, [false, false, true]);
-        let unassigned = people_picker(Some(&me), &users, None);
+        let unassigned = people_picker(Some(&me), &users, None, "No assignee");
         assert_eq!(unassigned.spec().items[1].icon.as_deref(), Some("check"));
     }
 

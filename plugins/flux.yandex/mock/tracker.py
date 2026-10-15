@@ -9,7 +9,11 @@ comments (read, add), links, the changelog (`perPage`, after `id`), the work log
 task's fields changed — `PATCH /v3/issues/<key>` in Tracker's formats (unknown fields and wrong
 values answer 400, as Tracker does) — and what they take: priorities (named by `Accept-Language`;
 `localized=false` — by language), a queue with `expand=issueTypesConfig`, a queue's components,
-the users (one of them dismissed).
+the users (one of them dismissed); the fields — the system ones (`GET /v3/fields`, named by
+`Accept-Language`) and a queue's own (`GET /v3/queues/<key>/localFields`: TRACK has six, WEB one) —
+and TRACK-142 has a value in most of them; `PATCH` changes them by their metadata (a date, a
+number, a person, one of a list, a line), a local field by its key in the task
+(`<queue's id>--<key>`).
 
 The query language as far as the plugin uses it: `Assignee: me()`, `Resolution: empty()`,
 `Followers: me()`, `"Pending reply from": me()`, `Queue: KEY`, `Key: KEY`, `Summary: "words"`,
@@ -71,6 +75,64 @@ WORKFLOW = {
     "resolved": [("reopen", "Переоткрыть", "open")],
     "closed": [("reopen", "Переоткрыть", "open")],
 }
+
+# Fields' categories: key → (Russian, English).
+CATEGORIES = {"system": ("Системные", "System"), "agile": ("Agile", "Agile"),
+              "time": ("Учёт времени", "Time tracking"), "email": ("Email", "Email")}
+# The system fields: (id, Russian, English, type, items, readonly, order, category).
+FIELDS = [
+    ("summary", "Задача", "Issue", "string", None, False, 1, "system"),
+    ("description", "Описание", "Description", "text", None, False, 2, "system"),
+    ("status", "Статус", "Status", "status", None, True, 3, "system"),
+    ("resolution", "Резолюция", "Resolution", "resolution", None, True, 4, "system"),
+    ("type", "Тип", "Type", "issuetype", None, False, 5, "system"),
+    ("priority", "Приоритет", "Priority", "priority", None, False, 6, "system"),
+    ("assignee", "Исполнитель", "Assignee", "user", None, False, 7, "system"),
+    ("createdBy", "Автор", "Reporter", "user", None, True, 8, "system"),
+    ("followers", "Наблюдатели", "Followers", "array", "user", False, 9, "system"),
+    ("qaEngineer", "QA-инженер", "QA engineer", "user", None, False, 10, "system"),
+    ("tags", "Теги", "Tags", "array", "string", False, 11, "system"),
+    ("components", "Компоненты", "Components", "array", "component", False, 12, "system"),
+    ("fixVersions", "Исправить в версиях", "Fix versions", "array", "version", False, 13, "system"),
+    ("affectedVersions", "Затронутые версии", "Affected versions", "array", "version", False, 14,
+     "system"),
+    ("project", "Проект", "Project", "project", None, False, 15, "system"),
+    ("epic", "Эпик", "Epic", "issue", None, False, 16, "system"),
+    ("parent", "Родительская задача", "Parent issue", "issue", None, False, 17, "system"),
+    ("deadline", "Дедлайн", "Deadline", "date", None, False, 18, "system"),
+    ("votes", "Голоса", "Votes", "integer", None, True, 19, "system"),
+    ("createdAt", "Создана", "Created", "datetime", None, True, 20, "system"),
+    ("updatedAt", "Обновлена", "Updated", "datetime", None, True, 21, "system"),
+    ("resolvedAt", "Дата решения", "Resolved", "datetime", None, True, 22, "system"),
+    ("sprint", "Спринт", "Sprint", "array", "sprint", False, 30, "agile"),
+    ("storyPoints", "Story Points", "Story Points", "float", None, False, 31, "agile"),
+    ("start", "Начало", "Start date", "date", None, False, 40, "time"),
+    ("end", "Конец", "End date", "date", None, False, 41, "time"),
+    ("originalEstimation", "Первоначальная оценка", "Original estimate", "duration", None, False,
+     42, "time"),
+    ("estimation", "Оценка", "Estimate", "duration", None, False, 43, "time"),
+    ("spent", "Затрачено времени", "Time spent", "duration", None, True, 44, "time"),
+    ("emailFrom", "Email отправителя", "Email from", "string", None, True, 50, "email"),
+]
+# A queue's own fields: queue → (its id, [(key, Russian, English, type, options, order)]).
+LOCAL_FIELDS = {
+    "TRACK": ("64f1c0a2e4b0a1b2c3d4e5f6", [
+        ("team", "Команда", "Team", "string", ["Платформа", "Платежи", "Аналитика"], 101),
+        ("environment", "Окружение", "Environment", "string", None, 102),
+        ("customers", "Клиентов затронуто", "Customers affected", "integer", None, 103),
+        ("releaseDate", "Дата релиза", "Release date", "date", None, 104),
+        ("reviewer", "Ревьюер", "Reviewer", "user", None, 105),
+        ("supportNotes", "Заметки для поддержки", "Notes for support", "text", None, 106),
+    ]),
+    "WEB": ("64f1c0a2e4b0a1b2c3d4e5f7", [
+        ("design", "Макет", "Design", "string", None, 101),
+    ]),
+}
+
+
+def local_id(queue, key):
+    return f"{LOCAL_FIELDS[queue][0]}--{key}"
+
 
 LINK_TYPES = {
     # This task → the other: (the other's role seen from here, the reverse).
@@ -183,6 +245,44 @@ def sample():
     issues["TRACK-142"]["components"] = [component_ref("TRACK", "11")]
     issues["TRACK-142"]["storyPoints"] = 5
     issues["TRACK-120"]["tags"] = ["backend"]
+    # More of them, for the board's filters.
+    issues["TRACK-130"]["tags"] = ["export", "backend"]
+    issues["TRACK-130"]["components"] = [component_ref("TRACK", "13")]
+    issues["TRACK-155"]["tags"] = ["payments", "backend"]
+    issues["TRACK-155"]["components"] = [component_ref("TRACK", "12")]
+    issues["TRACK-150"]["tags"] = ["audit", "auth"]
+    issues["TRACK-150"]["components"] = [component_ref("TRACK", "11")]
+    issues["TRACK-99"]["tags"] = ["logs"]
+    issues["WEB-12"]["tags"] = ["frontend", "landing"]
+    issues["WEB-14"]["tags"] = ["frontend", "design"]
+    issues["WEB-15"]["tags"] = ["frontend", "auth"]
+    # Every other field it has: the system ones, the queue's own, Tracker's bookkeeping.
+    issues["TRACK-142"].update({
+        "start": str(today - datetime.timedelta(days=3)),
+        "end": str(today + datetime.timedelta(days=11)),
+        "originalEstimation": "P3D",
+        "spent": "PT6H30M",
+        "qaEngineer": user(OLEG),
+        "fixVersions": [{"self": f"{API}/versions/21", "id": "21", "display": "2.4"}],
+        "project": {"self": f"{API}/projects/5", "id": "5", "display": "Вход 2.0"},
+        "epic": {"self": f"{API}/issues/TRACK-100", "id": "mockTRACK100", "key": "TRACK-100",
+                 "display": "Новая авторизация"},
+        "votes": 2,
+        "votedBy": [user(ANNA), user(OLEG)],
+        "favorite": False,
+        "unique": "mock-142",
+        "commentWithoutExternalMessageCount": 2,
+        "lastCommentUpdatedAt": now_iso(-60 * 3),
+        "statusStartTime": now_iso(-60 * 24),
+        "previousStatus": {"id": "needInfo", "key": "needInfo", "display": "Требуется информация"},
+        local_id("TRACK", "team"): "Платформа",
+        local_id("TRACK", "environment"): "stage, prod — после перехода с ADFS на новый IdP",
+        local_id("TRACK", "customers"): 120,
+        local_id("TRACK", "releaseDate"): str(today + datetime.timedelta(days=14)),
+        local_id("TRACK", "reviewer"): user(OLEG),
+    })
+    issues["TRACK-120"][local_id("TRACK", "environment")] = "prod"
+    issues["WEB-14"][local_id("WEB", "design")] = "figma.com/file/dark-theme"
     links = [
         # (this, the other, type): this → the other is "outward".
         ("TRACK-150", "TRACK-142", "subtask"),
@@ -558,6 +658,19 @@ def register(router, state):
             return out, None
         return None, bad(field, "Ожидается список или {add, remove}")
 
+    def other_field(field, queue):
+        """A field PATCH changes by its metadata: (type, Russian name, options or None)."""
+        editable = {"qaEngineer", "start", "end"}
+        for id_, name_ru, _, kind, _, readonly, _, _ in FIELDS:
+            if id_ == field and id_ in editable and not readonly:
+                return kind, name_ru, None
+        if queue in LOCAL_FIELDS:
+            queue_id, fields = LOCAL_FIELDS[queue]
+            for key_, name_ru, _, kind, options, _ in fields:
+                if field == f"{queue_id}--{key_}":
+                    return kind, name_ru, options
+        return None
+
     def patch_issue(request, match):
         problem = denied(request)
         if problem:
@@ -675,6 +788,40 @@ def register(router, state):
                 if problem:
                     return problem
                 task["_followers"] = [id_ for id_ in ids if id_]
+            elif other_field(field, queue):
+                kind, name, options = other_field(field, queue)
+                before = task.get(field)
+                if value is None:
+                    task.pop(field, None)
+                    after = None
+                elif options is not None:
+                    if value not in options:
+                        return bad(field, f"Нет значения «{value}» в списке поля «{name}»")
+                    after = value
+                elif kind == "date":
+                    if not (isinstance(value, str) and re.match(r"^\d{4}-\d\d-\d\d$", value)):
+                        return bad(field, "Ожидается дата ГГГГ-ММ-ДД")
+                    after = value
+                elif kind in ("integer", "float"):
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        return bad(field, "Ожидается число")
+                    if kind == "integer" and value != int(value):
+                        return bad(field, "Ожидается целое число")
+                    after = int(value) if kind == "integer" else value
+                elif kind == "user":
+                    who = person(str(value))
+                    if not who or who.get("dismissed"):
+                        return bad(field, f"Пользователь {value} не найден")
+                    after = user(who)
+                elif kind in ("string", "text"):
+                    if not isinstance(value, str):
+                        return bad(field, "Ожидается строка")
+                    after = value
+                else:
+                    return bad(field, f"Поле «{name}» так не меняется")
+                if after is not None:
+                    task[field] = after
+                change(field, name, before, after)
             else:
                 return bad(field, f"Неизвестное поле {field}")
         touch(task)
@@ -720,6 +867,56 @@ def register(router, state):
                                "queue": {"key": key_}}
                               for id_, name in COMPONENTS.get(key_, [])])
 
+    def russian(request):
+        return (request.headers.get("accept-language") or "ru").lower().startswith("ru")
+
+    def field_meta(request):
+        ru = russian(request)
+        out = []
+        for id_, name_ru, name_en, kind, items, readonly, order, category in FIELDS:
+            schema = {"type": kind, "required": id_ == "summary"}
+            if items:
+                schema["items"] = items
+            out.append({"self": f"{API}/fields/{id_}", "id": id_, "name": name_ru if ru else name_en,
+                        "version": 1, "schema": schema, "readonly": readonly, "options": False,
+                        "suggest": False, "order": order,
+                        "category": {"self": f"{API}/fields/categories/{category}",
+                                     "id": category,
+                                     "display": CATEGORIES[category][0 if ru else 1]}})
+        return out
+
+    def local_meta(request, queue):
+        ru = russian(request)
+        if queue not in LOCAL_FIELDS:
+            return []
+        queue_id, fields = LOCAL_FIELDS[queue]
+        out = []
+        for key_, name_ru, name_en, kind, options, order in fields:
+            entry = {"self": f"{API}/queues/{queue}/localFields/{key_}",
+                     "id": f"{queue_id}--{key_}", "key": key_, "type": "local",
+                     "name": name_ru if ru else name_en, "version": 1,
+                     "schema": {"type": kind, "required": False}, "readonly": False,
+                     "options": bool(options), "suggest": False, "order": order,
+                     "queue": {"self": f"{API}/queues/{queue}", "key": queue}}
+            if options:
+                entry["optionsProvider"] = {"type": "FixedListOptionsProvider",
+                                            "needValidation": True, "values": options}
+            out.append(entry)
+        return out
+
+    def fields_route(request, match):
+        return denied(request) or Response(200, field_meta(request))
+
+    def local_fields_route(request, match):
+        problem = denied(request)
+        if problem:
+            return problem
+        queue = match.group(1).upper()
+        if queue not in TYPES:
+            return Response(404, {"errorMessages": [f"Очередь {queue} не найдена"],
+                                  "statusCode": 404})
+        return Response(200, local_meta(request, queue))
+
     def users(request, match):
         problem = denied(request)
         if problem:
@@ -739,6 +936,8 @@ def register(router, state):
     router.add("GET", r"/v3/queues/([A-Za-z][A-Za-z0-9_]*)", queue)
     router.add("GET", r"/v3/queues/([A-Za-z][A-Za-z0-9_]*)/components", queue_components)
     router.add("GET", r"/v3/users", users)
+    router.add("GET", r"/v3/fields", fields_route)
+    router.add("GET", r"/v3/queues/([A-Za-z][A-Za-z0-9_]*)/localFields", local_fields_route)
     router.add("GET", r"/v3/myself", myself)
     router.add("GET", r"/v3/queues/?", queues)
     router.add("POST", r"/v3/issues/_search", search)

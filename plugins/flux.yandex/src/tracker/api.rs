@@ -1,13 +1,14 @@
 //! Tracker's API v3 as the Tracker side uses it, over [`crate::client`]: tasks (search, one task,
 //! its changes of fields, transitions, comments, links, history, work log), what the fields take
-//! (priorities, a queue's types and components, users, a board's sprints), queues, who the token is.
+//! (priorities, a queue's types and components, users, a board's sprints), the fields themselves
+//! (the system ones and a queue's own), queues, who the token is.
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::model::{
-    ChangelogEntry, Comment, Component, Issue, IssueLink, Myself, Priority, Queue, QueueTypes,
-    Sprint, Transition, User,
+    ChangelogEntry, Comment, Component, FieldMeta, Issue, IssueLink, Myself, Priority, Queue,
+    QueueTypes, Sprint, Transition, User,
 };
 use crate::auth::Auth;
 use crate::client::{self, ClientError};
@@ -187,6 +188,20 @@ pub fn components(auth: &Auth, queue: &str) -> Result<Vec<Component>, ClientErro
 pub fn users(auth: &Auth) -> Result<Vec<User>, ClientError> {
     let users: Vec<User> = parse(client::get(auth, "users?perPage=1000")?)?;
     Ok(users.into_iter().filter(|user| !user.dismissed).collect())
+}
+
+/// The organization's fields — the system ones — named in the interface language.
+pub fn fields(auth: &Auth) -> Result<Vec<FieldMeta>, ClientError> {
+    parse(client::get(auth, "fields")?)
+}
+
+/// The queue's own (local) fields; none when the queue has none.
+pub fn local_fields(auth: &Auth, queue: &str) -> Result<Vec<FieldMeta>, ClientError> {
+    match client::get(auth, &format!("queues/{}/localFields", queue_path(queue)?)) {
+        Ok(Value::Null) | Err(ClientError::NotFound) => Ok(Vec::new()),
+        Ok(value) => parse(value),
+        Err(err) => Err(err),
+    }
 }
 
 /// A board's sprints; none for a board that has no sprints (a kanban board answers 400).

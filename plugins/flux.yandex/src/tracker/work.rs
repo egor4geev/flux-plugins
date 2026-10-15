@@ -663,7 +663,8 @@ impl Tracker {
             asked @ (Asked::Deadline(_)
             | Asked::StoryPoints(_)
             | Asked::Tags(_)
-            | Asked::EditTask(_)) => self.edit_form_answered(asked, values, auth),
+            | Asked::EditTask(_)
+            | Asked::OtherField { .. }) => self.edit_form_answered(asked, values, auth),
         }
     }
 

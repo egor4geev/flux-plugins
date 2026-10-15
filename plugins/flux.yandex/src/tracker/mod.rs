@@ -17,6 +17,7 @@ pub mod actions;
 pub mod api;
 mod edit;
 pub mod facts;
+pub mod fields;
 mod links;
 pub mod model;
 mod poll;
@@ -30,12 +31,16 @@ use flux_plugin_api::{CommandContext, Event, timers};
 
 use crate::auth::Auth;
 use crate::client;
-use model::{Comment, Component, Issue, IssueLink, Myself, Named, Priority, Queue, User};
+use model::{
+    Comment, Component, FieldMeta, Issue, IssueLink, Myself, Named, Priority, Queue, User,
+};
 
 /// The window of the manifest.
 pub const WINDOW: &str = "tracker";
 /// Network work after the window opens waits a moment: the window's start isn't held up.
 const STARTUP_DELAY: Duration = Duration::from_millis(1500);
+/// Storage: the card shows every field of the task (true by default) or only the main ones.
+const ALL_FIELDS: &str = "card.all-fields";
 
 /// What the list shows.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -59,6 +64,8 @@ enum PickerPurpose {
     TaskMenu,
     /// A property of the card being changed.
     Field { task: String, field: edit::EditField },
+    /// One of the other fields of the card being changed: its key in the task.
+    OtherField { task: String, field: String },
 }
 
 /// What a form or a text question of the Tracker is for.
@@ -73,6 +80,12 @@ enum Asked {
     Tags(String),
     /// The title and the description.
     EditTask(String),
+    /// A value of one's own for one of the other fields: the task, the field's key, how it reads.
+    OtherField {
+        task: String,
+        field: String,
+        kind: fields::EditKind,
+    },
 }
 
 pub struct Tracker {
@@ -106,6 +119,12 @@ pub struct Tracker {
     issue_types: HashMap<String, Vec<Named>>,
     /// A queue's components, by its key.
     components: HashMap<String, Vec<Component>>,
+    /// The system fields (`GET /v3/fields`): their names, types and categories, read once.
+    field_meta: Option<Vec<FieldMeta>>,
+    /// A queue's own fields, by its key.
+    local_fields: HashMap<String, Vec<FieldMeta>>,
+    /// The card shows every field of the task, not only the main ones (`card.all-fields`).
+    all_fields: bool,
 }
 
 impl Tracker {
@@ -130,6 +149,9 @@ impl Tracker {
             priorities: Vec::new(),
             issue_types: HashMap::new(),
             components: HashMap::new(),
+            field_meta: None,
+            local_fields: HashMap::new(),
+            all_fields: flux_plugin_api::storage::get(ALL_FIELDS).unwrap_or(true),
         }
     }
 
@@ -162,6 +184,8 @@ impl Tracker {
         self.priorities.clear();
         self.issue_types.clear();
         self.components.clear();
+        self.field_meta = None;
+        self.local_fields.clear();
         self.poll.reset();
         self.list = window::List {
             stale: true,

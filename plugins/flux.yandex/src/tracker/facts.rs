@@ -35,12 +35,12 @@ const MAX_CARD_TAGS: usize = 4;
 /// The most of the task's own tags a board's card shows.
 const MAX_OWN_TAGS: usize = 2;
 
-/// A field of the Tracker card: what names it (a property's id — the editable ones are the ids
-/// [`super::edit`] knows), its name, its value (empty — none: a dash) and how loud it is, whether
-/// the user can change it there.
+/// A field of the Tracker card: what names it (a property's id — the main editable ones are the ids
+/// [`super::edit`] knows, the others the field's key in the task), its name, its value (empty —
+/// none: a dash) and how loud it is, whether the user can change it there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
-    pub id: &'static str,
+    pub id: String,
     pub name: String,
     pub value: String,
     pub tone: Tone,
@@ -193,16 +193,16 @@ pub fn card_fields(issue: &Issue, now: i64, offset: i32, language: &str) -> Vec<
             .and_then(time::parse_iso)
             .map(|at| time::moment(at, now, offset, language))
     };
-    let editable = |id: &'static str, name: String, value: String, tone: Tone| Field {
-        id,
+    let editable = |id: &str, name: String, value: String, tone: Tone| Field {
+        id: id.to_string(),
         name,
         value,
         tone,
         editable: true,
     };
-    let shown = |id: &'static str, name: String, value: Option<String>| {
+    let shown = |id: &str, name: String, value: Option<String>| {
         value.filter(|value| !value.is_empty()).map(|value| Field {
-            id,
+            id: id.to_string(),
             name,
             value,
             tone: Tone::Normal,
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(get("author").unwrap().value, "Игорь");
         assert_eq!(get("sprint").unwrap().value, "Спринт DE 2026_20");
         assert_eq!(get("deadline").unwrap(), Field {
-            id: "deadline",
+            id: "deadline".into(),
             name: "Deadline".into(),
             value: "14 Oct · overdue".into(),
             tone: Tone::Error,
@@ -450,7 +450,7 @@ mod tests {
         assert!(points.editable && points.value.is_empty());
         assert_eq!(get("awaiting"), None);
         assert!(!get("author").unwrap().editable);
-        let order: Vec<&str> = fields.iter().map(|field| field.id).collect();
+        let order: Vec<&str> = fields.iter().map(|field| field.id.as_str()).collect();
         assert_eq!(&order[..3], &["assignee", "priority", "type"]);
     }
 }

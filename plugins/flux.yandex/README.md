@@ -23,8 +23,12 @@ The **Tracker** window on the right (its icon in the launchpad):
 - **The list**: My Tasks (the query of the settings), Following, a queue's open tasks or a query of
   your own — the menu at the top; tasks grouped by status.
 - **The card** of a task (a double click, ↵, a link): the key and the title; the status — click it for
-  its transitions; type, priority, assignee, deadline, sprint, the parent task; the description;
-  **Links** grouped by relation (subtasks, blocks, depends on, relates…), each opens its card;
+  its transitions; type, priority, assignee, deadline, sprint, the parent task — and after them every
+  other field the task has, as Tracker's own page lists them: the system fields (start and end,
+  estimates and time spent, versions, the QA engineer, the project, the epic…) in Tracker's order,
+  then the queue's own fields, named as Tracker names them (**Fewer Fields** keeps only the main
+  ones). Click a field with ▾ to change it: a person, a date, one value of a list, a line or a number.
+  Then the description; **Links** grouped by relation (subtasks, blocks, depends on, relates…), each opens its card;
   **Comments** with a field for a new one (⌘↵ sends) and **History** — who changed what, from what to
   what.
 - **A button per Claude action** of the settings. An action sends Claude its prompt with the task's
@@ -63,7 +67,14 @@ tags) shows what the filter finds.
 - **The board** — the menu in the toolbar lists your boards: your favorite boards first, then all
   the others by name. ☆ next to it makes the shown board a favorite. The tab opens the board you
   chose last — at first, your first favorite, or the most recently changed board.
-- **Only mine** — the tasks assigned to you.
+- **Filters**, as on Tracker's boards: **Only mine**, then **Assignee**, **Type**, **Priority**,
+  **Tags** and **Components** — each lists the values the board's tasks have, with how many tasks
+  show if you choose it; choose one, then another (the menu stays open, Esc closes it): several values
+  of one filter show any of them, the filters together narrow each other. The field in the toolbar
+  filters by words of the key or the title. A column says how many of its tasks show — "2 of 5";
+  × clears the filters. Each board keeps its filter until you change it.
+- **Saved filters** — save the current filter of a board under a name and choose it later from the
+  same menu (or delete it there).
 - **Take to Work** — the favorite Claude action of the settings (the one marked On the board; its
   name is the button's) on the selected task: it moves the task, makes its branch, opens its tabs
   and hands Claude the prompt, as the settings say.

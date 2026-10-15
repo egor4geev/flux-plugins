@@ -14,7 +14,12 @@ the scenario plays the browser: `curl -s -L "$(tail -1 <file> | sed 's|https://o
   organization `123456` (Yandex 360) or `bpf-mock` (Cloud); a pasted token `y0_…` works.
   The card's editing: `PATCH /v3/issues/<key>` (an unknown field or a wrong value — 400 with
   `errors`, as Tracker), priorities, the queue's types (`?expand=issueTypesConfig`) and
-  components, users (a dismissed one among them).
+  components, users (a dismissed one among them). The fields: `GET /v3/fields` (the system ones,
+  named by `Accept-Language`, with categories) and `GET /v3/queues/<key>/localFields` (TRACK has
+  six — a list, a line, a number, a date, a person, a text — WEB one); TRACK-142 has a value in
+  most of them, and `PATCH` changes the simple ones by their metadata (a local field by its key in
+  the task, `<queue's id>--<key>`). Tags and components on most TRACK tasks, for the board's
+  filters.
   `POST /_mock/assign {"key"}`, `/_mock/status {"key", "status"}`, `/_mock/summon {"key"}` play
   the news polling finds; `/_mock/reject {"field", "message"}` refuses the next change of a field.
 - `boards.py` — the boards (agent K); `caldav.py` — the calendar (agent G).

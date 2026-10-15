@@ -1,7 +1,8 @@
 //! The Tracker window: the list of tasks (a filter, grouped by status) and a task's card inside the
 //! window (← back). The card reads top down: the parent, the key with Copy and the status with its
-//! transitions, the title, a button per Claude action; the fields as aligned properties — a click
-//! on an editable one changes it ([`super::edit`]); the description with Edit; the links by
+//! transitions, the title, a button per Claude action; the fields as aligned properties — the main
+//! ones, then every other field the task has ([`super::fields`]; "Fewer fields" hides those) — a
+//! click on an editable one changes it ([`super::edit`]); the description with Edit; the links by
 //! relation; Comments | History. Its input, the filter and status pickers, Open Task (⌥⇧N).
 
 use flux_plugin_api::picker::{self, Picker};
@@ -13,8 +14,10 @@ use flux_plugin_api::view::{
 use flux_plugin_api::{UiEvent, UiInput, dialog, log, notify, storage, system, tr, trf};
 
 use super::api::{self, Search};
-use super::model::{ChangelogEntry, Comment, Issue, IssueLink, StatusKind};
-use super::{Asked, Filter, PickerPurpose, Tracker, WINDOW, actions, open_in_browser};
+use super::model::{ChangelogEntry, Comment, FieldMeta, Issue, IssueLink, StatusKind};
+use super::{
+    ALL_FIELDS, Asked, Filter, PickerPurpose, Tracker, WINDOW, actions, fields, open_in_browser,
+};
 use crate::auth::Auth;
 use crate::settings::{self, MY_QUERY};
 use crate::{text as words, time};
@@ -324,8 +327,15 @@ impl Tracker {
         // opens under it, or a form.
         children.push(divider("fields-divider"));
         let now = time::now();
+        let offset = time::offset_at(now);
         let language = flux_plugin_api::host::i18n::language();
-        let fields = super::facts::card_fields(issue, now, time::offset_at(now), &language);
+        let mut fields = super::facts::card_fields(issue, now, offset, &language);
+        // Then every other field the task has, in Tracker's order, in the same aligned list.
+        let others = fields::other_fields(issue, &self.metas_of(issue), now, offset, &language);
+        let more = others.len();
+        if self.all_fields {
+            fields.extend(others);
+        }
         let list = fields
             .iter()
             .map(|field| {
@@ -335,13 +345,25 @@ impl Tracker {
                     vec![span(&field.value).tone(field.tone)]
                 };
                 if field.editable {
-                    editable_property(field.id, &field.name, value)
+                    editable_property(&field.id, &field.name, value)
                 } else {
-                    property(field.id, &field.name, value)
+                    property(&field.id, &field.name, value)
                 }
             })
             .collect();
         children.push(properties("fields", list));
+        if more > 0 {
+            let toggle = if self.all_fields {
+                button("more-fields", &tr("Fewer Fields"))
+                    .icon("collapse-all")
+                    .tooltip(&tr("Show only the main fields"))
+            } else {
+                button("more-fields", &trf("{0} More Fields", &[&more]))
+                    .icon("expand-all")
+                    .tooltip(&tr("Show every field of the task"))
+            };
+            children.push(row("more-fields-row", [toggle.into()]));
+        }
         children.push(divider("description-divider"));
         children.push(row(
             "description-head",
@@ -564,9 +586,47 @@ impl Tracker {
         }
     }
 
+    /// The fields the task can have: the system ones and its queue's own, as far as they're read.
+    pub(super) fn metas_of(&self, issue: &Issue) -> Vec<FieldMeta> {
+        let mut metas = self.field_meta.clone().unwrap_or_default();
+        if let Some(queue) = issue.queue.as_ref().and_then(|queue| queue.key.as_ref())
+            && let Some(local) = self.local_fields.get(queue)
+        {
+            metas.extend(local.iter().cloned());
+        }
+        metas
+    }
+
+    /// Reads what the fields of a task of `queue` are, once: the system ones and the queue's own.
+    /// Without them the card still shows the values, named by their ids.
+    fn learn_fields(&mut self, queue: Option<&str>, auth: &Auth) {
+        if self.field_meta.is_none() {
+            match api::fields(auth) {
+                Ok(metas) => self.field_meta = Some(metas),
+                Err(err) => {
+                    log::warn(&format!("Fields: {}", err.message()));
+                    self.field_meta = Some(Vec::new());
+                }
+            }
+        }
+        if let Some(queue) = queue
+            && !self.local_fields.contains_key(queue)
+        {
+            let local = api::local_fields(auth, queue).unwrap_or_else(|err| {
+                log::warn(&format!("Fields of {queue}: {}", err.message()));
+                Vec::new()
+            });
+            self.local_fields.insert(queue.to_string(), local);
+        }
+    }
+
     /// Loads the card's task, its links and comments (the history when its tab opens).
     pub(super) fn load_card(&mut self, key: &str, auth: &Auth) {
         let result = api::issue(auth, key);
+        if let Ok(issue) = &result {
+            let queue = issue.queue.as_ref().and_then(|queue| queue.key.clone());
+            self.learn_fields(queue.as_deref(), auth);
+        }
         let Some(card) = self.card.as_mut().filter(|card| card.key == key) else {
             return;
         };
@@ -662,6 +722,11 @@ impl Tracker {
                 self.edit_field(&property["fields/".len()..], auth)
             }
             ("edit-task", UiEvent::Clicked) => self.edit_task(),
+            ("more-fields", UiEvent::Clicked) => {
+                self.all_fields = !self.all_fields;
+                storage::set(ALL_FIELDS, &self.all_fields);
+                self.render(auth);
+            }
             ("copy-key", UiEvent::Clicked) => {
                 if let Some(key) = self.card_key() {
                     system::copy_text(&key);
@@ -937,6 +1002,9 @@ impl Tracker {
             }
             PickerPurpose::TaskMenu => self.task_menu_chosen(&key, auth),
             PickerPurpose::Field { task, field } => self.field_picked(&task, field, &key, auth),
+            PickerPurpose::OtherField { task, field } => {
+                self.other_field_picked(&task, &field, &key, auth)
+            }
         }
     }
 }
