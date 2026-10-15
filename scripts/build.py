@@ -46,13 +46,13 @@ BUILD = ROOT / ".build"
 
 # The repository the packages are published in (GitHub Releases, a tag per plugin version).
 DEFAULT_REPO = "egor4geev/flux-plugins"
-# The plugin API this catalog is for (Flux runs plugins of this API only).
-API_VERSION = "0.2"
+# The plugin APIs this catalog takes: what Flux runs (a plugin built for an older API keeps working).
+API_VERSIONS = ("0.2", "0.3")
 INDEX_FORMAT = 1
 
 ID = re.compile(r"^[a-z0-9]+([.-][a-z0-9]+)*$")
 # Files of a plugin's folder that are not part of its package: build inputs and outputs.
-EXCLUDED_TOP = {"grammars.toml", "Cargo.toml", "Cargo.lock", "src", "target", "build.rs"}
+EXCLUDED_TOP = {"grammars.toml", "Cargo.toml", "Cargo.lock", "src", "target", "build.rs", "mock"}
 
 
 class BuildError(Exception):
@@ -156,8 +156,8 @@ def check_manifest(folder: Path, manifest: dict) -> None:
         raise BuildError(f"id {plugin_id!r}: lowercase letters and digits, words joined by '.' or '-'")
     if folder.name != plugin_id:
         raise BuildError(f"the folder is {folder.name!r}, but the plugin's id is {plugin_id!r}: name the folder by the id")
-    if manifest["api"] != API_VERSION:
-        raise BuildError(f"api {manifest['api']!r}: the catalog takes plugins for API {API_VERSION}")
+    if manifest["api"] not in API_VERSIONS:
+        raise BuildError(f"api {manifest['api']!r}: the catalog takes plugins for API {', '.join(API_VERSIONS)}")
     if not re.match(r"^\d+\.\d+\.\d+([-+].*)?$", manifest["version"]):
         raise BuildError(f"version {manifest['version']!r}: MAJOR.MINOR.PATCH")
     grammars = {grammar.get("id") for grammar in manifest.get("grammars", [])}

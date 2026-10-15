@@ -1,0 +1,421 @@
+# Yandex Tracker and Calendar for Flux: the board of tasks in an editor tab, a task's card with its
+# links, comments and history, your own Claude actions on a task (the favorite one — Take to Work on
+# the board), tasks as Tasks & Contexts in JetBrains IDEs, and the day's meetings in the status bar. Sign-in — Yandex ID (OAuth with PKCE through the browser), the token
+# in the keychain; the organization — Yandex 360 or Yandex Cloud.
+id = "flux.yandex"
+name = "Yandex Tracker & Calendar"
+version = "0.1.0"
+api = "0.3"
+authors = ["Egor Ageev"]
+description = "Yandex Tracker and Calendar in Flux: the board of tasks, a task with its links, comments and history, your own Claude actions on a task — Take to Work moves it, makes its branch, opens its tabs and hands Claude your prompt at once; links to tasks in code, commits and Claude's chat; the next meeting in the status bar with a reminder and Join."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/yandex.svg"
+wasm = "target/wasm32-wasip2/release/flux_yandex.wasm"
+
+[permissions]
+# Git branches, the commit message template, the tabs of a task (contexts).
+project = "write"
+network = ["oauth.yandex.ru", "login.yandex.ru", "api.tracker.yandex.net", "caldav.yandex.ru"]
+# The sign-in: Yandex ID returns to http://127.0.0.1:<port>/callback.
+server = true
+# Discuss and Plan with Claude: a session with the task.
+claude = true
+
+# Sign-in.
+[[commands]]
+id = "sign-in"
+title = "Sign In to Yandex…"
+category = "Yandex"
+
+[[commands]]
+id = "sign-out"
+title = "Sign Out of Yandex"
+category = "Yandex"
+
+[[commands]]
+id = "check-connection"
+title = "Check Yandex Connection"
+category = "Yandex"
+
+# Tracker: the keys of JetBrains Tasks & Contexts.
+[[commands]]
+id = "open-task"
+title = "Open Task…"
+category = "Tracker"
+keys = "alt-shift-n"
+
+[[commands]]
+id = "close-task"
+title = "Close Active Task…"
+category = "Tracker"
+
+[[commands]]
+id = "show-task"
+title = "Show Active Task"
+category = "Tracker"
+
+[[commands]]
+id = "open-in-browser"
+title = "Open Task in Browser"
+category = "Tracker"
+keys = "alt-shift-b"
+
+[[commands]]
+id = "log-time"
+title = "Log Time…"
+category = "Tracker"
+
+[[commands]]
+id = "toggle-timer"
+title = "Pause or Resume Task Timer"
+category = "Tracker"
+
+[[commands]]
+id = "discuss-task"
+title = "Discuss Task with Claude"
+category = "Tracker"
+
+[[commands]]
+id = "open-board"
+title = "Open Task Board"
+category = "Tracker"
+
+[[commands]]
+id = "refresh-tasks"
+title = "Refresh Tasks"
+category = "Tracker"
+
+# The active task's status bar item: its menu.
+[[commands]]
+id = "task-menu"
+title = "Active Task Menu"
+category = "Tracker"
+palette = false
+
+# A notification's Open: the task in the window (`argument` — its key).
+[[commands]]
+id = "open-notified-task"
+title = "Open Task"
+category = "Tracker"
+palette = false
+
+# Calendar.
+[[commands]]
+id = "calendar-agenda"
+title = "Show Today's Meetings"
+category = "Calendar"
+
+[[commands]]
+id = "calendar-join"
+title = "Join Meeting"
+category = "Calendar"
+
+[[commands]]
+id = "calendar-refresh"
+title = "Refresh Calendar"
+category = "Calendar"
+
+[[tool-windows]]
+id = "tracker"
+title = "Tracker"
+icon = "icons/tracker.svg"
+
+# The board: wide, among the editor's tabs; a card chosen on it opens in the Tracker window.
+[[tool-windows]]
+id = "board"
+title = "Board"
+icon = "icons/board.svg"
+location = "editor"
+
+[[status-items]]
+id = "active-task"
+
+[[status-items]]
+id = "next-meeting"
+
+# Settings → the plugin: all about the account and the organization.
+
+[[settings]]
+key = "account"
+type = "section"
+title = "Account"
+description = "Sign in with your Yandex ID — or paste a token below instead."
+
+[[settings]]
+key = "account-status"
+type = "status"
+title = "Account"
+default = "Not signed in"
+
+[[settings]]
+key = "sign-in-button"
+type = "button"
+title = "Sign In with Yandex…"
+command = "sign-in"
+
+[[settings]]
+key = "sign-out-button"
+type = "button"
+title = "Sign Out"
+command = "sign-out"
+
+[[settings]]
+key = "oauth-token"
+type = "secret"
+title = "OAuth token"
+description = "Instead of signing in: a Yandex OAuth token with tracker:read, tracker:write and calendar:all."
+
+[[settings]]
+key = "iam-token"
+type = "secret"
+title = "IAM token"
+description = "For a federated account of Yandex Cloud: `yc iam create-token` (it lives 12 hours)."
+
+[[settings]]
+key = "organization"
+type = "section"
+title = "Organization"
+description = "Tracker → Administration → Organizations shows the ID."
+
+[[settings]]
+key = "org-id"
+type = "string"
+title = "Organization ID"
+
+[[settings]]
+key = "org-type"
+type = "choice"
+title = "Organization type"
+default = "auto"
+options = [
+    { value = "auto", title = "By the ID: only digits — Yandex 360" },
+    { value = "360", title = "Yandex 360" },
+    { value = "cloud", title = "Yandex Cloud" },
+]
+
+[[settings]]
+key = "check-connection-button"
+type = "button"
+title = "Check Connection"
+command = "check-connection"
+
+[[settings]]
+key = "connection-status"
+type = "status"
+title = "Connection"
+
+[[settings]]
+key = "claude"
+type = "section"
+title = "Claude actions"
+description = "Buttons of a task's card; the board shows the one marked On the board. A prompt takes the task's {key}, {summary}, {description}, {url}, {status}, {type}, {priority}, {assignee}, {author}, {queue}, {deadline}, {sprint}, {parent}, {branch}, {links}, {comments}."
+
+[[settings]]
+key = "actions"
+type = "records"
+title = "Actions"
+
+[[settings.fields]]
+key = "name"
+title = "Name"
+type = "string"
+
+[[settings.fields]]
+key = "prompt"
+title = "Prompt"
+type = "text"
+
+[[settings.fields]]
+key = "mode"
+title = "Claude's mode"
+type = "choice"
+default = "default"
+options = [
+    { value = "default", title = "As in Claude's settings" },
+    { value = "plan", title = "Plan mode" },
+]
+
+[[settings.fields]]
+key = "start"
+title = "Take the task to work first"
+type = "bool"
+
+[[settings.fields]]
+key = "favorite"
+title = "On the board"
+type = "bool"
+
+[[settings.default]]
+name = "Take to Work"
+mode = "default"
+start = true
+favorite = true
+prompt = """
+Take Yandex Tracker task {key} "{summary}" to work: {url}
+
+{description}
+
+Links:
+{links}
+
+Comments:
+{comments}
+
+Study the code it concerns, then implement the task. Answer in the task's language."""
+
+[[settings.default]]
+name = "Plan"
+mode = "plan"
+start = false
+favorite = false
+prompt = """
+Study Yandex Tracker task {key} "{summary}" ({url}) and the code it concerns, then propose a plan; don't change anything yet.
+
+{description}
+
+Links:
+{links}
+
+Comments:
+{comments}"""
+
+[[settings]]
+key = "work"
+type = "section"
+title = "Take to work"
+description = "What an action that takes a task to work does before Claude gets the prompt."
+
+[[settings]]
+key = "work-status"
+type = "bool"
+title = "Move the task to In Progress"
+default = true
+
+[[settings]]
+key = "work-branch"
+type = "bool"
+title = "Create or check out the task's branch"
+default = true
+
+[[settings]]
+key = "work-context"
+type = "bool"
+title = "Switch to the task's tabs"
+default = true
+
+[[settings]]
+key = "work-timer"
+type = "bool"
+title = "Start the task's timer"
+default = true
+
+[[settings]]
+key = "offer-worklog"
+type = "bool"
+title = "When a task is closed, offer to log its time"
+default = true
+
+[[settings]]
+key = "tracker"
+type = "section"
+title = "Tracker"
+description = "Your list of tasks, a task's branch and its commit message."
+
+[[settings]]
+key = "my-query"
+type = "string"
+title = "My tasks"
+description = "What the Tracker window lists as My Tasks: a query in Tracker's language."
+default = "Assignee: me() Resolution: empty() \"Sort by\": Updated DESC"
+
+[[settings]]
+key = "branch-template"
+type = "string"
+title = "Branch name"
+description = "{key} — the task's key, {summary} — its title in Latin letters."
+default = "{key}-{summary}"
+
+[[settings]]
+key = "commit-template"
+type = "string"
+title = "Commit message"
+default = "{key} {summary}"
+
+[[settings]]
+key = "notifications"
+type = "section"
+title = "Notifications"
+description = "Tracker doesn't send news to Flux by itself: the plugin asks it every few minutes."
+
+[[settings]]
+key = "poll-minutes"
+type = "integer"
+title = "Check for news every (minutes)"
+default = 2
+min = 1
+max = 60
+
+[[settings]]
+key = "notify-assigned"
+type = "bool"
+title = "Tasks assigned to me"
+default = true
+
+[[settings]]
+key = "notify-summoned"
+type = "bool"
+title = "When I'm summoned"
+default = true
+
+[[settings]]
+key = "notify-status"
+type = "bool"
+title = "Status changes of my tasks"
+default = true
+
+[[settings]]
+key = "calendar"
+type = "section"
+title = "Calendar"
+
+[[settings]]
+key = "calendar-enabled"
+type = "bool"
+title = "Show meetings"
+default = true
+
+[[settings]]
+key = "remind-minutes"
+type = "integer"
+title = "Remind before a meeting (minutes)"
+description = "0 — don't remind."
+default = 5
+min = 0
+max = 60
+
+[[settings]]
+key = "hidden-calendars"
+type = "string-list"
+title = "Hidden calendars"
+
+[[settings]]
+key = "caldav-login"
+type = "string"
+title = "CalDAV login"
+description = "With an app password instead of the OAuth token: login@domain."
+
+[[settings]]
+key = "caldav-password"
+type = "secret"
+title = "App password for CalDAV"
+
+[[settings]]
+key = "advanced"
+type = "section"
+title = "Advanced"
+
+[[settings]]
+key = "client-id"
+type = "string"
+title = "ClientID of the OAuth app"
+description = "Your organization's own Yandex ID app instead of Flux's."
