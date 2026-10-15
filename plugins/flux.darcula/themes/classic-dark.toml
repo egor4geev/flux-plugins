@@ -1,9 +1,8 @@
-# Darcula: the classic dark scheme of JetBrains IDEs. Warm gray islands (the editor's #2b2b2b) on a
-# darker glass frame, popups in the tool windows' #3c3f41, Darcula's blue for selection and focus.
-# Code as IntelliJ IDEA draws it: keywords and delimiters orange, strings green, numbers blue,
-# functions yellow, fields and constants purple, annotations olive; plain names keep the text color.
-# What isn't named here comes from Flux Night.
-name = "Darcula"
+# Classic Dark: a calm, warm gray dark scheme. Warm gray islands (#2b2b2b) on a darker glass frame,
+# popups in #3c3f41, a quiet blue for selection and focus. Code: keywords and delimiters orange,
+# strings green, numbers blue, functions yellow, fields and constants purple, annotations olive;
+# plain names keep the text color. What isn't named here comes from Flux Night.
+name = "Classic Dark"
 appearance = "dark"
 
 [ui]
@@ -52,7 +51,7 @@ cursor = "#bbbbbb"
 match_text = "#589df6"
 search_match = "#32593dcc"
 search_match_active = "#3f8a4ee6"
-# Version control: JetBrains' Darcula file statuses
+# Version control: the file statuses of the scheme
 vcs_modified = "#6897bb"
 vcs_added = "#629755"
 vcs_deleted = "#6c6c6c"
@@ -125,7 +124,7 @@ variable = "#a9b7c6"
 "variable.builtin" = "#94558d"
 "variable.parameter" = "#a9b7c6"
 
-# A Darcula-tuned ANSI table. `background` is what programs assume: the island without its alpha.
+# An ANSI table tuned to the scheme. `background` is what programs assume: the island without its alpha.
 [terminal]
 foreground = "#a9b7c6"
 background = "#2b2b2b"

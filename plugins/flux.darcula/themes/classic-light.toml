@@ -1,9 +1,8 @@
-# IntelliJ Light: the light scheme of JetBrains IDEs, Darcula's pair. White islands on a pale gray
-# glass frame, the IDE's blue for selection and focus. Code as IntelliJ IDEA draws it: keywords dark
-# blue, strings green, numbers blue, function declarations teal, fields and constants purple,
-# annotations olive, comments gray italic; plain names keep the text color. What isn't named here
-# comes from Flux Day.
-name = "IntelliJ Light"
+# Classic Light: the light scheme of the pair, Classic Dark's companion. White islands on a pale gray
+# glass frame, a clear blue for selection and focus. Code: keywords dark blue, strings green, numbers
+# blue, function declarations teal, fields and constants purple, annotations olive, comments gray
+# italic; plain names keep the text color. What isn't named here comes from Flux Day.
+name = "Classic Light"
 appearance = "light"
 
 [ui]
@@ -52,7 +51,7 @@ cursor = "#000000"
 match_text = "#2e62d0"
 search_match = "#ffd96a59"
 search_match_active = "#ffc533b3"
-# Version control: JetBrains' light file statuses
+# Version control: the file statuses of the scheme
 vcs_modified = "#0032a0"
 vcs_added = "#067d17"
 vcs_deleted = "#6c707e"
@@ -125,7 +124,7 @@ variable = "#080808"
 "variable.builtin" = "#94558d"
 "variable.parameter" = "#080808"
 
-# An IntelliJ-Light-tuned ANSI table. `background` is what programs assume: the island without its alpha.
+# An ANSI table tuned to the scheme. `background` is what programs assume: the island without its alpha.
 [terminal]
 foreground = "#080808"
 background = "#ffffff"

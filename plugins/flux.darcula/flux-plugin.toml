@@ -1,16 +1,18 @@
-# Darcula and IntelliJ Light for Flux: the dark and light schemes of JetBrains IDEs, on Flux's glass.
+# Classic Dark and Classic Light for Flux: a calm dark and light pair of color schemes, on Flux's glass.
 # Tokens the themes don't name come from Flux Night (dark) and Flux Day (light): `docs/themes.md` in Flux.
+# The id stays `flux.darcula` (the plugin's first name): installed copies update by it, and Flux still
+# finds a theme chosen under its old name.
 id = "flux.darcula"
-name = "Darcula & IntelliJ Light"
-version = "0.1.0"
+name = "Classic Themes"
+version = "0.2.0"
 api = "0.2"
 authors = ["Egor Ageev"]
-description = "Darcula and IntelliJ Light: the classic dark and light schemes of JetBrains IDEs on Flux's frosted glass. A dark and a light theme — a pair for Sync with OS."
+description = "Classic Dark and Classic Light: calm color schemes — warm gray and white — on Flux's frosted glass. A dark and a light theme, a pair for Sync with OS."
 repository = "https://github.com/egor4geev/flux-plugins"
-icon = "icons/darcula.svg"
+icon = "icons/classic.svg"
 
 [[themes]]
-file = "themes/darcula.toml"
+file = "themes/classic-dark.toml"
 
 [[themes]]
-file = "themes/intellij-light.toml"
+file = "themes/classic-light.toml"
