@@ -1,21 +1,36 @@
-# Yandex Tracker & Calendar
+# Yandex Tracker
 
-Yandex Tracker and Yandex Calendar in Flux: your tasks on a board, work on a task with its branch and
-its own tabs, and the day's meetings in the status bar.
+Yandex Tracker in Flux: your tasks on a board, work on a task with its branch and its own tabs, and
+your own Claude actions on a task.
 
 ## Signing in
 
-**Settings → Plugins → Yandex Tracker & Calendar**:
+**Settings → Plugins → Yandex Tracker → Sign In with Yandex…** — that's all it takes:
 
-- **Sign In with Yandex…** opens Yandex ID in the browser; after you allow access, the browser comes
-  back to Flux on this Mac (`http://127.0.0.1:52580/callback`, or 52581, 52582 when it's busy) and the
-  page says you're signed in. The token is kept in the macOS keychain.
-- Instead: paste an **OAuth token** (with `tracker:read`, `tracker:write`, `calendar:all`), or an
-  **IAM token** for a federated account of Yandex Cloud (`yc iam create-token`, it lives 12 hours).
-- **Organization**: its ID (Tracker → Administration → Organizations) and its type — by the ID (only
-  digits — Yandex 360), Yandex 360 or Yandex Cloud. **Check Connection** says who you are in Tracker.
-- **Advanced → ClientID**: your organization's own Yandex ID app instead of Flux's (an app "for user
-  authorization" with the three redirect addresses above).
+- The browser opens Yandex ID's page; once you allow access, it comes back to Flux on this Mac and
+  says you're signed in. Flux asks for Tracker's rights and who you are, and — if you allow it — for
+  the list of your organizations. Flux keeps the token.
+- Flux then finds your organization by itself: one is taken, several are offered to choose from;
+  if it can't find any (you declined the list, or the organization is in Yandex Cloud), it shows where
+  the ID is — Tracker → Administration → Organizations — and asks for it. Then it checks the
+  connection, and the page says who you are and which organization Tracker works in.
+- **Change Organization…** — another organization of yours, or an ID by hand.
+- While Flux waits for the browser, a notification has **Cancel**; if the browser doesn't come back
+  in a while, it suggests the other ways.
+
+**Other Ways…** — when the browser sign-in doesn't suit you:
+
+- **OAuth token** — if you already have a Yandex ID token with `tracker:read` and `tracker:write`.
+- **IAM token** — for a federated account of Yandex Cloud: `yc iam create-token` gives one; it lives
+  12 hours, then Flux asks for a new one.
+- **Own app** — when your organization allows only its own Yandex ID app: its ClientID, and what it
+  is for. An app "for user authorization" signs in in the browser (it needs the redirect URIs
+  `http://127.0.0.1:52580/callback`, `:52581/callback` and `:52582/callback`); an app "for API access
+  or debugging" shows a code in the browser — paste it into Flux.
+
+A new sign-in replaces the previous one; **Sign Out** forgets it. Flux renews the token before it
+expires when Yandex allows; when it can't — or Yandex stops accepting the token — a notification
+offers to sign in again.
 
 ## Tasks
 
@@ -82,26 +97,3 @@ tags) shows what the filter finds.
 - A task opens in the Tracker window on the right with a double click or ↵.
 - The board refreshes when its tab shows, every two minutes while it shows, and when a task on it
   changes in Flux; ⟳ refreshes it now, the globe opens it in Tracker.
-
-## Calendar
-
-Your Yandex Calendar meetings, without leaving the code:
-
-- **The next meeting in the status bar** — "Daily in 12 min", "Daily now · 5 min left", "Review at
-  15:00"; nothing when the rest of the day is free. The tooltip has its time, place and whether it
-  is on Telemost.
-- **The agenda** — click the meeting in the status bar (or **Calendar: Show Today's Meetings**) for
-  today's and tomorrow's meetings; choose one to join its Telemost conference (or the link in its
-  place or description), or to open the day in Yandex Calendar when it has none.
-- **A reminder** a few minutes before a meeting (**Remind before a meeting**, 5 by default; 0 turns
-  it off), with **Join**. All-day events are in the agenda, not reminded of.
-- **Calendar: Join Meeting** — the meeting going on, or the next one within the hour.
-
-Meetings you declined and cancelled ones are left out; recurring meetings, moved and cancelled
-occurrences and time zones are read as the calendar has them. **Hidden calendars** (by name) keeps
-a calendar out — say, a colleague's you subscribed to.
-
-The calendar uses the sign-in's token. If your organization's admin doesn't allow it, or your
-account is a federated one, make an app password for CalDAV in Yandex ID (Security → App passwords
-→ Calendar) and put your `login@domain` and the password into **CalDAV login** and **App password
-for CalDAV** — a new app password starts working in a couple of hours.

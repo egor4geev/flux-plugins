@@ -19,6 +19,10 @@
 //! opens again for the next one (Esc closes it), as a dropdown of checkboxes; words of the key or
 //! the title filter as they're typed. Each board keeps its filter, and its saved filters — named
 //! (Save Current Filter…), chosen or deleted in the saved filters' menu — in the plugin's storage.
+//!
+//! The cache ([`crate::cache`]): the boards, and each board read — its columns, its sprint, its
+//! tasks (only the fields a card and the filters use). The tab shows the cached board at once and
+//! refreshes it over the columns; a board another window read a moment ago isn't read again.
 
 mod api;
 mod filter;
@@ -35,6 +39,7 @@ use serde_json::Value;
 
 use crate::Intent;
 use crate::auth::Auth;
+use crate::cache::{self, Cache, MAX_FILES};
 use crate::client::{self, ClientError};
 use crate::time;
 use crate::tracker::model::Issue;
@@ -59,6 +64,26 @@ const SAVED_FILTERS: &str = "board.saved-filters";
 const ACTIVE_TASK: &str = "active-task";
 /// While the tab shows, the board refreshes this often.
 const REFRESH_EVERY: Duration = Duration::from_secs(120);
+/// A board read this recently (seconds; by another window) isn't read again.
+const FRESH: i64 = 90;
+/// The cache's files: the boards, who the user is (shared with the Tracker), a board read.
+const CACHED_BOARDS: &str = "boards";
+const CACHED_MYSELF: &str = "myself";
+
+/// A board as the cache keeps it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedBoard {
+    board: BoardInfo,
+    columns: Vec<Column>,
+    sprint: Option<Sprint>,
+    tasks: Vec<Issue>,
+    total: usize,
+}
+
+/// The file of a board: `board-<its key>`.
+fn board_name(key: &str) -> String {
+    format!("board-{}", cache::hash(key))
+}
 
 /// What a refresh reads.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,6 +141,10 @@ pub struct Board {
     saved_picker: Option<u64>,
     /// The question of a name for the filter being saved.
     naming: Option<u64>,
+    /// The account's cache; the account — taken at the start (`started`).
+    cache: Cache,
+    account: Option<String>,
+    started: bool,
 }
 
 impl Board {
@@ -144,15 +173,111 @@ impl Board {
             facet_picker: None,
             saved_picker: None,
             naming: None,
+            cache: Cache::none(),
+            account: None,
+            started: false,
         }
     }
 
     pub fn activate(&mut self, auth: &Auth) {
-        let _ = auth;
         self.only_mine = storage::get(ONLY_MINE).unwrap_or(false);
         self.favorites = storage::get(FAVORITES).unwrap_or_default();
         self.filters = storage::get(FILTERS).unwrap_or_default();
         self.saved = storage::get(SAVED_FILTERS).unwrap_or_default();
+        self.use_account(auth);
+    }
+
+    /// Takes the account of `auth` (the Tracker deletes the other accounts' files): its cache.
+    /// Returns whether it changed.
+    fn use_account(&mut self, auth: &Auth) -> bool {
+        let account = cache::account(auth);
+        if self.started && account == self.account {
+            return false;
+        }
+        self.started = true;
+        self.cache = match &account {
+            Some(name) => Cache::at(&cache::root(), name),
+            None => Cache::none(),
+        };
+        self.account = account;
+        true
+    }
+
+    /// The board the tab opens, from the cache: shown at once, then refreshed over its columns.
+    /// Returns whether it was there, and fresh (read by a window a moment ago).
+    fn load_cached(&mut self) -> Option<bool> {
+        if self.me.is_none() {
+            self.me = self
+                .cache
+                .load::<Value>(CACHED_MYSELF)
+                .map(|saved| Me::from_myself(&saved.data));
+        }
+        if self.boards.is_none() {
+            self.boards = self
+                .cache
+                .load::<Vec<BoardInfo>>(CACHED_BOARDS)
+                .map(|saved| saved.data);
+        }
+        let boards = self.boards.as_deref()?;
+        let wanted = self
+            .current
+            .as_ref()
+            .map(BoardInfo::key)
+            .or_else(|| storage::get::<String>(LAST_BOARD));
+        let key = opening_board(boards, wanted.as_deref(), &self.favorites)?.key();
+        let saved = self.cache.load::<CachedBoard>(&board_name(&key))?;
+        let fresh = time::now() - saved.saved <= FRESH;
+        self.apply(saved.data);
+        Some(fresh)
+    }
+
+    /// The shown board as a window read it a moment ago (this one or another): drawn from the
+    /// cache, no request. False — it wants reading.
+    fn fresh_from_cache(&mut self) -> bool {
+        let key = self
+            .current
+            .as_ref()
+            .map(BoardInfo::key)
+            .unwrap_or_default();
+        match self.cache.load::<CachedBoard>(&board_name(&key)) {
+            Some(saved) if time::now() - saved.saved <= FRESH => {
+                self.apply(saved.data);
+                self.render();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn apply(&mut self, cached: CachedBoard) {
+        ui::set_title(WINDOW, &trf("Board: {0}", &[&cached.board.name]));
+        self.columns_of = Some(cached.board.key());
+        self.current = Some(cached.board);
+        self.columns = cached.columns;
+        self.sprint = cached.sprint;
+        self.tasks = cached.tasks;
+        self.total = cached.total;
+        self.phase = Phase::Ready;
+    }
+
+    /// The board just read, into the cache (the newest boards kept).
+    fn save(&self) {
+        let Some(board) = &self.current else {
+            return;
+        };
+        let cached = CachedBoard {
+            board: board.clone(),
+            columns: self.columns.clone(),
+            sprint: self.sprint.clone(),
+            tasks: self.tasks.clone(),
+            total: self.total,
+        };
+        if self
+            .cache
+            .save(&board_name(&board.key()), &cached, time::now())
+        {
+            self.cache.prune("board-", MAX_FILES);
+        }
     }
 
     pub fn deactivate(&mut self) {
@@ -178,8 +303,12 @@ impl Board {
         let _ = auth;
     }
 
-    /// A sign-in, a sign-out, another organization: the boards are someone else's now.
+    /// A sign-in, a sign-out, another organization: the boards are someone else's now. (The
+    /// start has taken the account already: nothing changes.)
     pub fn auth_changed(&mut self, auth: &Auth) {
+        if !self.use_account(auth) {
+            return;
+        }
         self.boards = None;
         self.current = None;
         self.columns.clear();
@@ -233,6 +362,24 @@ impl Board {
             Event::ToolWindowShown(_) => {
                 self.shown = true;
                 self.start_timer();
+                if self.current.is_none() && auth.headers().is_some() {
+                    // The cached board at once; refreshed over its columns unless it's fresh.
+                    match self.load_cached() {
+                        Some(true) => {
+                            self.render();
+                            return Vec::new();
+                        }
+                        Some(false) => {
+                            self.render();
+                            self.refresh(auth, Scope::Tasks);
+                            return Vec::new();
+                        }
+                        None => {}
+                    }
+                }
+                if matches!(self.phase, Phase::Ready) && self.fresh_from_cache() {
+                    return Vec::new();
+                }
                 let scope = if self.current.is_none() {
                     Scope::All
                 } else {
@@ -250,7 +397,7 @@ impl Board {
                 Vec::new()
             }
             Event::Timer(_) => {
-                if self.shown && matches!(self.phase, Phase::Ready) {
+                if self.shown && matches!(self.phase, Phase::Ready) && !self.fresh_from_cache() {
                     self.refresh(auth, Scope::Tasks);
                 }
                 Vec::new()
@@ -466,6 +613,7 @@ impl Board {
         self.refreshing = false;
         match result {
             Ok(()) => {
+                self.save();
                 self.stale = None;
                 self.phase = if self.current.is_some() {
                     Phase::Ready
@@ -483,14 +631,22 @@ impl Board {
     fn load(&mut self, auth: &Auth, scope: Scope) -> Result<(), ClientError> {
         if self.me.is_none() {
             match api::myself(auth) {
-                Ok(me) => self.me = Some(me),
+                Ok(value) => {
+                    self.cache.save(CACHED_MYSELF, &value, time::now());
+                    self.me = Some(Me::from_myself(&value));
+                }
                 Err(err @ (ClientError::SignedOut | ClientError::Unauthorized)) => return Err(err),
                 // Only Mine waits for the next refresh; the board shows.
-                Err(err) => log::warn(&format!("Couldn't learn who the user is: {}", err.message())),
+                Err(err) => log::warn(&format!(
+                    "Couldn't learn who the user is: {}",
+                    err.message()
+                )),
             }
         }
         if scope == Scope::All || self.boards.is_none() {
-            self.boards = Some(api::boards(auth)?);
+            let boards = api::boards(auth)?;
+            self.cache.save(CACHED_BOARDS, &boards, time::now());
+            self.boards = Some(boards);
         }
         let boards = self.boards.as_deref().unwrap_or_default();
         let wanted = self
@@ -498,8 +654,7 @@ impl Board {
             .as_ref()
             .map(BoardInfo::key)
             .or_else(|| storage::get::<String>(LAST_BOARD));
-        let Some(board) = opening_board(boards, wanted.as_deref(), &self.favorites).cloned()
-        else {
+        let Some(board) = opening_board(boards, wanted.as_deref(), &self.favorites).cloned() else {
             self.current = None;
             return Ok(());
         };
@@ -508,7 +663,10 @@ impl Board {
             // A kanban board has no sprints (the API answers so); a failure here only loses the
             // sprint.
             let sprints = api::sprints(auth, &board.key()).unwrap_or_else(|err| {
-                log::warn(&format!("Couldn't read the board's sprints: {}", err.message()));
+                log::warn(&format!(
+                    "Couldn't read the board's sprints: {}",
+                    err.message()
+                ));
                 Vec::new()
             });
             self.sprint = model::current_sprint(&sprints, &today());
@@ -560,7 +718,13 @@ impl Board {
 
     /// The tasks of the board before the filters: the sprint's.
     fn board_tasks(&self) -> Vec<Issue> {
-        visible_tasks(&self.tasks, self.sprint.as_ref(), false, None, &BoardFilter::default())
+        visible_tasks(
+            &self.tasks,
+            self.sprint.as_ref(),
+            false,
+            None,
+            &BoardFilter::default(),
+        )
     }
 
     /// The tasks a facet's values are counted on: those the other filters (and Only mine) let
@@ -640,10 +804,15 @@ impl Board {
         let Some(key) = choice.strip_prefix("value:") else {
             return;
         };
-        let name = filter::options(&self.board_tasks(), facet, filter.chosen(facet), self.me.as_ref())
-            .into_iter()
-            .find(|value| value.key == key)
-            .map_or_else(|| key.to_string(), |value| value.name);
+        let name = filter::options(
+            &self.board_tasks(),
+            facet,
+            filter.chosen(facet),
+            self.me.as_ref(),
+        )
+        .into_iter()
+        .find(|value| value.key == key)
+        .map_or_else(|| key.to_string(), |value| value.name);
         filter.toggle(facet, key, &name);
         self.set_filter(filter);
         self.open_facet_picker(facet);
@@ -679,9 +848,12 @@ impl Board {
         }
         if let Some(index) = current {
             items.push(
-                picker::item(&format!("delete:{index}"), &trf("Delete «{0}»", &[&saved[index].name]))
-                    .icon("trash")
-                    .group(&actions),
+                picker::item(
+                    &format!("delete:{index}"),
+                    &trf("Delete «{0}»", &[&saved[index].name]),
+                )
+                .icon("trash")
+                .group(&actions),
             );
         }
         if !filter.is_empty() {
@@ -693,7 +865,10 @@ impl Board {
                 &tr("Choose filters — then save them here under a name"),
             ));
         }
-        let id = Picker::menu().items(items).under(WINDOW, view::SAVED).open();
+        let id = Picker::menu()
+            .items(items)
+            .under(WINDOW, view::SAVED)
+            .open();
         self.saved_picker = Some(id);
     }
 
@@ -704,7 +879,9 @@ impl Board {
         if choice == "save" {
             let filter = self.filter();
             let id = flux_plugin_api::dialog::AskText::new(&tr("Save Filter"), &tr("Save"))
-                .message(&tr("The filter is kept for this board, in the saved filters' menu."))
+                .message(&tr(
+                    "The filter is kept for this board, in the saved filters' menu.",
+                ))
                 .text(&filter::suggested_name(&filter))
                 .placeholder(&tr("A name"))
                 .send();
@@ -760,10 +937,12 @@ impl Board {
         };
         // Each column's tasks before the filters and Only mine: "2 of 5".
         let totals: Vec<(String, usize)> = match self.phase {
-            Phase::Ready => model::arrange(&self.columns, &self.board_tasks(), &tr("Other statuses"))
-                .into_iter()
-                .map(|lane| (lane.key, lane.tasks.len()))
-                .collect(),
+            Phase::Ready => {
+                model::arrange(&self.columns, &self.board_tasks(), &tr("Other statuses"))
+                    .into_iter()
+                    .map(|lane| (lane.key, lane.tasks.len()))
+                    .collect()
+            }
             _ => Vec::new(),
         };
         let filter = self.filter();
@@ -939,11 +1118,41 @@ mod tests {
             issue("A-3", Some("7"), in_7),
             issue("A-4", None, None),
         ];
-        assert_eq!(keys(&visible_tasks(&tasks, None, false, Some(&me), &BoardFilter::default())), ["A-1", "A-2", "A-3", "A-4"]);
-        assert_eq!(keys(&visible_tasks(&tasks, Some(&sprint), false, Some(&me), &BoardFilter::default())), ["A-1", "A-2"]);
-        assert_eq!(keys(&visible_tasks(&tasks, Some(&sprint), true, Some(&me), &BoardFilter::default())), ["A-1"]);
+        assert_eq!(
+            keys(&visible_tasks(
+                &tasks,
+                None,
+                false,
+                Some(&me),
+                &BoardFilter::default()
+            )),
+            ["A-1", "A-2", "A-3", "A-4"]
+        );
+        assert_eq!(
+            keys(&visible_tasks(
+                &tasks,
+                Some(&sprint),
+                false,
+                Some(&me),
+                &BoardFilter::default()
+            )),
+            ["A-1", "A-2"]
+        );
+        assert_eq!(
+            keys(&visible_tasks(
+                &tasks,
+                Some(&sprint),
+                true,
+                Some(&me),
+                &BoardFilter::default()
+            )),
+            ["A-1"]
+        );
         // The user unknown: Only Mine can't filter.
-        assert_eq!(visible_tasks(&tasks, None, true, None, &BoardFilter::default()).len(), 4);
+        assert_eq!(
+            visible_tasks(&tasks, None, true, None, &BoardFilter::default()).len(),
+            4
+        );
     }
 
     #[test]
@@ -978,6 +1187,9 @@ mod tests {
             ..Sprint::default()
         };
         let tasks = vec![issue("A-1", None, None), issue("A-2", None, None)];
-        assert_eq!(visible_tasks(&tasks, Some(&sprint), false, None, &BoardFilter::default()).len(), 2);
+        assert_eq!(
+            visible_tasks(&tasks, Some(&sprint), false, None, &BoardFilter::default()).len(),
+            2
+        );
     }
 }

@@ -7,9 +7,9 @@
 
 use flux_plugin_api::picker::{self, Picker};
 use flux_plugin_api::view::{
-    RowSpec, SpanStyle, Tone, Tree, badge, button, column, divider, editable_property,
-    icon_button, label, markdown, menu_badge, multiline_field, progress, properties, property, row,
-    set_view, spacer, span, text, toolbar,
+    RowSpec, SpanStyle, Tone, Tree, badge, button, column, divider, editable_property, icon_button,
+    label, markdown, menu_badge, multiline_field, progress, properties, property, row, set_view,
+    spacer, span, text, toolbar,
 };
 use flux_plugin_api::{UiEvent, UiInput, dialog, log, notify, storage, system, tr, trf};
 
@@ -32,11 +32,23 @@ const OPEN_TASK_FIRST: u32 = 50;
 pub(super) struct List {
     pub issues: Vec<Issue>,
     pub total: u32,
+    /// Nothing to show: why (else a failed refresh is [`List::problem`], over the tasks shown).
     pub error: Option<String>,
+    /// A refresh failed: the tasks shown are older; why, quietly under them.
+    pub problem: Option<String>,
     pub loaded_at: Option<i64>,
     pub loading: bool,
     /// Load again before showing.
     pub stale: bool,
+    /// The query the tasks are of.
+    pub query: String,
+    /// When they were read (here, or by the window that cached them).
+    pub saved: i64,
+    /// The cache's file of the list as last read or written here: another window's write
+    /// changes it.
+    pub stamp: Option<std::time::SystemTime>,
+    /// A failed list isn't read again before this.
+    pub next_try: i64,
     /// A new filter gives the tree a new id: its groups expand afresh.
     pub generation: u32,
 }
@@ -80,9 +92,14 @@ impl Card {
 impl Tracker {
     /// Shows the window's content, if the window is open.
     pub(super) fn render(&mut self, auth: &Auth) {
-        if !self.shown {
-            return;
+        if self.shown {
+            self.draw(auth);
         }
+    }
+
+    /// Sends the window's content, shown or not: at the start the cached list is there before
+    /// the window opens.
+    pub(super) fn draw(&mut self, auth: &Auth) {
         let root = match &self.card {
             Some(_) => self.card_view(),
             None => self.list_view(auth),
@@ -104,7 +121,7 @@ impl Tracker {
         }
     }
 
-    fn filter_query(&self) -> String {
+    pub(super) fn filter_query(&self) -> String {
         match &self.filter {
             Filter::Mine => settings::text(MY_QUERY)
                 .unwrap_or_else(|| "Assignee: me() Resolution: empty()".to_string()),
@@ -118,31 +135,64 @@ impl Tracker {
         }
     }
 
+    /// Reads the filter's list (only the fields it shows) and keeps it in the cache. A failure
+    /// keeps the tasks shown, with a quiet line of why; only an empty list says it instead.
     pub(super) fn load_list(&mut self, auth: &Auth) {
         if auth.headers().is_none() || auth.organization().is_none() {
             return;
         }
+        let query = self.filter_query();
+        if self.list.query != query && !self.load_cached_list() {
+            self.list.issues.clear();
+            self.list.total = 0;
+            self.list.query = query.clone();
+            self.list.loaded_at = None;
+        }
         self.list.loading = true;
         self.render(auth);
-        let query = self.filter_query();
-        match api::search(auth, Search::Query(&query), api::PAGE) {
+        let now = time::now();
+        match api::search(auth, Search::Query(&query), api::PAGE, api::LIST_FIELDS) {
             Ok((issues, total)) => {
                 self.list.issues = issues;
                 self.list.total = total;
                 self.list.error = None;
+                self.list.problem = None;
+                self.list.query = query;
+                self.list.saved = now;
+                self.list.loaded_at = Some(now);
+                self.list.next_try = 0;
+                self.list.stale = false;
+                self.save_list();
             }
-            Err(err) => self.list.error = Some(err.message()),
+            Err(err) if self.list.loaded_at.is_some() => {
+                self.list.problem = Some(err.message());
+                self.list_failed(now, &err);
+            }
+            Err(err) => {
+                self.list.error = Some(err.message());
+                self.list_failed(now, &err);
+            }
         }
         self.list.loading = false;
-        self.list.stale = false;
-        self.list.loaded_at = Some(time::now());
     }
 
+    /// Another filter: its cached tasks at once, then read (unless another window just did).
     pub(super) fn set_filter(&mut self, filter: Filter, auth: &Auth) {
         storage::set("filter", &filter);
         self.filter = filter;
-        self.list.issues.clear();
         self.list.generation += 1;
+        self.list.next_try = 0;
+        self.list.problem = None;
+        if self.load_cached_list() {
+            self.render(auth);
+            if !self.list_due(time::now()) {
+                return;
+            }
+        } else {
+            self.list.issues.clear();
+            self.list.total = 0;
+            self.list.error = None;
+        }
         self.load_list(auth);
         self.render(auth);
     }
@@ -200,7 +250,10 @@ impl Tracker {
             ));
         } else if let Some(error) = &self.list.error {
             children.push(message("list-error", error.clone(), false));
-        } else if self.list.loading && self.list.issues.is_empty() {
+        } else if self.list.issues.is_empty()
+            && (self.list.loading || self.list.loaded_at.is_none())
+        {
+            // Not read yet (nothing cached): a progress, never "no tasks".
             children.push(progress("loading", None));
         } else {
             children.push(self.tree());
@@ -225,7 +278,11 @@ impl Tracker {
         };
         let mut tree = Tree::new().empty_text(&empty);
         for (_, name, issues) in &groups {
-            let name = if name.is_empty() { tr("No status") } else { name.clone() };
+            let name = if name.is_empty() {
+                tr("No status")
+            } else {
+                name.clone()
+            };
             let group = tree.add(
                 RowSpec::spans(&format!("status:{name}"), vec![span(&name).bold()])
                     .badge(&issues.len().to_string())
@@ -249,19 +306,23 @@ impl Tracker {
                 tree.add_child(group, row);
             }
         }
+        if let Some(problem) = &self.list.problem {
+            tree.add(RowSpec::spans(
+                "problem",
+                vec![span(&trf("Couldn't refresh: {0}", &[problem])).tone(Tone::Dim)],
+            ));
+        }
         if self.list.total > self.list.issues.len() as u32 {
-            tree.add(
-                RowSpec::spans(
-                    "more",
-                    vec![
-                        span(&trf(
-                            "{0} of {1}: narrow the filter to see the rest",
-                            &[&self.list.issues.len(), &self.list.total],
-                        ))
-                        .tone(Tone::Dim),
-                    ],
-                ),
-            );
+            tree.add(RowSpec::spans(
+                "more",
+                vec![
+                    span(&trf(
+                        "{0} of {1}: narrow the filter to see the rest",
+                        &[&self.list.issues.len(), &self.list.total],
+                    ))
+                    .tone(Tone::Dim),
+                ],
+            ));
         }
         tree.into_element(&format!("tasks-{}", self.list.generation))
     }
@@ -470,7 +531,9 @@ impl Tracker {
         buttons.push(
             button("discuss", &tr("Discuss"))
                 .icon("claude")
-                .tooltip(&tr("Discuss with Claude: the task goes along, you write the question"))
+                .tooltip(&tr(
+                    "Discuss with Claude: the task goes along, you write the question",
+                ))
                 .into(),
         );
         if self.work.active_key().as_deref() == Some(issue.key.as_str()) {
@@ -507,7 +570,10 @@ impl Tracker {
             }
             children.push(text(
                 &format!("comment-{index}-head"),
-                [span(&author).bold(), span(&format!("   {when}")).tone(Tone::Dim)],
+                [
+                    span(&author).bold(),
+                    span(&format!("   {when}")).tone(Tone::Dim),
+                ],
             ));
             children.push(markdown(&format!("comment-{index}"), &comment.text));
         }
@@ -560,7 +626,10 @@ impl Tracker {
             }
             children.push(text(
                 &format!("change-{index}-head"),
-                [span(&author).bold(), span(&format!("   {when}")).tone(Tone::Dim)],
+                [
+                    span(&author).bold(),
+                    span(&format!("   {when}")).tone(Tone::Dim),
+                ],
             ));
             if entry.fields.is_empty() {
                 children.push(text(
@@ -602,7 +671,10 @@ impl Tracker {
     fn learn_fields(&mut self, queue: Option<&str>, auth: &Auth) {
         if self.field_meta.is_none() {
             match api::fields(auth) {
-                Ok(metas) => self.field_meta = Some(metas),
+                Ok(metas) => {
+                    self.save_fields(&metas);
+                    self.field_meta = Some(metas);
+                }
                 Err(err) => {
                     log::warn(&format!("Fields: {}", err.message()));
                     self.field_meta = Some(Vec::new());
@@ -844,11 +916,18 @@ impl Tracker {
             Filter::Query(_) => "query".to_string(),
         };
         let mark = |item: picker::Item, key: &str| {
-            if key == current { item.icon("check") } else { item }
+            if key == current {
+                item.icon("check")
+            } else {
+                item
+            }
         };
         let mut menu = Picker::menu()
             .item(mark(picker::item("mine", &tr("My Tasks")), "mine"))
-            .item(mark(picker::item("following", &tr("Following")), "following"));
+            .item(mark(
+                picker::item("following", &tr("Following")),
+                "following",
+            ));
         for queue in &self.queues {
             let key = format!("queue:{}", queue.key);
             menu = menu.item(mark(
@@ -897,7 +976,9 @@ impl Tracker {
     /// Open Task (⌥⇧N): a live picker over the tasks — mine at once, a key or words searched.
     pub(super) fn open_task_picker(&mut self, auth: &Auth) {
         if auth.headers().is_none() || auth.organization().is_none() {
-            notify::info(&tr("Sign in to Yandex and set the organization in the plugin's settings"));
+            notify::info(&tr(
+                "Sign in to Yandex and set the organization in the plugin's settings",
+            ));
             system::open_settings();
             return;
         }
@@ -906,7 +987,13 @@ impl Tracker {
         } else {
             let query = settings::text(MY_QUERY)
                 .unwrap_or_else(|| "Assignee: me() Resolution: empty()".to_string());
-            api::search(auth, Search::Query(&query), OPEN_TASK_FIRST).map(|(issues, _)| issues)
+            api::search(
+                auth,
+                Search::Query(&query),
+                OPEN_TASK_FIRST,
+                api::PICKER_FIELDS,
+            )
+            .map(|(issues, _)| issues)
         };
         self.open_task_items = mine.unwrap_or_else(|err| {
             log::warn(&format!("Open Task: {}", err.message()));
@@ -915,7 +1002,11 @@ impl Tracker {
         let group = tr("My Tasks");
         let id = Picker::new(&tr("Find a task by its key or words"))
             .live()
-            .items(self.open_task_items.iter().map(|issue| task_item(issue, &group)))
+            .items(
+                self.open_task_items
+                    .iter()
+                    .map(|issue| task_item(issue, &group)),
+            )
             .empty_text(&tr("No tasks found"))
             .open();
         self.pickers.insert(id, PickerPurpose::OpenTask);
@@ -940,13 +1031,20 @@ impl Tracker {
         }
         picker::update(id, local.iter().map(|issue| task_item(issue, &mine)), true);
         let found = if words::is_key(query) {
-            api::search(auth, Search::Keys(&[query.to_ascii_uppercase()]), OPEN_TASK_FIRST)
+            api::search(
+                auth,
+                Search::Keys(&[query.to_ascii_uppercase()]),
+                OPEN_TASK_FIRST,
+                api::PICKER_FIELDS,
+            )
         } else {
-            let search = format!(
-                "Summary: {} \"Sort by\": Updated DESC",
-                words::quote(query)
-            );
-            api::search(auth, Search::Query(&search), OPEN_TASK_FIRST)
+            let search = format!("Summary: {} \"Sort by\": Updated DESC", words::quote(query));
+            api::search(
+                auth,
+                Search::Query(&search),
+                OPEN_TASK_FIRST,
+                api::PICKER_FIELDS,
+            )
         };
         let found = found.map(|(issues, _)| issues).unwrap_or_else(|err| {
             log::warn(&format!("Open Task: {}", err.message()));

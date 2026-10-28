@@ -1,43 +1,74 @@
-//! The sign-in: Yandex ID's OAuth — the code with PKCE (S256, no secret) through the browser, back
-//! to the plugin's server on `http://127.0.0.1:<port>/callback` (Yandex checks the port: the first
-//! free of [`PORTS`], all three registered with the app), then `POST https://oauth.yandex.ru/token`;
-//! who signed in from `login.yandex.ru/info`; the token and the account in the keychain (`secrets`).
-//! Instead of the sign-in — a pasted OAuth token (`oauth-token`) or an IAM token for a federated
-//! account of Yandex Cloud (`iam-token`): settings of the secret kind, the same keychain. The
-//! organization: `org-id`, `org-type` (by the ID: only digits — Yandex 360, `X-Org-ID`; else Yandex
-//! Cloud, `X-Cloud-Org-ID`). The settings page's lines: who is signed in, the connection's check.
+//! The account: who is signed in to Yandex, how, and in which organization.
+//!
+//! - One way at a time: Flux's own Yandex ID app in the browser (the main one), or — under Other
+//!   Ways — a pasted OAuth token, an IAM token of Yandex Cloud, the organization's own app (in the
+//!   browser, or with the code Yandex shows). A new sign-in replaces the previous one's tokens
+//!   ([`signin`]).
+//! - After any sign-in the plugin finds the organization by itself — Yandex 360's list of the
+//!   user's organizations: one is chosen, several are offered, none asks for the ID with directions
+//!   ([`orgs`]) — and checks the connection (Tracker's `/myself`).
+//! - The token's lifetime: `expires_in` and `refresh_token` are kept; near the end the plugin
+//!   refreshes the token, and when it can't, or Yandex rejects the token, a sticky notification
+//!   offers to sign in again.
+//! - The settings page: a line about the account and one about the organization, with their
+//!   buttons; the buttons' `argument` says which flow (Other Ways, Cancel, Change Organization).
+//!
+//! Flux's secrets keep the tokens (`account.token`, `account.refresh`; the old settings' secrets
+//! `oauth-token`, `iam-token` — the same keys); the plugin's storage keeps how the account signed
+//! in, when its token expires and who it is (`session`), and the organization (`organization`).
 
+mod orgs;
+mod signin;
+
+use std::cell::Cell;
 use std::time::Duration;
 
-use flux_plugin_api::bindings::flux::plugin::server::ServerRequest;
+use flux_plugin_api::dialog::Values;
+use flux_plugin_api::host::commands;
+use flux_plugin_api::notify::Notice;
 use flux_plugin_api::settings::Tone;
-use flux_plugin_api::{CommandContext, Event, http, log, notify, secrets, server, system, timers};
+use flux_plugin_api::{
+    CommandContext, CommandSource, Event, log, secrets, server, storage, system, timers,
+};
 use flux_plugin_api::{settings as page, tr, trf};
 use serde::{Deserialize, Serialize};
 
-use crate::pkce::Pkce;
-use crate::settings::{
-    ACCOUNT_STATUS, CLIENT_ID, CONNECTION_STATUS, IAM_TOKEN, OAUTH_TOKEN, ORG_ID, ORG_TYPE, text,
-};
+pub use orgs::Organization;
+
+use crate::client::ClientError;
+use crate::settings::{ACCOUNT_STATUS, ORGANIZATION_STATUS};
 use crate::tracker::api;
 
 pub const SIGN_IN: &str = "sign-in";
 pub const SIGN_OUT: &str = "sign-out";
 pub const CHECK_CONNECTION: &str = "check-connection";
 
-/// The ports Yandex returns to: registered with the app as `http://127.0.0.1:<port>/callback`.
-pub const PORTS: [u16; 3] = [52580, 52581, 52582];
-/// Flux's Yandex ID app; the `client-id` setting replaces it. Empty until the app is registered.
-const BUILTIN_CLIENT_ID: &str = "";
-const AUTHORIZE: &str = "https://oauth.yandex.ru/authorize";
-const TOKEN: &str = "https://oauth.yandex.ru/token";
-const INFO: &str = "https://login.yandex.ru/info?format=json";
-/// A sign-in the browser doesn't finish is abandoned.
-const SIGN_IN_WAIT: Duration = Duration::from_secs(5 * 60);
+/// What a settings button or a notification's action carries to `sign-in`.
+const OTHER_WAYS: &str = "other";
+const CANCEL: &str = "cancel";
+/// Sign in again the way the account signed in last time.
+const AGAIN: &str = "again";
+/// … and to `check-connection`: Change Organization.
+const CHANGE_ORGANIZATION: &str = "organization";
 
-/// The keychain's keys of the signed-in account.
+/// The secrets' keys: the sign-in's tokens, the old settings' secrets.
 const ACCOUNT_TOKEN: &str = "account.token";
+const ACCOUNT_REFRESH: &str = "account.refresh";
+/// Who signed in, as versions before the session kept it.
 const ACCOUNT_INFO: &str = "account.info";
+const OAUTH_TOKEN: &str = "oauth-token";
+const IAM_TOKEN: &str = "iam-token";
+/// The plugin's storage: [`Session`].
+const SESSION: &str = "session";
+
+/// How often the token's lifetime is looked at while Flux runs.
+const LIFETIME_CHECK: Duration = Duration::from_secs(6 * 60 * 60);
+/// A token is refreshed this long before it expires (Yandex advises every few months)…
+const REFRESH_BEFORE: i64 = 30 * 24 * 60 * 60;
+/// …and the user is told to sign in again this long before, when it can't be.
+const WARN_BEFORE: i64 = 7 * 24 * 60 * 60;
+/// An IAM token lives 12 hours.
+const IAM_LIFETIME: i64 = 12 * 60 * 60;
 
 /// How requests to Yandex authorize: `Authorization: OAuth <token>` or `Bearer <IAM token>`.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,49 +87,7 @@ impl Credentials {
     }
 }
 
-/// The organization's header: `X-Org-ID` (Yandex 360) or `X-Cloud-Org-ID` (Yandex Cloud).
-#[derive(Clone, Debug, PartialEq)]
-pub enum Organization {
-    Yandex360(String),
-    Cloud(String),
-}
-
-impl Organization {
-    /// From the settings: the ID and its type (`auto` — by the ID: only digits are Yandex 360's).
-    pub fn of(id: &str, kind: &str) -> Option<Organization> {
-        let id = id.trim();
-        if id.is_empty() {
-            return None;
-        }
-        let yandex_360 = match kind {
-            "360" => true,
-            "cloud" => false,
-            _ => id.chars().all(|c| c.is_ascii_digit()),
-        };
-        Some(if yandex_360 {
-            Organization::Yandex360(id.to_string())
-        } else {
-            Organization::Cloud(id.to_string())
-        })
-    }
-
-    pub fn header(&self) -> (String, String) {
-        match self {
-            Organization::Yandex360(id) => ("X-Org-ID".into(), id.clone()),
-            Organization::Cloud(id) => ("X-Cloud-Org-ID".into(), id.clone()),
-        }
-    }
-
-    /// "Yandex 360 · 123456".
-    pub fn describe(&self) -> String {
-        match self {
-            Organization::Yandex360(id) => format!("{} · {id}", tr("Yandex 360")),
-            Organization::Cloud(id) => format!("{} · {id}", tr("Yandex Cloud")),
-        }
-    }
-}
-
-/// Who signed in, as `login.yandex.ru/info` says.
+/// Who signed in, as `login.yandex.ru/info` (or Tracker's `/myself`) says.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Account {
@@ -107,25 +96,100 @@ pub struct Account {
     pub email: String,
 }
 
-/// A sign-in waiting for the browser.
-struct Pending {
-    pkce: Pkce,
+impl Account {
+    /// "Егор Агеев (egor.ageev)", or the login alone.
+    fn who(&self) -> String {
+        if self.display.is_empty() || self.display == self.login {
+            self.login.clone()
+        } else if self.login.is_empty() {
+            self.display.clone()
+        } else {
+            format!("{} ({})", self.display, self.login)
+        }
+    }
+
+    fn is_known(&self) -> bool {
+        !self.login.is_empty() || !self.display.is_empty()
+    }
+}
+
+/// How the account signed in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Way {
+    /// Flux's app, in the browser.
+    #[default]
+    Flux,
+    /// The organization's own app "for user authorization", in the browser.
+    App,
+    /// The organization's own app "for API access or debugging": the code from Yandex's page.
+    Code,
+    /// A pasted OAuth token.
+    Token,
+    /// An IAM token of Yandex Cloud.
+    Iam,
+}
+
+/// What the plugin knows of the sign-in besides its tokens (the plugin's storage).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct Session {
+    way: Way,
+    /// The app the token came from: refreshing needs it. Empty — unknown.
     client_id: String,
-    redirect: String,
-    timer: u64,
+    /// When the token stops working, in seconds since 1970; 0 — unknown.
+    expires_at: i64,
+    /// Who it is; none until Yandex or Tracker said.
+    account: Option<Account>,
+}
+
+/// What an open dialog asks.
+enum Question {
+    /// Other Ways to Sign In: the buttons of the ways.
+    OtherWays,
+    /// A pasted OAuth token.
+    TokenForm,
+    /// An IAM token.
+    IamForm,
+    /// The organization's own app: its ClientID and kind.
+    AppForm,
+    /// The code Yandex's page shows (a debug app).
+    CodeForm,
+    /// Several organizations found: a button each.
+    ChooseOrganization(Vec<Organization>),
+    /// Many found: a dropdown.
+    ChooseOrganizationForm(Vec<Organization>),
+    /// None found: where the ID is.
+    MissingOrganization,
+    /// The ID and the type, by hand.
+    OrganizationForm,
 }
 
 pub struct Auth {
-    /// The signed-in account's token and who it is.
+    /// The token of a sign-in in the browser or with a code.
     token: Option<String>,
-    account: Option<Account>,
-    /// The tokens of the settings.
+    /// A pasted OAuth token, an IAM token.
     pasted: Option<String>,
     iam: Option<String>,
+    session: Session,
     organization: Option<Organization>,
-    pending: Option<Pending>,
+    /// The last check of the connection since the sign-in or the launch: none — not checked; an
+    /// error — what Tracker said.
+    checked: Option<Result<(), ClientError>>,
+    /// A sign-in waiting for the browser.
+    pending: Option<signin::Pending>,
+    /// A sign-in with a code waiting for the user to paste it.
+    code: Option<signin::CodeSignIn>,
+    /// The open dialogs and forms.
+    asked: Vec<(u64, Question)>,
     /// Stops the server a moment after the browser got its page.
     stop_timer: Option<u64>,
+    lifetime_timer: Option<u64>,
+    /// A refresh failed this launch: not tried again until the next.
+    refresh_failed: bool,
+    /// The user was told this launch that the token expires, or that Yandex rejected it.
+    expiry_told: bool,
+    rejected_told: Cell<bool>,
     changed: bool,
 }
 
@@ -133,74 +197,90 @@ impl Auth {
     pub fn new() -> Self {
         Auth {
             token: None,
-            account: None,
             pasted: None,
             iam: None,
+            session: Session::default(),
             organization: None,
+            checked: None,
             pending: None,
+            code: None,
+            asked: Vec::new(),
             stop_timer: None,
+            lifetime_timer: None,
+            refresh_failed: false,
+            expiry_told: false,
+            rejected_told: Cell::new(false),
             changed: false,
         }
     }
 
     pub fn activate(&mut self) {
-        self.token = secrets::get(ACCOUNT_TOKEN).filter(|token| !token.is_empty());
-        self.account = self.token.as_ref().and_then(|_| {
-            secrets::get(ACCOUNT_INFO).and_then(|info| serde_json::from_str(&info).ok())
-        });
-        self.read_settings();
-        self.show_account();
+        self.token = secret(ACCOUNT_TOKEN);
+        self.pasted = secret(OAUTH_TOKEN);
+        self.iam = secret(IAM_TOKEN);
+        self.session = storage::get(SESSION).unwrap_or_default();
+        if self.session.account.is_none() && self.token.is_some() {
+            // Signed in by a version before the session: who it is was in the secrets.
+            self.session.account = secrets::get(ACCOUNT_INFO)
+                .and_then(|info| serde_json::from_str::<Account>(&info).ok())
+                .filter(Account::is_known);
+        }
+        self.organization = orgs::stored();
+        self.lifetime_timer = Some(timers::every(LIFETIME_CHECK));
         self.changed = true;
+        self.show();
+        self.look_at_lifetime();
+        if self.credentials().is_some() && self.organization.is_none() {
+            // Signed in, but the organization isn't known (the settings of versions before kept
+            // it): one found is taken at once; otherwise a notification offers to choose.
+            self.find_organization_quietly();
+        }
     }
 
     pub fn deactivate(&mut self) {
-        if self.pending.take().is_some() {
+        if let Some(pending) = self.pending.take() {
+            pending.close();
             server::stop();
         }
-    }
-
-    pub fn settings_changed(&mut self) {
-        let before = (self.credentials(), self.organization.clone());
-        self.read_settings();
-        if (self.credentials(), self.organization.clone()) != before {
-            self.changed = true;
-            page::clear_status(CONNECTION_STATUS);
+        if let Some(timer) = self.lifetime_timer.take() {
+            timers::cancel(timer);
         }
-        self.show_account();
     }
 
-    fn read_settings(&mut self) {
-        let secret = |key: &str| {
-            secrets::get(key)
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        };
-        self.pasted = secret(OAUTH_TOKEN);
-        self.iam = secret(IAM_TOKEN);
-        self.organization = Organization::of(
-            &text(ORG_ID).unwrap_or_default(),
-            &text(ORG_TYPE).unwrap_or_default(),
-        );
+    /// The page's values changed: nothing of the account is among them any more.
+    pub fn settings_changed(&mut self) {
+        self.show();
     }
 
     pub fn run_command(&mut self, command: &str, context: &CommandContext) {
-        let _ = context;
-        match command {
-            SIGN_IN => self.sign_in(),
-            SIGN_OUT => self.sign_out(),
-            CHECK_CONNECTION => self.check_connection(),
+        let from_settings = context.source == CommandSource::Settings;
+        match (command, context.argument.as_deref()) {
+            (SIGN_IN, Some(OTHER_WAYS)) => self.ask_other_ways(from_settings),
+            (SIGN_IN, Some(CANCEL)) => self.cancel_sign_in(),
+            (SIGN_IN, Some(AGAIN)) => self.sign_in_again(from_settings),
+            (SIGN_IN, _) => self.sign_in_with_flux(),
+            (SIGN_OUT, _) => self.sign_out(),
+            (CHECK_CONNECTION, Some(CHANGE_ORGANIZATION)) => self.change_organization(),
+            (CHECK_CONNECTION, _) => self.check_connection(),
             _ => {}
         }
     }
 
-    /// The event is about the sign-in: the plugin's server (the callback), the sign-in's timers.
+    /// The event is the account's: the plugin's server (the browser's return), its timers, its
+    /// dialogs.
     pub fn claims(&self, event: &Event) -> bool {
         match event {
             Event::ServerRequest(_) => true,
             Event::Timer(id) => {
-                self.pending.as_ref().is_some_and(|pending| pending.timer == *id)
+                self.pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.owns(*id))
                     || self.stop_timer == Some(*id)
+                    || self.lifetime_timer == Some(*id)
             }
+            Event::DialogAnswered((id, _))
+            | Event::TextAnswered((id, _))
+            | Event::FormAnswered((id, _)) => self.asked.iter().any(|(asked, _)| asked == id),
             _ => false,
         }
     }
@@ -214,17 +294,24 @@ impl Auth {
                     server::stop();
                 }
             }
-            Event::Timer(_) => {
-                // The browser didn't come back.
-                self.pending = None;
-                server::stop();
-                page::status(ACCOUNT_STATUS, &tr("The sign-in timed out"), Tone::Warning);
+            Event::Timer(id) if self.lifetime_timer == Some(id) => self.look_at_lifetime(),
+            Event::Timer(id) => self.pending_timer(id),
+            Event::DialogAnswered((id, button)) => {
+                if let Some(question) = self.take_question(id) {
+                    self.dialog_answered(question, button);
+                }
+            }
+            Event::FormAnswered((id, values)) => {
+                if let Some(question) = self.take_question(id) {
+                    self.form_answered(question, values.map(Values::from));
+                }
             }
             _ => {}
         }
     }
 
-    /// The credentials of requests: an IAM token, a pasted OAuth token, the sign-in's token.
+    /// The credentials of requests: an IAM token, a pasted OAuth token, the sign-in's token (a new
+    /// sign-in removes the others; the order is for those kept by versions before).
     pub fn credentials(&self) -> Option<Credentials> {
         if let Some(iam) = &self.iam {
             return Some(Credentials::Iam(iam.clone()));
@@ -235,7 +322,7 @@ impl Auth {
             .map(Credentials::OAuth)
     }
 
-    /// The organization of the settings.
+    /// The chosen organization.
     pub fn organization(&self) -> Option<Organization> {
         self.organization.clone()
     }
@@ -251,301 +338,321 @@ impl Auth {
         Some(headers)
     }
 
-    /// The signed-in account's email (`login@domain` for CalDAV), when known.
-    pub fn email(&self) -> Option<String> {
-        self.account
-            .as_ref()
-            .map(|account| account.email.clone())
-            .filter(|email| !email.is_empty())
-    }
-
     /// The sign-in, the token or the organization changed since the last call.
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
     }
 
-    /// The account's line on the settings page.
-    fn show_account(&self) {
-        if self.pending.is_some() {
+    /// Yandex answered 401 to a request with the credentials: once a launch, a sticky
+    /// notification offers to sign in again (the client calls it).
+    pub fn token_rejected(&self) {
+        if self.credentials().is_none() || self.rejected_told.replace(true) {
             return;
         }
-        if self.iam.is_some() {
-            page::status(ACCOUNT_STATUS, &tr("An IAM token is used"), Tone::Normal);
-        } else if self.pasted.is_some() {
-            page::status(ACCOUNT_STATUS, &tr("A pasted OAuth token is used"), Tone::Normal);
-        } else if let (Some(_), Some(account)) = (&self.token, &self.account) {
-            let who = if account.display.is_empty() || account.display == account.login {
-                account.login.clone()
-            } else {
-                format!("{} ({})", account.display, account.login)
+        Notice::warning(&tr("Yandex didn't accept the sign-in"))
+            .body(&tr("Sign in again to keep Tracker working."))
+            .action_with(&tr("Sign In…"), SIGN_IN, AGAIN)
+            .sticky()
+            .send();
+    }
+
+    // --- The page ---
+
+    /// The account's and the organization's lines, and which buttons work.
+    fn show(&self) {
+        let signed_in = self.credentials().is_some();
+        commands::set_enabled(SIGN_OUT, signed_in);
+        commands::set_enabled(CHECK_CONNECTION, signed_in);
+        if self.pending.is_none() {
+            match self.account_line() {
+                Some((text, tone)) => page::status(ACCOUNT_STATUS, &text, tone),
+                None => page::clear_status(ACCOUNT_STATUS),
+            }
+        }
+        match (&self.organization, signed_in) {
+            (Some(organization), _) => page::status(
+                ORGANIZATION_STATUS,
+                &trf("Organization: {0}", &[&organization.describe()]),
+                Tone::Normal,
+            ),
+            (None, true) => page::status(
+                ORGANIZATION_STATUS,
+                &tr("Choose the organization: Change Organization…"),
+                Tone::Warning,
+            ),
+            (None, false) => page::clear_status(ORGANIZATION_STATUS),
+        }
+    }
+
+    /// The account's line; none — the manifest's "Not signed in".
+    fn account_line(&self) -> Option<(String, Tone)> {
+        let credentials = self.credentials()?;
+        let who = self
+            .session
+            .account
+            .as_ref()
+            .filter(|account| account.is_known())
+            .map(Account::who);
+        let signed_in = match (&who, &credentials) {
+            (Some(who), _) => trf("You're signed in as {0}", &[who]),
+            (None, Credentials::Iam(_)) => tr("You're signed in with an IAM token"),
+            (None, Credentials::OAuth(_)) => tr("You're signed in with an OAuth token"),
+        };
+        let now = system::now();
+        let expired = self.session.expires_at > 0 && now >= self.session.expires_at;
+        Some(match &self.checked {
+            _ if expired && self.session.way == Way::Iam => {
+                (tr("The IAM token has expired: sign in again"), Tone::Error)
+            }
+            _ if expired => (tr("The sign-in has expired: sign in again"), Tone::Error),
+            Some(Err(ClientError::Unauthorized)) => (
+                tr("Yandex didn't accept the sign-in: sign in again"),
+                Tone::Error,
+            ),
+            Some(Err(err)) => (
+                trf(
+                    "{0} · Tracker didn't let you in: {1}",
+                    &[&signed_in, &err.message()],
+                ),
+                Tone::Error,
+            ),
+            _ if self.session.way == Way::Iam && self.session.expires_at > 0 => {
+                let until = system::local_time(self.session.expires_at).hm();
+                (trf("{0} · until {1}", &[&signed_in, &until]), Tone::Success)
+            }
+            _ => (signed_in, Tone::Success),
+        })
+    }
+
+    // --- Signing in and out ---
+
+    /// A sign-in of any way is over: its tokens replace every other's, then who it is, the
+    /// organization and the check.
+    fn signed_in(
+        &mut self,
+        way: Way,
+        tokens: signin::Tokens,
+        client_id: &str,
+        account: Option<Account>,
+    ) {
+        let now = system::now();
+        let keep = |key: &str, value: Option<&str>| {
+            let result = match value {
+                Some(value) => secrets::set(key, value),
+                None => secrets::remove(key),
             };
-            page::status(ACCOUNT_STATUS, &trf("Signed in as {0}", &[&who]), Tone::Success);
-        } else {
-            page::clear_status(ACCOUNT_STATUS);
-        }
-    }
-
-    fn sign_in(&mut self) {
-        let client_id = text(CLIENT_ID).unwrap_or_else(|| BUILTIN_CLIENT_ID.to_string());
-        if client_id.is_empty() {
-            let message = tr("Set the ClientID of a Yandex ID app in the plugin's settings (Advanced)");
-            page::status(ACCOUNT_STATUS, &message, Tone::Warning);
-            notify::warning(&tr("Can't sign in to Yandex"), Some(&message));
-            return;
-        }
-        let Some(pkce) = Pkce::new() else {
-            page::status(ACCOUNT_STATUS, &tr("No randomness for the sign-in"), Tone::Error);
-            return;
+            if let Err(err) = result {
+                log::warn(&format!("Couldn't keep \"{key}\" in Flux's secrets: {err}"));
+            }
         };
-        if let Some(pending) = self.pending.take() {
-            timers::cancel(pending.timer);
-        }
-        let Some(port) = PORTS.iter().find_map(|port| server::listen_on(*port).ok()) else {
-            let message = trf("The ports {0} are busy: close what uses them and try again", &[
-                &"52580–52582",
-            ]);
-            page::status(ACCOUNT_STATUS, &message, Tone::Error);
-            return;
+        let (token, pasted, iam) = match way {
+            Way::Flux | Way::App | Way::Code => (Some(tokens.access.clone()), None, None),
+            Way::Token => (None, Some(tokens.access.clone()), None),
+            Way::Iam => (None, None, Some(tokens.access.clone())),
         };
-        let redirect = server::url(port, "/callback");
-        let url = http::with_query(
-            AUTHORIZE,
-            &[
-                ("response_type", "code"),
-                ("client_id", &client_id),
-                ("redirect_uri", &redirect),
-                ("code_challenge", &pkce.challenge),
-                ("code_challenge_method", "S256"),
-                ("state", &pkce.state),
-            ],
+        keep(ACCOUNT_TOKEN, token.as_deref());
+        keep(
+            ACCOUNT_REFRESH,
+            tokens.refresh.as_deref().filter(|_| token.is_some()),
         );
-        if let Err(err) = system::open_url(&url) {
-            server::stop();
-            page::status(ACCOUNT_STATUS, &err, Tone::Error);
-            return;
+        keep(OAUTH_TOKEN, pasted.as_deref());
+        keep(IAM_TOKEN, iam.as_deref());
+        if secrets::get(ACCOUNT_INFO).is_some() {
+            keep(ACCOUNT_INFO, None);
         }
-        let timer = timers::after(SIGN_IN_WAIT);
-        self.pending = Some(Pending {
-            pkce,
-            client_id,
-            redirect,
-            timer,
-        });
-        page::busy(ACCOUNT_STATUS, &tr("Finish the sign-in in the browser…"));
-    }
-
-    /// The browser came back to `/callback`.
-    fn callback(&mut self, request: ServerRequest) {
-        if request.route() != "/callback" {
-            server::not_found(request.id);
-            return;
-        }
-        let Some(pending) = self.pending.take() else {
-            respond(request.id, false, &tr("This sign-in is over: start it again in Flux."));
-            return;
+        let expires_at = match (way, tokens.expires_in) {
+            (Way::Iam, _) => now + IAM_LIFETIME,
+            (_, Some(seconds)) if seconds > 0 => now + seconds,
+            _ => 0,
         };
-        timers::cancel(pending.timer);
-        let state_fits = request.query("state").as_deref() == Some(pending.pkce.state.as_str());
-        let finish = |auth: &mut Auth, page_ok: bool, page_text: &str| {
-            respond(request.id, page_ok, page_text);
-            // The browser gets its page first; the server stops a moment later.
-            auth.stop_timer = Some(timers::after(Duration::from_secs(1)));
+        self.token = token;
+        self.pasted = pasted;
+        self.iam = iam;
+        self.session = Session {
+            way,
+            client_id: client_id.to_string(),
+            expires_at,
+            account,
         };
-        if let Some(error) = request.query("error") {
-            let words = request.query("error_description").unwrap_or(error);
-            finish(self, false, &trf("Yandex didn't sign you in: {0}", &[&words]));
-            page::status(ACCOUNT_STATUS, &tr("The sign-in was cancelled"), Tone::Warning);
-            return;
+        storage::set(SESSION, &self.session);
+        self.checked = None;
+        self.refresh_failed = false;
+        self.expiry_told = false;
+        self.rejected_told.set(false);
+        self.changed = true;
+        self.show();
+        if let Some(who) = self.session.account.as_ref().map(Account::who) {
+            flux_plugin_api::notify::success(&trf("Signed in to Yandex as {0}", &[&who]));
         }
-        let Some(code) = request.query("code").filter(|_| state_fits) else {
-            finish(self, false, &tr("The answer doesn't belong to this sign-in."));
-            page::status(ACCOUNT_STATUS, &tr("The sign-in failed"), Tone::Error);
-            return;
-        };
-        match exchange(&pending, &code) {
-            Ok((token, account)) => {
-                let saved = secrets::set(ACCOUNT_TOKEN, &token).and_then(|()| {
-                    secrets::set(ACCOUNT_INFO, &serde_json::to_string(&account).unwrap_or_default())
-                });
-                if let Err(err) = saved {
-                    log::warn(&format!("Couldn't keep the token in the keychain: {err}"));
-                }
-                let who = if account.display.is_empty() {
-                    account.login.clone()
-                } else {
-                    account.display.clone()
-                };
-                finish(self, true, &trf("You're signed in to Flux as {0}. You can close this tab.", &[&who]));
-                self.token = Some(token);
-                self.account = Some(account);
-                self.changed = true;
-                self.show_account();
-                notify::success(&trf("Signed in to Yandex as {0}", &[&who]));
-            }
-            Err(err) => {
-                finish(self, false, &err);
-                page::status(ACCOUNT_STATUS, &err, Tone::Error);
-            }
-        }
+        self.find_organization(false);
     }
 
     fn sign_out(&mut self) {
         if let Some(pending) = self.pending.take() {
-            timers::cancel(pending.timer);
+            pending.close();
             server::stop();
         }
-        let _ = secrets::remove(ACCOUNT_TOKEN);
-        let _ = secrets::remove(ACCOUNT_INFO);
-        let was = self.token.take().is_some();
-        self.account = None;
-        self.show_account();
-        page::clear_status(CONNECTION_STATUS);
+        for key in [
+            ACCOUNT_TOKEN,
+            ACCOUNT_REFRESH,
+            ACCOUNT_INFO,
+            OAUTH_TOKEN,
+            IAM_TOKEN,
+        ] {
+            if secrets::get(key).is_some() {
+                let _ = secrets::remove(key);
+            }
+        }
+        storage::remove(SESSION);
+        let was = self.credentials().is_some();
+        self.token = None;
+        self.pasted = None;
+        self.iam = None;
+        self.session = Session::default();
+        self.checked = None;
+        // The organization stays: a sign-in again finds it in the list, or asks.
+        self.show();
         if was {
             self.changed = true;
         }
     }
 
-    /// Check Connection: who the token is in Tracker, and the organization.
+    /// The notification's Sign In: the way the account signed in last time.
+    fn sign_in_again(&mut self, from_settings: bool) {
+        match self.session.way {
+            Way::Flux => self.sign_in_with_flux(),
+            Way::App => match signin::own_app() {
+                Some(app) => self.start_browser(&app.client_id, Way::App),
+                None => self.ask_other_ways(from_settings),
+            },
+            Way::Code => match signin::own_app() {
+                Some(app) => self.start_code(&app.client_id),
+                None => self.ask_other_ways(from_settings),
+            },
+            Way::Token => self.ask_token(false),
+            Way::Iam => self.ask_token(true),
+        }
+    }
+
+    // --- The token's lifetime ---
+
+    /// Near its end the token is refreshed; when it can't be, the user is told to sign in again.
+    fn look_at_lifetime(&mut self) {
+        let expires_at = self.session.expires_at;
+        if expires_at == 0 || self.credentials().is_none() {
+            return;
+        }
+        let left = expires_at - system::now();
+        if self.session.way == Way::Iam {
+            if left <= 0 && !self.expiry_told {
+                self.expiry_told = true;
+                Notice::warning(&tr("The IAM token has expired"))
+                    .body(&tr(
+                        "Get a new one with yc iam create-token and sign in again.",
+                    ))
+                    .action_with(&tr("Sign In…"), SIGN_IN, AGAIN)
+                    .sticky()
+                    .send();
+                self.show();
+            }
+            return;
+        }
+        if left < REFRESH_BEFORE && !self.refresh_failed {
+            let refresh = secret(ACCOUNT_REFRESH);
+            match refresh.map(|refresh| signin::refresh(&refresh, &self.session.client_id)) {
+                Some(Ok(tokens)) => {
+                    log::info("The Yandex token was refreshed");
+                    self.refreshed(tokens);
+                    return;
+                }
+                Some(Err(err)) => log::info(&format!("The Yandex token wasn't refreshed: {err}")),
+                None => {}
+            }
+            self.refresh_failed = true;
+        }
+        if left < WARN_BEFORE && !self.expiry_told {
+            self.expiry_told = true;
+            let title = if left <= 0 {
+                tr("The Yandex sign-in has expired")
+            } else {
+                let days = (left / (24 * 60 * 60)).max(1);
+                trf("The Yandex sign-in expires in {0} d", &[&days])
+            };
+            Notice::warning(&title)
+                .body(&tr("Sign in again to keep Tracker working."))
+                .action_with(&tr("Sign In…"), SIGN_IN, AGAIN)
+                .sticky()
+                .send();
+            self.show();
+        }
+    }
+
+    fn refreshed(&mut self, tokens: signin::Tokens) {
+        if let Err(err) = secrets::set(ACCOUNT_TOKEN, &tokens.access) {
+            log::warn(&format!("Couldn't keep the token in Flux's secrets: {err}"));
+        }
+        if let Some(refresh) = &tokens.refresh {
+            let _ = secrets::set(ACCOUNT_REFRESH, refresh);
+        }
+        if let Some(seconds) = tokens.expires_in.filter(|seconds| *seconds > 0) {
+            self.session.expires_at = system::now() + seconds;
+        }
+        storage::set(SESSION, &self.session);
+        if self.token.as_deref() != Some(tokens.access.as_str()) {
+            self.token = Some(tokens.access);
+            self.changed = true;
+        }
+    }
+
+    // --- The connection ---
+
+    /// Check Connection: who the token is in Tracker, with the organization.
     fn check_connection(&mut self) {
         if self.credentials().is_none() {
-            page::status(CONNECTION_STATUS, &tr("Sign in first"), Tone::Warning);
+            self.show();
             return;
         }
-        let Some(organization) = self.organization.clone() else {
-            page::status(CONNECTION_STATUS, &tr("Set the organization's ID"), Tone::Warning);
+        if self.organization.is_none() {
+            self.find_organization(false);
             return;
-        };
-        page::busy(CONNECTION_STATUS, &tr("Checking…"));
-        match api::myself(self) {
-            Ok(me) => {
-                let who = if me.display.is_empty() { me.login } else { me.display };
-                page::status(
-                    CONNECTION_STATUS,
-                    &trf("Connected as {0} · {1}", &[&who, &organization.describe()]),
-                    Tone::Success,
-                );
+        }
+        let _ = self.check();
+    }
+
+    /// Tracker's `/myself` with the credentials and the organization; the account's line says how
+    /// it went. Who it is comes from there when Yandex ID didn't say (a pasted token, IAM).
+    fn check(&mut self) -> Result<(), ClientError> {
+        page::busy(ACCOUNT_STATUS, &tr("Checking the connection…"));
+        let result = api::myself(self).map(|me| {
+            let unknown = !self.session.account.as_ref().is_some_and(Account::is_known);
+            if unknown && (!me.login.is_empty() || !me.display.is_empty()) {
+                self.session.account = Some(Account {
+                    login: me.login,
+                    display: me.display,
+                    email: me.email,
+                });
+                storage::set(SESSION, &self.session);
             }
-            Err(err) => page::status(CONNECTION_STATUS, &err.message(), Tone::Error),
+        });
+        if result == Err(ClientError::Unauthorized) {
+            self.token_rejected();
         }
+        self.checked = Some(result.clone());
+        self.show();
+        result
     }
 }
 
-/// The code for the token (`/token` with the verifier), then who it is (`/info`).
-fn exchange(pending: &Pending, code: &str) -> Result<(String, Account), String> {
-    let response = http::post(TOKEN)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("client_id", &pending.client_id),
-            ("code_verifier", &pending.pkce.verifier),
-            ("redirect_uri", &pending.redirect),
-        ])
-        .timeout(Duration::from_secs(20))
-        .fetch()
-        .map_err(|err| err.message())?;
-    #[derive(Deserialize)]
-    struct Token {
-        access_token: Option<String>,
-        error: Option<String>,
-        error_description: Option<String>,
-    }
-    let token: Token = response
-        .json()
-        .map_err(|_| trf("Yandex answered {0}", &[&response.status.to_string()]))?;
-    let Some(access) = token.access_token.filter(|token| !token.is_empty()) else {
-        let words = token
-            .error_description
-            .or(token.error)
-            .unwrap_or_else(|| response.status.to_string());
-        return Err(trf("Yandex didn't give a token: {0}", &[&words]));
-    };
-    #[derive(Deserialize, Default)]
-    #[serde(default)]
-    struct Info {
-        login: String,
-        display_name: String,
-        real_name: String,
-        default_email: String,
-    }
-    let info: Info = http::get(INFO)
-        .header("Authorization", &format!("OAuth {access}"))
-        .timeout(Duration::from_secs(20))
-        .fetch()
-        .ok()
-        .filter(|response| response.is_success())
-        .and_then(|response| response.json().ok())
-        .unwrap_or_default();
-    let display = if info.real_name.is_empty() {
-        info.display_name
-    } else {
-        info.real_name
-    };
-    let email = if info.default_email.is_empty() && !info.login.is_empty() {
-        format!("{}@yandex.ru", info.login)
-    } else {
-        info.default_email
-    };
-    Ok((
-        access,
-        Account {
-            login: info.login,
-            display,
-            email,
-        },
-    ))
-}
-
-/// The page the browser shows after the sign-in.
-fn respond(request: u64, ok: bool, message: &str) {
-    let title = if ok {
-        tr("Signed in")
-    } else {
-        tr("The sign-in didn't work")
-    };
-    let color = if ok { "#2f9e5b" } else { "#c2453b" };
-    let html = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Flux</title></head>\
-         <body style=\"font:15px -apple-system,BlinkMacSystemFont,sans-serif;display:flex;\
-         align-items:center;justify-content:center;height:90vh;margin:0;color:#333\">\
-         <div style=\"text-align:center;max-width:460px\"><h2 style=\"color:{color}\">{}</h2>\
-         <p>{}</p></div></body></html>",
-        escape(&title),
-        escape(message)
-    );
-    server::respond_html(request, if ok { 200 } else { 400 }, &html);
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+/// A secret, trimmed; none when empty.
+fn secret(key: &str) -> Option<String> {
+    secrets::get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn organizations_by_id_and_type() {
-        assert_eq!(
-            Organization::of("123456", "auto"),
-            Some(Organization::Yandex360("123456".into()))
-        );
-        assert_eq!(
-            Organization::of("bpf3abc", "auto"),
-            Some(Organization::Cloud("bpf3abc".into()))
-        );
-        assert_eq!(
-            Organization::of("123456", "cloud"),
-            Some(Organization::Cloud("123456".into()))
-        );
-        assert_eq!(Organization::of("  ", "auto"), None);
-        assert_eq!(
-            Organization::of("42", "360").unwrap().header(),
-            ("X-Org-ID".to_string(), "42".to_string())
-        );
-    }
 
     #[test]
     fn credentials_headers() {
@@ -554,7 +661,26 @@ mod tests {
     }
 
     #[test]
-    fn escapes_the_page() {
-        assert_eq!(escape("<b>&\"</b>"), "&lt;b&gt;&amp;&quot;&lt;/b&gt;");
+    fn who_the_account_is() {
+        let account = |login: &str, display: &str| Account {
+            login: login.into(),
+            display: display.into(),
+            email: String::new(),
+        };
+        assert_eq!(account("egor", "Егор Агеев").who(), "Егор Агеев (egor)");
+        assert_eq!(account("egor", "egor").who(), "egor");
+        assert_eq!(account("egor", "").who(), "egor");
+        assert_eq!(account("", "Егор").who(), "Егор");
+        assert!(!account("", "").is_known());
+    }
+
+    #[test]
+    fn sessions_of_versions_before_read() {
+        let session: Session = serde_json::from_str("{}").unwrap();
+        assert_eq!(session, Session::default());
+        let session: Session =
+            serde_json::from_str(r#"{"way":"iam","expires_at":5,"account":null}"#).unwrap();
+        assert_eq!(session.way, Way::Iam);
+        assert_eq!(session.expires_at, 5);
     }
 }
