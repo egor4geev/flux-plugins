@@ -1,13 +1,13 @@
 //! A board's objects as Tracker's API returns them (read tolerantly, as the Tracker's own), and
 //! what the board makes of them: the tasks put into the columns, "mine", the current sprint.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::tracker::model::{Issue, Named};
 
 /// A board as `GET /v3/boards` lists it.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BoardInfo {
     pub id: Value,
@@ -47,7 +47,7 @@ impl BoardInfo {
 }
 
 /// A column of a board and the statuses it takes.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Column {
     pub id: Value,
@@ -75,7 +75,7 @@ impl Column {
 }
 
 /// A sprint of a scrum board.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Sprint {
     pub id: Value,
@@ -100,8 +100,14 @@ impl Sprint {
 
     /// Today (`YYYY-MM-DD`) is within the sprint's dates.
     fn covers(&self, today: &str) -> bool {
-        let starts = self.start_date.as_deref().map(|date| date.get(..10).unwrap_or(date));
-        let ends = self.end_date.as_deref().map(|date| date.get(..10).unwrap_or(date));
+        let starts = self
+            .start_date
+            .as_deref()
+            .map(|date| date.get(..10).unwrap_or(date));
+        let ends = self
+            .end_date
+            .as_deref()
+            .map(|date| date.get(..10).unwrap_or(date));
         !self.archived
             && starts.is_some_and(|start| start <= today)
             && ends.is_some_and(|end| today <= end)
@@ -153,7 +159,10 @@ impl Me {
 
     /// The task is assigned to the user.
     pub fn owns(&self, issue: &Issue) -> bool {
-        issue.assignee.as_ref().is_some_and(|assignee| self.is(assignee))
+        issue
+            .assignee
+            .as_ref()
+            .is_some_and(|assignee| self.is(assignee))
     }
 
     /// A user Tracker names (an assignee, a follower) is the user.
@@ -331,7 +340,12 @@ mod tests {
             issue("TRACK-5", "open"),
         ];
         let lanes = arrange(&columns, &tasks, "Other statuses");
-        let keys = |lane: &Lane| lane.tasks.iter().map(|task| task.key.clone()).collect::<Vec<_>>();
+        let keys = |lane: &Lane| {
+            lane.tasks
+                .iter()
+                .map(|task| task.key.clone())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(lanes.len(), 4);
         assert_eq!(keys(&lanes[0]), ["TRACK-1", "TRACK-3", "TRACK-5"]);
         assert_eq!(keys(&lanes[1]), ["TRACK-2"]);
@@ -404,8 +418,14 @@ mod tests {
             sprint: Some(value),
             ..Issue::default()
         };
-        assert!(in_sprint(&with(serde_json::json!([{"id": "8", "display": "Sprint 8"}])), &sprint));
-        assert!(in_sprint(&with(serde_json::json!({"id": 8, "display": "Sprint 8"})), &sprint));
+        assert!(in_sprint(
+            &with(serde_json::json!([{"id": "8", "display": "Sprint 8"}])),
+            &sprint
+        ));
+        assert!(in_sprint(
+            &with(serde_json::json!({"id": 8, "display": "Sprint 8"})),
+            &sprint
+        ));
         assert!(!in_sprint(&with(serde_json::json!([{"id": "7"}])), &sprint));
         assert!(!in_sprint(&Issue::default(), &sprint));
     }

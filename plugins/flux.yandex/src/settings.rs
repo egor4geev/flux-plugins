@@ -1,13 +1,11 @@
-//! The keys of the manifest's settings, and reading them.
+//! The keys of the manifest's settings, and reading them. The account's tokens aren't settings
+//! any more: [`crate::auth`] keeps them (the same secret keys as the old `oauth-token` and
+//! `iam-token` secrets), with the organization in the plugin's storage.
 
 use flux_plugin_api::setting;
 
 pub const ACCOUNT_STATUS: &str = "account-status";
-pub const OAUTH_TOKEN: &str = "oauth-token";
-pub const IAM_TOKEN: &str = "iam-token";
-pub const ORG_ID: &str = "org-id";
-pub const ORG_TYPE: &str = "org-type";
-pub const CONNECTION_STATUS: &str = "connection-status";
+pub const ORGANIZATION_STATUS: &str = "organization-status";
 pub const MY_QUERY: &str = "my-query";
 pub const BRANCH_TEMPLATE: &str = "branch-template";
 pub const COMMIT_TEMPLATE: &str = "commit-template";
@@ -21,12 +19,6 @@ pub const WORK_STATUS: &str = "work-status";
 pub const WORK_BRANCH: &str = "work-branch";
 pub const WORK_CONTEXT: &str = "work-context";
 pub const WORK_TIMER: &str = "work-timer";
-pub const CALENDAR_ENABLED: &str = "calendar-enabled";
-pub const REMIND_MINUTES: &str = "remind-minutes";
-pub const HIDDEN_CALENDARS: &str = "hidden-calendars";
-pub const CALDAV_LOGIN: &str = "caldav-login";
-pub const CALDAV_PASSWORD: &str = "caldav-password";
-pub const CLIENT_ID: &str = "client-id";
 
 /// A string setting, trimmed; none when empty.
 pub fn text(key: &str) -> Option<String> {

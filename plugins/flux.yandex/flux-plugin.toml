@@ -1,13 +1,13 @@
-# Yandex Tracker and Calendar for Flux: the board of tasks in an editor tab, a task's card with its
-# links, comments and history, your own Claude actions on a task (the favorite one — Take to Work on
-# the board), tasks as Tasks & Contexts in JetBrains IDEs, and the day's meetings in the status bar. Sign-in — Yandex ID (OAuth with PKCE through the browser), the token
-# in the keychain; the organization — Yandex 360 or Yandex Cloud.
+# Yandex Tracker for Flux: the board of tasks in an editor tab, a task's card with its links,
+# comments and history, your own Claude actions on a task (the favorite one — Take to Work on the
+# board), tasks with their own tabs. Sign-in — Flux's Yandex ID app in the browser (the code with
+# PKCE); the organization is found by itself (Yandex 360) or entered — Yandex 360 or Yandex Cloud.
 id = "flux.yandex"
-name = "Yandex Tracker & Calendar"
-version = "0.1.0"
+name = "Yandex Tracker"
+version = "0.2.0"
 api = "0.3"
 authors = ["Egor Ageev"]
-description = "Yandex Tracker and Calendar in Flux: the board of tasks, a task with its links, comments and history, your own Claude actions on a task — Take to Work moves it, makes its branch, opens its tabs and hands Claude your prompt at once; links to tasks in code, commits and Claude's chat; the next meeting in the status bar with a reminder and Join."
+description = "Yandex Tracker in Flux: the board of tasks, a task with its links, comments and history, your own Claude actions on a task — Take to Work moves it, makes its branch, opens its tabs and hands Claude your prompt at once; links to tasks in code, commits and Claude's chat."
 repository = "https://github.com/egor4geev/flux-plugins"
 icon = "icons/yandex.svg"
 wasm = "target/wasm32-wasip2/release/flux_yandex.wasm"
@@ -15,7 +15,8 @@ wasm = "target/wasm32-wasip2/release/flux_yandex.wasm"
 [permissions]
 # Git branches, the commit message template, the tabs of a task (contexts).
 project = "write"
-network = ["oauth.yandex.ru", "login.yandex.ru", "api.tracker.yandex.net", "caldav.yandex.ru"]
+# Yandex ID, who signed in, Tracker, and Yandex 360's list of your organizations.
+network = ["oauth.yandex.ru", "login.yandex.ru", "api.tracker.yandex.net", "api360.yandex.net"]
 # The sign-in: Yandex ID returns to http://127.0.0.1:<port>/callback.
 server = true
 # Discuss and Plan with Claude: a session with the task.
@@ -99,22 +100,6 @@ title = "Open Task"
 category = "Tracker"
 palette = false
 
-# Calendar.
-[[commands]]
-id = "calendar-agenda"
-title = "Show Today's Meetings"
-category = "Calendar"
-
-[[commands]]
-id = "calendar-join"
-title = "Join Meeting"
-category = "Calendar"
-
-[[commands]]
-id = "calendar-refresh"
-title = "Refresh Calendar"
-category = "Calendar"
-
 [[tool-windows]]
 id = "tracker"
 title = "Tracker"
@@ -130,21 +115,19 @@ location = "editor"
 [[status-items]]
 id = "active-task"
 
-[[status-items]]
-id = "next-meeting"
-
-# Settings → the plugin: all about the account and the organization.
+# Settings → the plugin: the account first — a line each for who is signed in and the organization,
+# with their buttons (the buttons' `argument` picks the flow: Other Ways, Change Organization).
 
 [[settings]]
 key = "account"
 type = "section"
 title = "Account"
-description = "Sign in with your Yandex ID — or paste a token below instead."
+description = "Sign in with your Yandex ID: Flux finds your organization and checks the connection by itself."
 
 [[settings]]
 key = "account-status"
 type = "status"
-title = "Account"
+title = ""
 default = "Not signed in"
 
 [[settings]]
@@ -154,55 +137,32 @@ title = "Sign In with Yandex…"
 command = "sign-in"
 
 [[settings]]
+key = "other-ways-button"
+type = "button"
+title = "Other Ways…"
+description = "A token, or your organization's own Yandex ID app"
+command = "sign-in"
+argument = "other"
+
+[[settings]]
 key = "sign-out-button"
 type = "button"
 title = "Sign Out"
 command = "sign-out"
 
 [[settings]]
-key = "oauth-token"
-type = "secret"
-title = "OAuth token"
-description = "Instead of signing in: a Yandex OAuth token with tracker:read, tracker:write and calendar:all."
-
-[[settings]]
-key = "iam-token"
-type = "secret"
-title = "IAM token"
-description = "For a federated account of Yandex Cloud: `yc iam create-token` (it lives 12 hours)."
-
-[[settings]]
-key = "organization"
-type = "section"
-title = "Organization"
-description = "Tracker → Administration → Organizations shows the ID."
-
-[[settings]]
-key = "org-id"
-type = "string"
-title = "Organization ID"
-
-[[settings]]
-key = "org-type"
-type = "choice"
-title = "Organization type"
-default = "auto"
-options = [
-    { value = "auto", title = "By the ID: only digits — Yandex 360" },
-    { value = "360", title = "Yandex 360" },
-    { value = "cloud", title = "Yandex Cloud" },
-]
-
-[[settings]]
-key = "check-connection-button"
-type = "button"
-title = "Check Connection"
-command = "check-connection"
-
-[[settings]]
-key = "connection-status"
+key = "organization-status"
 type = "status"
-title = "Connection"
+title = ""
+default = "No organization chosen"
+
+[[settings]]
+key = "change-organization-button"
+type = "button"
+title = "Change Organization…"
+description = "Your organizations in Yandex 360, or an ID from Tracker → Administration → Organizations"
+command = "check-connection"
+argument = "organization"
 
 [[settings]]
 key = "claude"
@@ -372,50 +332,3 @@ key = "notify-status"
 type = "bool"
 title = "Status changes of my tasks"
 default = true
-
-[[settings]]
-key = "calendar"
-type = "section"
-title = "Calendar"
-
-[[settings]]
-key = "calendar-enabled"
-type = "bool"
-title = "Show meetings"
-default = true
-
-[[settings]]
-key = "remind-minutes"
-type = "integer"
-title = "Remind before a meeting (minutes)"
-description = "0 — don't remind."
-default = 5
-min = 0
-max = 60
-
-[[settings]]
-key = "hidden-calendars"
-type = "string-list"
-title = "Hidden calendars"
-
-[[settings]]
-key = "caldav-login"
-type = "string"
-title = "CalDAV login"
-description = "With an app password instead of the OAuth token: login@domain."
-
-[[settings]]
-key = "caldav-password"
-type = "secret"
-title = "App password for CalDAV"
-
-[[settings]]
-key = "advanced"
-type = "section"
-title = "Advanced"
-
-[[settings]]
-key = "client-id"
-type = "string"
-title = "ClientID of the OAuth app"
-description = "Your organization's own Yandex ID app instead of Flux's."

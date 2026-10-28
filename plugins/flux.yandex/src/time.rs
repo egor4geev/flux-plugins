@@ -1,4 +1,4 @@
-//! Time (agent G extends it for the calendar): now as seconds since 1970 (UTC), the user's local
+//! Time: now as seconds since 1970 (UTC), the user's local
 //! time through `system.utc-offset` (summer time included), Tracker's timestamps
 //! (`2026-10-14T10:00:00.000+0300`) both ways, and how times read in the interface: "10:05",
 //! "1:05" of a timer, "today, 10:05", "14 Oct" — in English or Russian.
@@ -137,12 +137,6 @@ pub fn parse_date(text: &str) -> Option<(i64, u32, u32)> {
     ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((year, month, day))
 }
 
-/// "10:05".
-pub fn clock(at: i64, offset: i32) -> String {
-    let time = civil(at, offset);
-    format!("{}:{:02}", time.hour, time.minute)
-}
-
 /// A timer's reading: hours and minutes, "1:05".
 pub fn hours_minutes(seconds: i64) -> String {
     let minutes = seconds.max(0) / 60;
@@ -229,7 +223,6 @@ mod tests {
     fn readings() {
         let at = days_from_civil(2026, 10, 14) * 86_400 + 7 * 3600 + 5 * 60;
         let msk = 3 * 3600;
-        assert_eq!(clock(at, msk), "10:05");
         assert_eq!(hours_minutes(3900), "1:05");
         assert_eq!(hours_minutes(59), "0:00");
         assert_eq!(moment(at, at + 3600, msk, "en"), "today, 10:05");

@@ -17,6 +17,23 @@ use crate::text;
 /// Tasks of a search page.
 pub const PAGE: u32 = 100;
 
+/// The fields a search returns (`?fields=`), exactly what each reader of its tasks needs; the
+/// card asks for the whole task. A server that ignored `fields` sends every field: the readers
+/// still work, and [`Issue::trimmed`](super::model::Issue::trimmed) keeps only these.
+/// The list of the window: grouped by status (and its kind), the deadline.
+pub const LIST_FIELDS: &[&str] = &[
+    "key",
+    "summary",
+    "status",
+    "statusType",
+    "deadline",
+    "updatedAt",
+];
+/// News by polling: what a notification says.
+pub const POLL_FIELDS: &[&str] = &["key", "summary", "status", "updatedAt"];
+/// The Open Task picker's items.
+pub const PICKER_FIELDS: &[&str] = &["key", "summary", "status"];
+
 fn parse<T: DeserializeOwned>(value: Value) -> Result<T, ClientError> {
     serde_json::from_value(value).map_err(|err| ClientError::Other(err.to_string()))
 }
@@ -33,7 +50,17 @@ fn key_path(key: &str) -> Result<String, ClientError> {
 
 /// Who the token is.
 pub fn myself(auth: &Auth) -> Result<Myself, ClientError> {
-    parse(client::get(auth, "myself")?)
+    parse(myself_value(auth)?)
+}
+
+/// Who the token is: as Tracker answers (the board reads its ids, the cache keeps it).
+pub fn myself_value(auth: &Auth) -> Result<Value, ClientError> {
+    client::get(auth, "myself")
+}
+
+/// Who the token is, read.
+pub fn read_myself(value: &Value) -> Option<Myself> {
+    serde_json::from_value(value.clone()).ok()
 }
 
 /// What to look for.
@@ -44,21 +71,57 @@ pub enum Search<'a> {
     Keys(&'a [String]),
 }
 
-/// A page of a search, and how many tasks match in all (`X-Total-Count`).
-pub fn search(auth: &Auth, what: Search, per_page: u32) -> Result<(Vec<Issue>, u32), ClientError> {
+/// A page of a search with only `fields` of its tasks (trimmed to them, whatever the server
+/// sent), and how many tasks match in all (`X-Total-Count`).
+pub fn search(
+    auth: &Auth,
+    what: Search,
+    per_page: u32,
+    fields: &[&str],
+) -> Result<(Vec<Issue>, u32), ClientError> {
+    search_page(auth, what, per_page, 1, fields)
+}
+
+/// The page `page` (from 1) of a search; see [`search`].
+pub fn search_page(
+    auth: &Auth,
+    what: Search,
+    per_page: u32,
+    page: u32,
+    fields: &[&str],
+) -> Result<(Vec<Issue>, u32), ClientError> {
     let body = match what {
         Search::Query(query) => json!({ "query": query }),
         Search::Keys(keys) => json!({ "keys": keys }),
     };
-    let path = format!("issues/_search?perPage={per_page}");
+    let path = search_path(per_page, page, fields);
     let (value, headers) = client::send(auth, "POST", &path, Some(&body))?;
-    let issues: Vec<Issue> = parse(value)?;
+    let issues: Vec<Issue> = match value {
+        Value::Null => Vec::new(),
+        value => parse(value)?,
+    };
+    let issues: Vec<Issue> = issues
+        .into_iter()
+        .map(|issue| issue.trimmed(fields))
+        .collect();
     let total = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("x-total-count"))
         .and_then(|(_, value)| value.trim().parse().ok())
         .unwrap_or(issues.len() as u32);
     Ok((issues, total))
+}
+
+/// `issues/_search?perPage=…[&page=…][&fields=…]`.
+pub fn search_path(per_page: u32, page: u32, fields: &[&str]) -> String {
+    let mut path = format!("issues/_search?perPage={per_page}");
+    if page > 1 {
+        path.push_str(&format!("&page={page}"));
+    }
+    if !fields.is_empty() {
+        path.push_str(&format!("&fields={}", fields.join(",")));
+    }
+    path
 }
 
 /// One task.
@@ -107,7 +170,10 @@ pub fn add_comment(auth: &Auth, key: &str, text: &str) -> Result<Comment, Client
 
 /// The task's links to other tasks.
 pub fn links(auth: &Auth, key: &str) -> Result<Vec<IssueLink>, ClientError> {
-    parse(client::get(auth, &format!("issues/{}/links", key_path(key)?))?)
+    parse(client::get(
+        auth,
+        &format!("issues/{}/links", key_path(key)?),
+    )?)
 }
 
 /// A page of the task's changes, oldest first, after the change `after` (none — from the start).
@@ -210,7 +276,7 @@ pub fn sprints(auth: &Auth, board: &str) -> Result<Vec<Sprint>, ClientError> {
     match client::get(auth, &format!("boards/{board}/sprints")) {
         Ok(value) => parse(value),
         Err(ClientError::NotFound) => Ok(Vec::new()),
-        Err(ClientError::Other(_)) => Ok(Vec::new()),
+        Err(ClientError::BadRequest(_) | ClientError::Other(_)) => Ok(Vec::new()),
         Err(err) => Err(err),
     }
 }

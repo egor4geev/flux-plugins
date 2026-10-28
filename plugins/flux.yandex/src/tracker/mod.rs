@@ -21,15 +21,16 @@ pub mod fields;
 mod links;
 pub mod model;
 mod poll;
+mod sync;
 mod window;
 mod work;
 
 use std::collections::HashMap;
-use std::time::Duration;
 
-use flux_plugin_api::{CommandContext, Event, timers};
+use flux_plugin_api::{CommandContext, Event};
 
 use crate::auth::Auth;
+use crate::cache::Cache;
 use crate::client;
 use model::{
     Comment, Component, FieldMeta, Issue, IssueLink, Myself, Named, Priority, Queue, User,
@@ -37,8 +38,6 @@ use model::{
 
 /// The window of the manifest.
 pub const WINDOW: &str = "tracker";
-/// Network work after the window opens waits a moment: the window's start isn't held up.
-const STARTUP_DELAY: Duration = Duration::from_millis(1500);
 /// Storage: the card shows every field of the task (true by default) or only the main ones.
 const ALL_FIELDS: &str = "card.all-fields";
 
@@ -63,9 +62,15 @@ enum PickerPurpose {
     /// The active task's menu.
     TaskMenu,
     /// A property of the card being changed.
-    Field { task: String, field: edit::EditField },
+    Field {
+        task: String,
+        field: edit::EditField,
+    },
     /// One of the other fields of the card being changed: its key in the task.
-    OtherField { task: String, field: String },
+    OtherField {
+        task: String,
+        field: String,
+    },
 }
 
 /// What a form or a text question of the Tracker is for.
@@ -98,7 +103,10 @@ pub struct Tracker {
     draft: String,
     // Background knowledge.
     me: Option<Myself>,
+    /// When `me` was read (unix seconds).
+    me_saved: i64,
     queues: Vec<Queue>,
+    queues_saved: i64,
     /// Tooltips of links by key.
     tooltips: HashMap<String, String>,
     // What's asked of the user.
@@ -109,7 +117,19 @@ pub struct Tracker {
     // The work.
     work: work::Work,
     poll: poll::Poll,
-    startup_timer: Option<u64>,
+    // The cache, the start, the windows.
+    /// The account's cache ([`crate::cache`]).
+    cache: Cache,
+    /// The account the cache and what's known are of; `started` — it's been taken.
+    account: Option<String>,
+    started: bool,
+    /// The background work: one request a step.
+    chain: sync::Chain,
+    /// This window polls for all ([`crate::lead`]).
+    leading: bool,
+    /// The leader's news file as last seen, and the news it told.
+    news_stamp: Option<std::time::SystemTime>,
+    news_seen: i64,
     /// Tasks changed here since the board last heard.
     changed: Vec<String>,
     // What the fields take, read once.
@@ -136,14 +156,22 @@ impl Tracker {
             list: window::List::default(),
             draft: String::new(),
             me: None,
+            me_saved: 0,
             queues: Vec::new(),
+            queues_saved: 0,
             tooltips: HashMap::new(),
             pickers: HashMap::new(),
             asked: HashMap::new(),
             open_task_items: Vec::new(),
             work: work::Work::default(),
             poll: poll::Poll::default(),
-            startup_timer: None,
+            cache: Cache::none(),
+            account: None,
+            started: false,
+            chain: sync::Chain::default(),
+            leading: false,
+            news_stamp: None,
+            news_seen: 0,
             changed: Vec::new(),
             users: None,
             priorities: Vec::new(),
@@ -155,30 +183,63 @@ impl Tracker {
         }
     }
 
+    /// The start: what the cache has shows at once — the window's content is sent before the
+    /// window shows — then the network work runs in the background ([`sync`]).
     pub fn activate(&mut self, auth: &Auth) {
-        let _ = auth;
         self.work.restore();
-        self.startup_timer = Some(timers::after(STARTUP_DELAY));
+        self.poll.read_interval();
+        self.use_account(auth);
+        self.draw(auth);
+        if auth.headers().is_some() {
+            self.start();
+        }
     }
 
     pub fn deactivate(&mut self) {
         self.work.save_time();
+        self.chain.stop();
     }
 
+    /// New settings: the poll's interval; `my-query` — My Tasks of the new query (cached, then
+    /// read). The account's settings come as [`Tracker::auth_changed`].
     pub fn settings_changed(&mut self, auth: &Auth) {
-        self.poll.restart();
+        self.poll.read_interval();
         self.work.show_status_item();
-        if self.filter == Filter::Mine {
+        if self.filter == Filter::Mine && self.filter_query() != self.list.query {
+            if !self.load_cached_list() {
+                self.list.issues.clear();
+                self.list.total = 0;
+            }
             self.list.stale = true;
-        }
-        if self.shown {
-            self.load_list(auth);
+            self.list.next_try = 0;
+            if self.shown {
+                self.render(auth);
+                self.queue_list_first();
+            }
         }
     }
 
+    /// A sign-in, a sign-out, another organization (and the start, which has taken the account
+    /// already): another account's cache shows, then its network work.
     pub fn auth_changed(&mut self, auth: &Auth) {
+        if !self.use_account(auth) {
+            return;
+        }
+        self.chain.stop();
+        if auth.headers().is_some() {
+            self.start();
+        } else {
+            links::clear();
+        }
+        self.render(auth);
+    }
+
+    /// Forgets what was known of the account.
+    fn forget(&mut self) {
         self.me = None;
+        self.me_saved = 0;
         self.queues.clear();
+        self.queues_saved = 0;
         self.tooltips.clear();
         self.users = None;
         self.priorities.clear();
@@ -189,20 +250,13 @@ impl Tracker {
         self.poll.reset();
         self.list = window::List {
             stale: true,
+            generation: self.list.generation + 1,
             ..window::List::default()
         };
         self.card = None;
-        if auth.headers().is_some() {
-            self.learn(auth);
-            // What's there now isn't news.
-            self.poll_now(auth);
-        } else {
-            links::clear();
-        }
-        if self.shown {
-            self.load_list(auth);
-            self.render(auth);
-        }
+        self.news_stamp = None;
+        self.news_seen = 0;
+        links::clear();
     }
 
     pub fn run_command(&mut self, command: &str, context: &CommandContext, auth: &Auth) {
@@ -234,6 +288,7 @@ impl Tracker {
             }
             "refresh-tasks" => {
                 self.list.stale = true;
+                self.list.next_try = 0;
                 self.load_list(auth);
                 if let Some(key) = self.card_key() {
                     self.load_card(&key, auth);
@@ -250,16 +305,18 @@ impl Tracker {
         }
     }
 
-    /// Everything the sign-in, the board and the calendar don't claim: the window, links, Git, its
+    /// Everything the sign-in and the board don't claim: the window, links, Git, its
     /// own timers, dialogs and pickers.
     pub fn on_event(&mut self, event: Event, auth: &Auth) {
         match event {
+            // Shown (again — Flux repeats it for a window open at the start): what's there shows
+            // at once; the list is read in the background only if it isn't fresh.
             Event::ToolWindowShown(window) if window == WINDOW => {
                 self.shown = true;
-                if self.list.stale || self.list.loaded_at.is_none() {
-                    self.load_list(auth);
-                }
                 self.render(auth);
+                if self.card.is_none() && self.list_due(crate::time::now()) {
+                    self.queue_list_first();
+                }
             }
             Event::ToolWindowHidden(window) if window == WINDOW => self.shown = false,
             Event::Ui(input) if input.window == WINDOW => self.on_ui(input, auth),
@@ -287,16 +344,7 @@ impl Tracker {
                 }
             }
             Event::GitDone((id, result)) => self.git_done(id, result, auth),
-            Event::Timer(id) if self.startup_timer == Some(id) => {
-                self.startup_timer = None;
-                self.poll.restart();
-                if auth.headers().is_some() {
-                    self.learn(auth);
-                    // What's there at the start isn't news.
-                    self.poll_now(auth);
-                }
-            }
-            Event::Timer(id) if self.poll.timer() == Some(id) => self.poll_now(auth),
+            Event::Timer(id) if self.chain.timer() == Some(id) => self.run_step(auth),
             Event::Timer(id) if self.work.tick_timer() == Some(id) => {
                 self.work.tick();
                 if self.shown {
@@ -342,31 +390,14 @@ impl Tracker {
         std::mem::take(&mut self.changed)
     }
 
-    /// Who the token is and the queues (for links), after a sign-in or at the start.
-    fn learn(&mut self, auth: &Auth) {
-        if auth.organization().is_none() {
-            return;
-        }
-        if self.me.is_none() {
-            self.me = api::myself(auth).ok();
-        }
-        if self.queues.is_empty() {
-            match api::queues(auth) {
-                Ok(queues) => {
-                    self.queues = queues;
-                    links::set(&self.queues);
-                }
-                Err(err) => flux_plugin_api::log::warn(&format!("Queues: {}", err.message())),
-            }
-        }
-    }
-
     fn card_key(&self) -> Option<String> {
         self.card.as_ref().map(|card| card.key.clone())
     }
 
     fn no_active_task(&self) {
-        flux_plugin_api::notify::info(&flux_plugin_api::tr("No task is in work: open one with ⌥⇧N"));
+        flux_plugin_api::notify::info(&flux_plugin_api::tr(
+            "No task is in work: open one with ⌥⇧N",
+        ));
     }
 
     /// The task with what a prompt needs: from the open card when it's the task, else fetched.
@@ -391,8 +422,9 @@ impl Tracker {
             self.changed.push(key.to_string());
         }
         self.list.stale = true;
+        self.list.next_try = 0;
         self.tooltips.remove(key);
-        self.poll.quiet(key);
+        self.quiet(key);
     }
 }
 

@@ -7,10 +7,29 @@ use crate::auth::Auth;
 use crate::client::{self, ClientError};
 use crate::tracker::model::Issue;
 
-use super::model::{BoardInfo, Column, Me, Sprint};
+use super::model::{BoardInfo, Column, Sprint};
 
 /// Tasks on a page of the search.
 const PER_PAGE: usize = 100;
+/// The fields of a board's tasks (`?fields=`): the columns (the status), a card (the type, the
+/// priority, the assignee, the tags, story points, the deadline, the reply awaited), the sprint,
+/// the filters (the components too). A server that ignored `fields` sends all: trimmed to these.
+pub const BOARD_FIELDS: &[&str] = &[
+    "key",
+    "summary",
+    "status",
+    "statusType",
+    "type",
+    "priority",
+    "assignee",
+    "sprint",
+    "tags",
+    "components",
+    "storyPoints",
+    "pendingReplyFrom",
+    "deadline",
+    "updatedAt",
+];
 /// At most this many pages: a board of more tasks shows the first ones and says so.
 pub const MAX_PAGES: usize = 5;
 
@@ -28,14 +47,16 @@ pub fn columns(auth: &Auth, board: &str) -> Result<Vec<Column>, ClientError> {
 /// быть спринтов») or 404 — no sprints, as any answer that isn't about the user's access.
 pub fn sprints(auth: &Auth, board: &str) -> Result<Vec<Sprint>, ClientError> {
     match client::get_as(auth, &format!("boards/{board}/sprints")) {
-        Err(ClientError::NotFound | ClientError::Other(_)) => Ok(Vec::new()),
+        Err(ClientError::NotFound | ClientError::BadRequest(_) | ClientError::Other(_)) => {
+            Ok(Vec::new())
+        }
         result => result,
     }
 }
 
-/// Who the user is (`GET /v3/myself`): Only Mine.
-pub fn myself(auth: &Auth) -> Result<Me, ClientError> {
-    client::get(auth, "myself").map(|value| Me::from_myself(&value))
+/// Who the user is (`GET /v3/myself`): Only Mine — as Tracker answers (the cache keeps it).
+pub fn myself(auth: &Auth) -> Result<Value, ClientError> {
+    client::get(auth, "myself")
 }
 
 /// The board's tasks — of `sprint` when given — in the board's order, page by page (at most
@@ -49,7 +70,10 @@ pub fn tasks(
     let mut tasks = Vec::new();
     let mut total = None;
     for page in 1..=MAX_PAGES {
-        let path = format!("issues/_search?perPage={PER_PAGE}&page={page}");
+        let path = format!(
+            "issues/_search?perPage={PER_PAGE}&page={page}&fields={}",
+            BOARD_FIELDS.join(",")
+        );
         let (value, headers) = client::send(auth, "POST", &path, Some(&body))?;
         total = total.or_else(|| header_number(&headers, "X-Total-Count"));
         let found: Vec<Issue> = match value {
@@ -59,7 +83,7 @@ pub fn tasks(
             }
         };
         let count = found.len();
-        tasks.extend(found);
+        tasks.extend(found.into_iter().map(|task| task.trimmed(BOARD_FIELDS)));
         if is_last_page(page, count, &headers) {
             break;
         }
@@ -72,7 +96,12 @@ pub fn tasks(
 /// else the tasks added to the board — `{"filter": {"boards": <id>}}`; with the sprint of a scrum
 /// board (`"sprint": <id>`), in the board's order.
 fn search_body(board: &BoardInfo, sprint: Option<&Sprint>) -> Value {
-    if let Some(query) = board.query.as_deref().map(str::trim).filter(|query| !query.is_empty()) {
+    if let Some(query) = board
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+    {
         // The query has its own order ("Sort by").
         return json!({ "query": query });
     }
@@ -161,7 +190,10 @@ mod tests {
             query: Some("Queue: DE Tags: frontend".into()),
             ..BoardInfo::default()
         };
-        assert_eq!(search_body(&board, None), json!({"query": "Queue: DE Tags: frontend"}));
+        assert_eq!(
+            search_body(&board, None),
+            json!({"query": "Queue: DE Tags: frontend"})
+        );
     }
 
     #[test]
@@ -173,5 +205,112 @@ mod tests {
         // Without the header: a short page is the last one.
         assert!(is_last_page(1, 37, &[]));
         assert!(!is_last_page(2, PER_PAGE, &[]));
+    }
+
+    /// A task as Tracker sends it in full: every field the card and the filters read, and more.
+    fn full_task() -> Value {
+        json!({
+            "self": "https://api.tracker.yandex.net/v3/issues/WEB-7", "id": "a1", "key": "WEB-7",
+            "version": 4, "summary": "Кнопка оплаты", "description": "Длинное описание…",
+            "status": {"id": "3", "key": "inReview", "display": "Ревью"},
+            "statusType": {"id": "inProgress", "display": "В работе"},
+            "type": {"id": "2", "key": "task", "display": "Задача"},
+            "priority": {"id": "4", "key": "critical", "display": "Критичный"},
+            "assignee": {"id": "7", "display": "Егор"},
+            "createdBy": {"id": "9", "display": "Анна"},
+            "queue": {"id": "1", "key": "WEB", "display": "Веб"},
+            "sprint": [{"id": "8", "display": "Спринт 8"}],
+            "tags": ["frontend", "payments", "q4"],
+            "components": [{"id": "5", "display": "Оплата"}],
+            "storyPoints": 3,
+            "pendingReplyFrom": [{"id": "7", "display": "Егор"}],
+            "followers": [{"id": "9", "display": "Анна"}],
+            "commentWithoutExternalMessageCount": 11,
+            "deadline": "2026-10-20",
+            "updatedAt": "2026-10-14T10:00:00.000+0000",
+            "1234--risk": "high"
+        })
+    }
+
+    /// What Tracker sends when it honours `fields`: the task's references and those fields.
+    fn only(task: &Value, fields: &[&str]) -> Issue {
+        let object = task.as_object().unwrap();
+        let kept: Map<String, Value> = object
+            .iter()
+            .filter(|(name, _)| {
+                ["self", "id", "key"].contains(&name.as_str()) || fields.contains(&name.as_str())
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        serde_json::from_value(Value::Object(kept)).unwrap()
+    }
+
+    #[test]
+    fn the_fields_asked_are_the_fields_a_card_and_the_filters_use() {
+        use crate::board::filter::Facet;
+        use crate::board::model::{Me, in_sprint};
+        use crate::tracker::facts;
+        let task = full_task();
+        let full: Issue = serde_json::from_value(task.clone()).unwrap();
+        // As the search keeps them, whether the server honoured `fields` or not.
+        let served = only(&task, BOARD_FIELDS).trimmed(BOARD_FIELDS);
+        assert_eq!(served, full.clone().trimmed(BOARD_FIELDS));
+        let me = Me::from_myself(&json!({"uid": 7}));
+        let is_me = |user: &crate::tracker::model::Named| me.is(user);
+        let today = facts::today(1_760_000_000, 0);
+        assert_eq!(
+            facts::card_tags(&served, is_me, today, "en"),
+            facts::card_tags(&full, is_me, today, "en")
+        );
+        assert_eq!(
+            facts::card_foot(&served, is_me),
+            facts::card_foot(&full, is_me)
+        );
+        for facet in [
+            Facet::Assignee,
+            Facet::Type,
+            Facet::Priority,
+            Facet::Tags,
+            Facet::Components,
+        ] {
+            assert_eq!(facet.values(&served), facet.values(&full));
+        }
+        let sprint = Sprint {
+            id: Value::from(8),
+            ..Sprint::default()
+        };
+        assert!(in_sprint(&served, &sprint));
+        assert_eq!(served.status, full.status);
+        assert!(served.description.is_none() && served.followers.is_empty());
+    }
+
+    #[test]
+    fn the_list_and_the_poll_ask_for_what_they_show() {
+        use crate::tracker::api::{LIST_FIELDS, PICKER_FIELDS, POLL_FIELDS};
+        let task = full_task();
+        let full: Issue = serde_json::from_value(task.clone()).unwrap();
+        for fields in [LIST_FIELDS, POLL_FIELDS, PICKER_FIELDS] {
+            let served = only(&task, fields).trimmed(fields);
+            assert_eq!(served, full.clone().trimmed(fields));
+            // The key, the title, the status (its name, its kind) of every reader.
+            assert_eq!(
+                (served.key.as_str(), served.summary.as_str()),
+                ("WEB-7", "Кнопка оплаты")
+            );
+            assert_eq!(served.status_name(), "Ревью");
+        }
+        // The list groups by the status's kind and shows the deadline.
+        let listed = only(&task, LIST_FIELDS);
+        assert_eq!(listed.status_kind(), full.status_kind());
+        assert_eq!(listed.deadline.as_deref(), Some("2026-10-20"));
+        // The search's path asks for them.
+        assert_eq!(
+            crate::tracker::api::search_path(100, 1, POLL_FIELDS),
+            "issues/_search?perPage=100&fields=key,summary,status,updatedAt"
+        );
+        assert_eq!(
+            crate::tracker::api::search_path(100, 3, &[]),
+            "issues/_search?perPage=100&page=3"
+        );
     }
 }

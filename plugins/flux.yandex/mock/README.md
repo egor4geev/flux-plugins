@@ -1,7 +1,7 @@
 # A fake Yandex for tests and scenarios
 
-`mock_yandex.py` answers as Yandex ID's OAuth, Tracker's API v3 and the Calendar's CalDAV do, on
-`http://127.0.0.1:<port>`, with tasks and meetings of its own (meetings relative to now). Flux sends
+`mock_yandex.py` answers as Yandex ID's OAuth and Tracker's API v3 do, on
+`http://127.0.0.1:<port>`, with tasks of its own. Flux sends
 the plugin's requests there with `FLUX_PLUGIN_HTTP_OVERRIDE` (a scenario's or a test's
 environment); `FLUX_SCENARIO_OPEN_URL=<file>` writes the sign-in's browser address to a file, and
 the scenario plays the browser: `curl -s -L "$(tail -1 <file> | sed 's|https://oauth.yandex.ru|http://127.0.0.1:<port>|')"`
@@ -22,5 +22,21 @@ the scenario plays the browser: `curl -s -L "$(tail -1 <file> | sed 's|https://o
   filters.
   `POST /_mock/assign {"key"}`, `/_mock/status {"key", "status"}`, `/_mock/summon {"key"}` play
   the news polling finds; `/_mock/reject {"field", "message"}` refuses the next change of a field.
-- `boards.py` — the boards (agent K); `caldav.py` — the calendar (agent G).
-- `GET /_mock/log` — the requests so far; `POST /_mock/reset` — the data back to the start.
+  The query language also takes `Updated: >= now()-15m` (`>=` `<=` `>` `<`; `now()` ± N `m` `h`
+  `d` `w`, or `"2026-10-28 09:30:00"` / `"2026-10-28"` in UTC, a date alone — its whole day;
+  `"from".."to"`), by the task's `updatedAt` (the controls above change it).
+  `POST /v3/issues/_search?fields=key,summary,status` — each task has only `self`, `id`, `key`
+  and the fields named, as Tracker does: a field the client forgets isn't there.
+- `boards.py` — the boards (agent K).
+- `GET /_mock/log` — the requests so far: `method`, `path` (with the query), `body`, `t` (seconds
+  since the fake started, at the arrival), `wall` (Unix time), `ms` (time to answer), `status`,
+  `bytes` (the answer's body); `DELETE /_mock/log` or `POST /_mock/log/clear` — empty it.
+  `POST /_mock/reset` — the data and the controls below back to the start (the log stays).
+- Closer to the real Tracker (`GET /_mock/controls` — their state):
+  - `POST /_mock/latency {"ms": 150, "searchMs": 400}` — each answer waits (a `_search` —
+    `searchMs`, `ms` when not given); requests wait in parallel, outside the server's lock;
+  - `POST /_mock/strict {"search": true}` — a `_search` that arrives while another one is in
+    flight answers 429 (Tracker allows one search at a time per user);
+  - `POST /_mock/throttle {"count": 2, "retryAfter": 3, "path": "_search"}` — the next `count`
+    requests (whose path with its query matches the regex `path`, when given) answer 429
+    `{"errorMessages": ["Too many requests"]}`, with `Retry-After` when `retryAfter` is given.

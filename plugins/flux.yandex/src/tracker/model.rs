@@ -2,11 +2,11 @@
 //! strings or numbers). Shared with the board; agent F extends it (transitions, comments, links,
 //! the changelog, work log), the board keeps its own objects in `board/`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A reference: a status, a type, a priority, a user, a queue — `{"id", "key", "display"}`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Named {
     pub id: Value,
@@ -27,7 +27,7 @@ impl Named {
 }
 
 /// A task.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Issue {
     pub key: String,
@@ -86,9 +86,61 @@ where
 }
 
 impl Issue {
+    /// Only `fields` of the task (Tracker's names; empty — all of them): what a search asked for,
+    /// whatever the server sent — a list doesn't keep (or cache) the descriptions it never shows.
+    pub fn trimmed(self, fields: &[&str]) -> Issue {
+        if fields.is_empty() {
+            return self;
+        }
+        fn keep<T: Default>(fields: &[&str], name: &str, value: T) -> T {
+            if fields.contains(&name) {
+                value
+            } else {
+                T::default()
+            }
+        }
+        let has = |name: &str| fields.contains(&name);
+        Issue {
+            key: self.key,
+            summary: keep(fields, "summary", self.summary),
+            description: keep(fields, "description", self.description),
+            status: keep(fields, "status", self.status),
+            status_type: keep(fields, "statusType", self.status_type),
+            kind: keep(fields, "type", self.kind),
+            priority: keep(fields, "priority", self.priority),
+            assignee: keep(fields, "assignee", self.assignee),
+            created_by: keep(fields, "createdBy", self.created_by),
+            queue: keep(fields, "queue", self.queue),
+            deadline: keep(fields, "deadline", self.deadline),
+            sprint: keep(fields, "sprint", self.sprint),
+            parent: keep(fields, "parent", self.parent),
+            resolution: keep(fields, "resolution", self.resolution),
+            created_at: keep(fields, "createdAt", self.created_at),
+            updated_at: keep(fields, "updatedAt", self.updated_at),
+            tags: keep(fields, "tags", self.tags),
+            components: keep(fields, "components", self.components),
+            story_points: keep(fields, "storyPoints", self.story_points),
+            followers: keep(fields, "followers", self.followers),
+            pending_reply_from: keep(fields, "pendingReplyFrom", self.pending_reply_from),
+            comment_count: keep(
+                fields,
+                "commentWithoutExternalMessageCount",
+                self.comment_count,
+            ),
+            boards: keep(fields, "boards", self.boards),
+            other: self
+                .other
+                .into_iter()
+                .filter(|(name, _)| has(name))
+                .collect(),
+        }
+    }
+
     /// The status's display name; "" without one.
     pub fn status_name(&self) -> &str {
-        self.status.as_ref().map_or("", |status| status.display.as_str())
+        self.status
+            .as_ref()
+            .map_or("", |status| status.display.as_str())
     }
 
     /// What the status is: by its type when Tracker gives it, else by its key.
@@ -129,7 +181,9 @@ impl StatusKind {
     pub fn of(key: &str) -> StatusKind {
         let key = key.to_ascii_lowercase();
         let has = |words: &[&str]| words.iter().any(|word| key.contains(word));
-        if has(&["done", "closed", "resolved", "cancel", "complete", "fixed", "rejected"]) {
+        if has(&[
+            "done", "closed", "resolved", "cancel", "complete", "fixed", "rejected",
+        ]) {
             StatusKind::Done
         } else if has(&["progress", "review", "testing", "test", "work", "started"]) {
             StatusKind::InProgress
@@ -144,7 +198,7 @@ impl StatusKind {
 /// A field of Tracker as `GET /v3/fields` (the system ones) and `GET /v3/queues/{key}/localFields`
 /// (a queue's own) describe it: its id in a task, its name in the interface language, what its
 /// values are, whether people may change it, the values a list offers, where it goes.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FieldMeta {
     /// The key in a task: "start", "qaEngineer"; a local field's "<queue's id>--<key>".
@@ -202,7 +256,7 @@ impl FieldMeta {
 }
 
 /// What a field's values are: `{"type": "date"}`, `{"type": "array", "items": "user"}`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FieldSchema {
     #[serde(rename = "type")]
@@ -212,7 +266,7 @@ pub struct FieldSchema {
 }
 
 /// The values a field offers.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct OptionsProvider {
     #[serde(rename = "type")]
@@ -221,7 +275,7 @@ pub struct OptionsProvider {
 }
 
 /// A transition of a task's workflow: `GET /v3/issues/{key}/transitions`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Transition {
     pub id: String,
@@ -230,7 +284,7 @@ pub struct Transition {
 }
 
 /// A comment: `GET /v3/issues/{key}/comments`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Comment {
     pub id: Value,
@@ -240,7 +294,7 @@ pub struct Comment {
 }
 
 /// A link of a task to another: `GET /v3/issues/{key}/links`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct IssueLink {
     #[serde(rename = "type")]
@@ -265,7 +319,7 @@ impl IssueLink {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LinkType {
     pub id: String,
@@ -274,7 +328,7 @@ pub struct LinkType {
 }
 
 /// A change of a task: `GET /v3/issues/{key}/changelog`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ChangelogEntry {
     pub id: String,
@@ -287,7 +341,7 @@ pub struct ChangelogEntry {
 }
 
 /// One field of a change: what it was, what it became.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FieldChange {
     pub field: Named,
@@ -321,7 +375,7 @@ pub fn value_text(value: &Value) -> String {
 
 /// A priority: `GET /v3/priorities` — its name in the language of `Accept-Language`, or (with
 /// `localized=false`) by language.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Priority {
     pub id: Value,
@@ -345,21 +399,21 @@ impl Priority {
 }
 
 /// The issue types a queue allows: `GET /v3/queues/{key}?expand=issueTypesConfig`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct QueueTypes {
     #[serde(deserialize_with = "list_or_null")]
     pub issue_types_config: Vec<IssueTypeConfig>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct IssueTypeConfig {
     pub issue_type: Named,
 }
 
 /// A user of the organization: `GET /v3/users`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct User {
     pub uid: Value,
@@ -383,7 +437,7 @@ impl User {
 }
 
 /// A component of a queue: `GET /v3/queues/{key}/components`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Component {
     pub id: Value,
@@ -391,7 +445,7 @@ pub struct Component {
 }
 
 /// A sprint of a board: `GET /v3/boards/{id}/sprints` — draft, in_progress, released, archived.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Sprint {
     pub id: Value,
@@ -410,7 +464,7 @@ pub fn id_text(id: &Value) -> String {
 }
 
 /// A queue: `GET /v3/queues`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Queue {
     pub key: String,
@@ -418,7 +472,7 @@ pub struct Queue {
 }
 
 /// Who the token is: `GET /v3/myself`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Myself {
     pub uid: Value,

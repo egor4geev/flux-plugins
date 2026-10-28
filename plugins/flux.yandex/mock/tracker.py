@@ -17,7 +17,10 @@ number, a person, one of a list, a line), a local field by its key in the task
 
 The query language as far as the plugin uses it: `Assignee: me()`, `Resolution: empty()`,
 `Followers: me()`, `"Pending reply from": me()`, `Queue: KEY`, `Key: KEY`, `Summary: "words"`,
-`Boards: N`, `"Sort by": Updated DESC|ASC`; other clauses are ignored (and printed).
+`Boards: N`, `"Sort by": Updated DESC|ASC`, `Updated: >= now()-15m` (`>=`, `<=`, `>`, `<`; `now()`
+with `- N` / `+ N` in `m`, `h`, `d`, `w`, or `"2026-10-28 09:30:00"` / `"2026-10-28"` in UTC — a date
+alone means its whole day; `"from".."to"` — a range); other clauses are ignored (and printed).
+`_search?fields=key,summary,status` — each task has only `self`, `id`, `key` and these fields.
 
 Auth: `Authorization: OAuth <a token oauth.py gave, or one that starts with y0_>` or `Bearer <IAM>`
 (`OAuth revoked` — 401); the organization `X-Org-ID: 123456` or `X-Cloud-Org-ID: bpf-mock`.
@@ -170,6 +173,52 @@ def component_ref(queue, id_):
 def priority_ref(key):
     id_, key, ru, en, _ = next(p for p in PRIORITIES if p[1] == key)
     return {"self": f"{API}/priorities/{id_}", "id": str(id_), "key": key, "display": ru}
+
+
+UPDATED = re.compile(
+    r'(?i)(?<![\w"])updated\s*:\s*(>=|<=|>|<)?\s*'
+    r'(now\(\)(?:\s*[-+]\s*\d+\s*[mhdw]\b)?|"[^"]*"\.\."[^"]*"|"[^"]*"|\d{4}-\d\d-\d\d)')
+UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
+
+
+def moment_of(text):
+    """`now()-15m`, `"2026-10-28 09:30:00"` or `"2026-10-28"` (UTC): the moment and whether it is a
+    whole day."""
+    text = text.strip().strip('"').strip()
+    now = re.fullmatch(r"now\(\)(?:\s*([-+])\s*(\d+)\s*([mhdw]))?", text, re.IGNORECASE)
+    if now:
+        moment = datetime.datetime.now(datetime.timezone.utc)
+        if now.group(1):
+            delta = datetime.timedelta(**{UNITS[now.group(3).lower()]: int(now.group(2))})
+            moment = moment + delta if now.group(1) == "+" else moment - delta
+        return moment, False
+    for pattern, day in (("%Y-%m-%d %H:%M:%S", False), ("%Y-%m-%dT%H:%M:%S", False),
+                         ("%Y-%m-%d %H:%M", False), ("%Y-%m-%d", True)):
+        try:
+            moment = datetime.datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+        return moment.replace(tzinfo=datetime.timezone.utc), day
+    raise ValueError(f"not a date: {text}")
+
+
+def updated_matches(task, operator, value):
+    """`Updated: <operator> <value>` on the task's `updatedAt`."""
+    updated = datetime.datetime.strptime(task["updatedAt"], "%Y-%m-%dT%H:%M:%S.%f%z")
+    one_day = datetime.timedelta(days=1)
+    if ".." in value:
+        low, high = value.split("..", 1)
+        start, _ = moment_of(low)
+        end, day = moment_of(high)
+        return start <= updated < end + one_day if day else start <= updated <= end
+    moment, day = moment_of(value)
+    if day:
+        # A date alone: its whole day.
+        return {">=": updated >= moment, ">": updated >= moment + one_day,
+                "<=": updated < moment + one_day, "<": updated < moment,
+                None: moment <= updated < moment + one_day}[operator]
+    return {">=": updated >= moment, ">": updated > moment, "<=": updated <= moment,
+            "<": updated < moment, None: updated == moment}[operator]
 
 
 def sample():
@@ -384,6 +433,15 @@ def register(router, state):
         task["version"] = task.get("version", 1) + 1
 
     def matches(task, query):
+        # `Updated: >= now() - 15m` first: its value has spaces and operators the clauses below
+        # don't take.
+        for operator, value in UPDATED.findall(query):
+            try:
+                if not updated_matches(task, operator or None, value):
+                    return False
+            except ValueError as err:
+                print(f"tracker mock: Updated: {err}", file=sys.stderr)
+        query = UPDATED.sub(" ", query)
         rest = query
         for clause in re.findall(r'("[^"]+"|[\w.]+):\s*("[^"]*"|[^\s"]+(?:\(\))?)', query):
             name, value = clause[0].strip('"').lower(), clause[1].strip('"')
@@ -448,7 +506,15 @@ def register(router, state):
         page = int(request.arg("page", "1"))
         chunk = found[(page - 1) * per_page: page * per_page]
         pages = max(1, -(-len(found) // per_page))
-        return Response(200, [public(task) for task in chunk],
+        shown = [public(task) for task in chunk]
+        # `fields=key,summary`: only these fields (and `self`, `id`, `key`) of each task.
+        fields = [name.strip() for value in request.query.get("fields", [])
+                  for name in value.split(",") if name.strip()]
+        if fields:
+            keep = {"self", "id", "key", *fields}
+            shown = [{name: value for name, value in task.items() if name in keep}
+                     for task in shown]
+        return Response(200, shown,
                         headers={"X-Total-Count": str(len(found)), "X-Total-Pages": str(pages)})
 
     def myself(request, match):
