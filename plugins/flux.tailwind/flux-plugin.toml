@@ -1,0 +1,47 @@
+# Tailwind CSS for Flux: a language server of the catalog, for the files of the languages other
+# plugins bring (HTML, CSS, JavaScript and TypeScript, Vue, Svelte, Astro, Angular templates).
+#
+# Plugin API 0.4: it needs a Flux that asks a file's other servers too — the class completion and
+# hover of this one, which is never a file's main server — and that keeps it from being the main
+# one of a file (by the plugins' order "Tailwind CSS" comes before "Vue").
+id = "flux.tailwind"
+name = "Tailwind CSS"
+version = "0.1.0"
+api = "0.4"
+authors = ["Egor Ageev"]
+description = "Tailwind CSS in Flux: completion of classes with the CSS they make, the CSS of a class on hover, errors in classes and in Tailwind's at-rules, and their quick fixes — from the Tailwind CSS language server."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/tailwind.svg"
+
+# The server looks for the project's Tailwind CSS itself — a `tailwind.config.*` (v3), a CSS file
+# with `@import "tailwindcss"` (v4) — and stays idle in a project without one. Flux can't say "start
+# only in such a project" yet. Every language id Flux sends is one the server knows
+# (`javascriptreact`, `typescriptreact`, `html` for Angular templates): no `includeLanguages`.
+[[language-servers]]
+id = "tailwindcss-language-server"
+command = "tailwindcss-language-server"
+args = ["--stdio"]
+languages = ["html", "css", "scss", "less", "javascript", "jsx", "typescript", "tsx", "vue", "svelte", "astro", "angular"]
+install = { npm = ["@tailwindcss/language-server"], bin = "tailwindcss-language-server" }
+
+# The answers to `workspace/configuration` (the sections `tailwindCSS` and `editor`), over the
+# server's defaults. Emmet's abbreviations are the HTML server's business.
+[language-servers.settings.tailwindCSS]
+validate = true
+emmetCompletions = false
+hovers = true
+suggestions = true
+codeActions = true
+classAttributes = ["class", "className", "ngClass", "class:list"]
+classFunctions = ["cn", "clsx", "cva", "cx", "twMerge", "twJoin"]
+showPixelEquivalents = true
+rootFontSize = 16
+
+[language-servers.settings.tailwindCSS.lint]
+cssConflict = "warning"
+invalidApply = "error"
+invalidScreen = "error"
+invalidVariant = "error"
+invalidConfigPath = "error"
+invalidTailwindDirective = "error"
+recommendedVariantOrder = "warning"

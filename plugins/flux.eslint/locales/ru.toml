@@ -1,0 +1,2 @@
+# The Russian interface of the plugin: English text = translation (the manifest's strings).
+"ESLint in Flux: the problems of the project's ESLint rules as you type, and their quick fixes — fix a problem, all of its kind, or turn the rule off for a line." = "ESLint во Flux: проблемы по правилам ESLint проекта по мере ввода и их быстрые исправления — исправить проблему, все такие же или отключить правило для строки."

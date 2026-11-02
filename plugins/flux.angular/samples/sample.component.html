@@ -1,0 +1,33 @@
+<!-- A template with everything the queries handle: check with `tree-sitter highlight`. -->
+<h1 [class.active]="isActive" (click)="toggle($event)" #heading>{{ title | uppercase }}</h1>
+<input [(ngModel)]="query" [style.width.px]="width" placeholder="Search" />
+<li *ngFor="let item of items; trackBy: trackById; let i = index">{{ i + 1 }}. {{ item?.name ?? 'none' }}</li>
+<p i18n>{count, plural, =0 {none} =1 {one} other {many}}</p>
+
+@if (user.isLoggedIn) {
+  <p>Welcome, {{ user.name }}!</p>
+} @else if (user.isGuest) {
+  <p>Guest</p>
+} @else {
+  <button (click)="login()">Log in</button>
+}
+
+@for (item of items; track item.id; let idx = $index) {
+  <app-item [item]="item" [index]="idx" />
+} @empty {
+  <p>No items</p>
+}
+
+@switch (mode) {
+  @case ('a') { <span>A</span> }
+  @default { <span>Other</span> }
+}
+
+@defer (on viewport) {
+  <app-heavy />
+} @placeholder (minimum 500ms) {
+  <p>Loading…</p>
+}
+
+@let total = items.length * 2;
+<p style="color: red">{{ total > 10 ? 'many' : 'few' }} &amp; more</p>

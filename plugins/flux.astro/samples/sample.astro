@@ -1,0 +1,28 @@
+---
+// A page with everything the queries handle: check with `tree-sitter highlight`.
+import Layout from '../layouts/Layout.astro';
+interface Props { title: string }
+const { title } = Astro.props as Props;
+const items: string[] = ['one', 'two'];
+---
+
+<Layout title={title}>
+  <h1 class="title" style="color: red">{title.toUpperCase()}</h1>
+  <ul>
+    {items.map((item) => <li data-item={item}>{item}</li>)}
+  </ul>
+  <a href={`/posts/${title}`}>Read</a>
+  <>
+    <p>A fragment</p>
+  </>
+</Layout>
+
+<script>
+  const button: HTMLButtonElement | null = document.querySelector('button');
+  button?.addEventListener('click', () => console.log('clicked'));
+</script>
+
+<style lang="scss">
+  $accent: #bc52ee;
+  h1 { color: $accent; }
+</style>

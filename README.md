@@ -43,12 +43,14 @@ plugins/<plugin id>/
   README.md                shown on the plugin's page in the Marketplace
   locales/ru.toml          translations of the manifest's strings (English text = the key)
   icons/                   the plugin's icon (`icon` of the manifest), file type icons
-  languages/<language>/    highlighting queries (`highlights.scm`)
+  languages/<language>/    highlighting and injection queries (`highlights.scm`, `injections.scm`)
   grammars.toml            where the grammars come from: the build compiles them
   grammars/<grammar>.wasm  the compiled grammars (built, not committed)
   themes/  icon-themes/    color themes, icon sets
   licenses/                the licenses of what the plugin ships (grammars, queries)
+  samples/                files to check the grammars and queries on (`tree-sitter query`; not packed)
   Cargo.toml + src/        a plugin with code (built for wasm32-wasip2)
+grammars/<grammar>/        a grammar written for the catalog: grammar.js and the generated src/
 scripts/build.py           the build
 dist/                      its output: packages and index.json (not committed)
 ```
@@ -64,7 +66,16 @@ rev = "v0.24.2"                                     # a tag or a commit
 path = "."                                          # the folder with src/ in the repository
 ```
 
-and compiled to the path the manifest names (`[[grammars]] wasm = "grammars/rust.wasm"`).
+and compiled to the path the manifest names (`[[grammars]] wasm = "grammars/rust.wasm"`). A grammar
+written for the catalog, with no upstream of its own, lives in this repository's `grammars/` —
+`grammar.js` and the `src/` that `tree-sitter generate` (0.27.1) makes of it, both committed — and is
+named by its folder:
+
+```toml
+[[grammars]]
+id = "dotenv"
+local = "grammars/tree-sitter-dotenv"
+```
 
 ## Building
 

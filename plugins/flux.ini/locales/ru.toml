@@ -1,0 +1,2 @@
+# The Russian interface of the plugin: English text = translation (the manifest's strings).
+"INI files and the configs written in it — .editorconfig, .npmrc, Git's .gitconfig and .gitmodules: highlighting of sections, keys, values and comments." = "Файлы INI и конфигурации в этом формате — .editorconfig, .npmrc, .gitconfig и .gitmodules Git: подсветка секций, ключей, значений и комментариев."

@@ -17,3 +17,4 @@ where each one comes from, and installs, updates or removes it).
 ## Highlighting
 
 - The grammar and its highlighting query: [tree-sitter-markdown](https://github.com/tree-sitter-grammars/tree-sitter-markdown) v0.5.3 (`tree-sitter-markdown`), MIT — `licenses/`.
+- Code blocks are highlighted by the language their info string names (```` ```rust ````, ```` ```ts ````) when Flux has it; HTML blocks as HTML, the front matter as YAML (`---`) or TOML (`+++`). Needs Flux 0.4 or later.

@@ -1,0 +1,27 @@
+# INI for Flux: a language of the catalog. The grammar is the upstream tree-sitter grammar compiled
+# to WebAssembly (`grammars.toml` says which); the highlighting query is the grammar's own
+# (Apache-2.0), adapted to the scopes Flux themes color — see its first lines.
+id = "flux.ini"
+name = "INI"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "INI files and the configs written in it — .editorconfig, .npmrc, Git's .gitconfig and .gitmodules: highlighting of sections, keys, values and comments."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/ini.svg"
+
+# `.yarnrc` of Yarn 1 is not INI (`key "value"`, without `=`): it stays plain text.
+[[languages]]
+id = "ini"
+name = "INI"
+extensions = ["ini"]
+file-names = [".editorconfig", ".npmrc", ".gitconfig", ".gitmodules"]
+aliases = ["dosini", "editorconfig", "gitconfig"]
+grammar = "ini"
+highlights = "languages/ini/highlights.scm"
+icon = "icons/ini.svg"
+icon-color = "text-muted"
+
+[[grammars]]
+id = "ini"
+wasm = "grammars/ini.wasm"

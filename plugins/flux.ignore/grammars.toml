@@ -1,0 +1,9 @@
+# Where the grammars come from: the build compiles each into grammars/<id>.wasm
+# (tree-sitter CLI 0.27.1, `tree-sitter build --wasm`).
+
+[[grammars]]
+id = "gitignore"
+repo = "https://github.com/shunsambongi/tree-sitter-gitignore"
+# No tags: the tip of main on 2022-05-04, the revision other editors pin too
+rev = "f4685bf11ac466dd278449bcfe5fd014e94aa504"
+path = "."

@@ -3,7 +3,7 @@
 # query is the grammar's own (MIT).
 id = "flux.json"
 name = "JSON"
-version = "0.1.0"
+version = "0.2.0"
 api = "0.2"
 authors = ["Egor Ageev"]
 description = "JSON and JSON with Comments: highlighting, and the JSON language server with errors, completion and formatting."
@@ -11,23 +11,26 @@ repository = "https://github.com/egor4geev/flux-plugins"
 icon = "icons/json.svg"
 
 # The JSON query puts the keys `(pair key: …)` before the generic `(string)`: the earlier pattern
-# wins.
+# wins. Configs without an extension that are JSON by default: `.htmlhintrc`. (`.prettierrc`,
+# `.stylelintrc` and `.lintstagedrc` may be JSON or YAML: they stay plain text.)
 [[languages]]
 id = "json"
 name = "JSON"
 extensions = ["json"]
-file-names = ["flake.lock"]
+file-names = ["flake.lock", ".htmlhintrc"]
 grammar = "json"
 highlights = "languages/json/highlights.scm"
 precedence = "first-pattern"
 icon = "icons/json.svg"
 icon-color = "amber"
 
-# Its own language: language servers know `.jsonc` files as `jsonc`.
+# Its own language: language servers know `.jsonc` files as `jsonc`. Configs without an extension
+# whose tools read comments in them (`.babelrc` is even JSON5).
 [[languages]]
 id = "jsonc"
 name = "JSON with Comments"
 extensions = ["jsonc"]
+file-names = [".babelrc", ".eslintrc", ".jshintrc", ".swcrc", ".markdownlintrc"]
 grammar = "json"
 highlights = "languages/json/highlights.scm"
 precedence = "first-pattern"

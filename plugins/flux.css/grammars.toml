@@ -13,3 +13,10 @@ repo = "https://github.com/savetheclocktower/tree-sitter-scss"
 # Pulsar's SCSS grammar (no tags): the module system, `!default`, maps
 rev = "f5dfc3b4609d01fb11af8c97f3948fffeff25e92"
 path = "."
+
+[[grammars]]
+id = "less"
+repo = "https://github.com/jimliang/tree-sitter-less"
+# Its tags are older than the updates of 2024–2025 (tree-sitter 0.22+): the tip of master on 2025-10-30
+rev = "e5ae6245f841b5778c79ac93b28fa4f56b679c5d"
+path = "."

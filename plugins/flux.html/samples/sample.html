@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!-- A page with everything the injections handle: check with `tree-sitter query`. -->
+<html lang="en">
+<head>
+  <style>
+    body { margin: 0; }
+  </style>
+  <script type="importmap">{ "imports": { "app": "./app.js" } }</script>
+  <script type="application/ld+json">{ "@type": "WebSite" }</script>
+</head>
+<body style="color: red">
+  <button onclick="count++; render()">Count &amp; more</button>
+  <script>
+    let count = 0;
+  </script>
+  <script type="module">
+    import { render } from 'app';
+  </script>
+  <script type="text/plain">Not code</script>
+</body>
+</html>

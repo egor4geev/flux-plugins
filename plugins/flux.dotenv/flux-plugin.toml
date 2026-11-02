@@ -1,0 +1,49 @@
+# .env files for Flux: a language of the catalog with checks of its own. The grammar is written
+# here (`grammars/tree-sitter-dotenv` of this repository) and compiled to WebAssembly; the
+# highlighting query is written for Flux's scopes. Plugin API 0.4: `file-patterns` names
+# `.env.local` and `production.env`; the component is built with the 0.3 interfaces, which 0.4
+# keeps.
+id = "flux.dotenv"
+name = "Dotenv"
+version = "0.1.0"
+api = "0.4"
+authors = ["Egor Ageev"]
+description = ".env files: highlighting of keys, values, references and comments, and checks — keys set twice, files with values Git doesn't ignore, keys missing from .env.example."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/dotenv.svg"
+wasm = "target/wasm32-wasip2/release/flux_dotenv.wasm"
+
+[permissions]
+# The project's .env files and their templates are read to check and compare them.
+project = "read"
+# `git check-ignore` and `git ls-files`: whether Git ignores a .env file, or has it.
+processes = ["git"]
+
+[[languages]]
+id = "dotenv"
+name = "Dotenv"
+file-names = [".env"]
+file-patterns = [".env.*", "*.env"]
+aliases = ["env"]
+grammar = "dotenv"
+highlights = "languages/dotenv/highlights.scm"
+icon = "icons/dotenv.svg"
+icon-color = "lime"
+
+[[grammars]]
+id = "dotenv"
+wasm = "grammars/dotenv.wasm"
+
+[[settings]]
+key = "git-check"
+title = "Warn about .env files Git doesn't ignore"
+description = "Files with values, other than templates (.env.example, .env.sample, .env.template)."
+type = "bool"
+default = true
+
+[[settings]]
+key = "compare-example"
+title = "Compare with .env.example"
+description = "Keys of .env.example (or .env.sample, .env.template) a file of its folder doesn't set, and keys the template doesn't list."
+type = "bool"
+default = true

@@ -1,0 +1,35 @@
+# Svelte for Flux: a language of the catalog. The grammar is the upstream tree-sitter grammar
+# compiled to WebAssembly (`grammars.toml` says which); the highlighting query is written for Flux
+# on the grammar's node types and its own query (MIT) — see its first lines. Plugin API 0.4: the
+# injections hand <script>, <style> and the `{…}` expressions to their languages.
+id = "flux.svelte"
+name = "Svelte"
+version = "0.1.0"
+api = "0.4"
+authors = ["Egor Ageev"]
+description = "Svelte components: highlighting of the markup, blocks, scripts and styles, and the Svelte language server with errors, completion, hover, navigation and formatting."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/svelte.svg"
+
+[[languages]]
+id = "svelte"
+name = "Svelte"
+extensions = ["svelte"]
+grammar = "svelte"
+highlights = "languages/svelte/highlights.scm"
+injections = "languages/svelte/injections.scm"
+icon = "icons/svelte.svg"
+icon-color = "orange"
+
+[[grammars]]
+id = "svelte"
+wasm = "grammars/svelte.wasm"
+
+# The server brings the Svelte compiler and reads the project's own `svelte` when it has one;
+# TypeScript 6 is the newest it takes (TypeScript 7 has no JavaScript API).
+[[language-servers]]
+id = "svelte-language-server"
+command = "svelteserver"
+args = ["--stdio"]
+languages = ["svelte"]
+install = { npm = ["svelte-language-server", "typescript@6"], bin = "svelteserver" }

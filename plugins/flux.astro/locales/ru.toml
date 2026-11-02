@@ -1,0 +1,2 @@
+# The Russian interface of the plugin: English text = translation (the manifest's strings).
+"Astro components: highlighting of the frontmatter, markup, expressions, scripts and styles, and the Astro language server with errors, completion, hover and navigation." = "Компоненты Astro: подсветка frontmatter, разметки, выражений, скриптов и стилей и языковой сервер Astro — ошибки, подсказки, описания и навигация."

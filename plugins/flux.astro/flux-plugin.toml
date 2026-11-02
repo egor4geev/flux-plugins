@@ -1,0 +1,37 @@
+# Astro for Flux: a language of the catalog. The grammar is the upstream tree-sitter grammar
+# compiled to WebAssembly (`grammars.toml` says which); the highlighting query is the grammar's own
+# (MIT), adapted to the scopes Flux themes color — see its first lines. Plugin API 0.4: the
+# injections hand the frontmatter, the `{…}` expressions, <script> and <style> to their languages.
+id = "flux.astro"
+name = "Astro"
+version = "0.1.0"
+api = "0.4"
+authors = ["Egor Ageev"]
+description = "Astro components: highlighting of the frontmatter, markup, expressions, scripts and styles, and the Astro language server with errors, completion, hover and navigation."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/astro.svg"
+
+[[languages]]
+id = "astro"
+name = "Astro"
+extensions = ["astro"]
+grammar = "astro"
+highlights = "languages/astro/highlights.scm"
+injections = "languages/astro/injections.scm"
+icon = "icons/astro.svg"
+icon-color = "pink"
+
+[[grammars]]
+id = "astro"
+wasm = "grammars/astro.wasm"
+
+# The server needs a TypeScript (`typescript.tsdk`): the one installed next to it, TypeScript 6 —
+# TypeScript 7 has no JavaScript API. `{server-dir}` is the server's folder among the ones Flux
+# installed.
+[[language-servers]]
+id = "astro-language-server"
+command = "{server-dir}/node_modules/.bin/astro-ls"
+args = ["--stdio"]
+languages = ["astro"]
+initialization-options = { typescript = { tsdk = "{server-dir}/node_modules/typescript/lib" } }
+install = { npm = ["@astrojs/language-server", "typescript@6"], bin = "astro-ls" }

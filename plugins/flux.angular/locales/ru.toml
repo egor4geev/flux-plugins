@@ -1,0 +1,3 @@
+# The Russian interface of the plugin: English text = translation (the manifest's strings).
+"Angular templates: highlighting of bindings, pipes and control flow blocks, and the Angular language server with errors, completion, hover and navigation between templates and components." = "Шаблоны Angular: подсветка привязок, пайпов и блоков управления и языковой сервер Angular — ошибки, подсказки, описания и навигация между шаблонами и компонентами."
+"Angular Template" = "Шаблон Angular"

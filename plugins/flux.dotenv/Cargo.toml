@@ -1,0 +1,25 @@
+[package]
+name = "flux-dotenv"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "The checks of .env files in Flux: keys set twice, files Git doesn't ignore, keys missing from .env.example."
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+# The SDK of the Flux commit with plugin API 0.3: API 0.4 keeps its interfaces (part 10.3).
+flux-plugin-api = { git = "https://github.com/egor4geev/flux", rev = "14bba127222980a9d57f3b5d6ec8b4a67eb967fc" }
+
+# Plugins are small: Flux compiles the component when it loads it.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+# A plugin is a project of its own: `cargo build --release --target wasm32-wasip2`.
+[workspace]

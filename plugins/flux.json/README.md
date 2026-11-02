@@ -4,8 +4,10 @@ JSON and JSON with Comments: highlighting, and the JSON language server with err
 
 ## Files
 
-- **JSON**: `*.json`, `flake.lock`.
-- **JSON with Comments**: `*.jsonc`.
+- **JSON**: `*.json`, `flake.lock`, `.htmlhintrc`.
+- **JSON with Comments**: `*.jsonc`, `.babelrc`, `.eslintrc`, `.jshintrc`, `.swcrc`, `.markdownlintrc`.
+
+`.prettierrc`, `.stylelintrc` and `.lintstagedrc` may be written in JSON or in YAML, so Flux doesn't take them for either.
 
 ## Language servers
 
