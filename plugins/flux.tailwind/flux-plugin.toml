@@ -1,9 +1,9 @@
 # Tailwind CSS for Flux: a language server of the catalog, for the files of the languages other
 # plugins bring (HTML, CSS, JavaScript and TypeScript, Vue, Svelte, Astro, Angular templates).
 #
-# Plugin API 0.4: it needs a Flux that asks a file's other servers too — the class completion and
-# hover of this one, which is never a file's main server — and that keeps it from being the main
-# one of a file (by the plugins' order "Tailwind CSS" comes before "Vue").
+# Plugin API 0.4: a secondary server — never a file's main one (by the plugins' order "Tailwind CSS"
+# comes before "Vue"), its class completion and hover joining the main server's — that starts only
+# in projects with Tailwind CSS.
 id = "flux.tailwind"
 name = "Tailwind CSS"
 version = "0.1.0"
@@ -13,16 +13,20 @@ description = "Tailwind CSS in Flux: completion of classes with the CSS they mak
 repository = "https://github.com/egor4geev/flux-plugins"
 icon = "icons/tailwind.svg"
 
-# The server looks for the project's Tailwind CSS itself — a `tailwind.config.*` (v3), a CSS file
-# with `@import "tailwindcss"` (v4) — and stays idle in a project without one. Flux can't say "start
-# only in such a project" yet. Every language id Flux sends is one the server knows
-# (`javascriptreact`, `typescriptreact`, `html` for Angular templates): no `includeLanguages`.
+# It starts in a project with a `tailwind.config.*` of version 3 (in the root or next to the file's
+# `package.json`), or with Tailwind CSS among the dependencies of the file's `package.json` — version
+# 4 is configured in CSS (`@import "tailwindcss"`), but its packages (`tailwindcss`,
+# `@tailwindcss/vite`, `@tailwindcss/postcss`, `@tailwindcss/cli`) are still dependencies. The server
+# then finds the project's configuration itself. Every language id Flux sends is one the server
+# knows (`javascriptreact`, `typescriptreact`, `html` for Angular templates): no `includeLanguages`.
 [[language-servers]]
 id = "tailwindcss-language-server"
 command = "tailwindcss-language-server"
 args = ["--stdio"]
 languages = ["html", "css", "scss", "less", "javascript", "jsx", "typescript", "tsx", "vue", "svelte", "astro", "angular"]
 install = { npm = ["@tailwindcss/language-server"], bin = "tailwindcss-language-server" }
+secondary = true
+activation = { files = ["tailwind.config.*"], dependencies = ["tailwindcss", "@tailwindcss/*"] }
 
 # The answers to `workspace/configuration` (the sections `tailwindCSS` and `editor`), over the
 # server's defaults. Emmet's abbreviations are the HTML server's business.

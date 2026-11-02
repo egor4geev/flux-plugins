@@ -169,6 +169,41 @@ def check_manifest(folder: Path, manifest: dict) -> None:
     for grammar in manifest.get("grammars", []):
         if "builtin" in grammar:
             raise BuildError(f"grammar {grammar.get('id')!r}: catalog plugins bring their grammars (`wasm`), not Flux's built-in ones")
+    for server in manifest.get("language-servers", []):
+        check_server(server, manifest["api"])
+
+
+def api_at_least(api: str, major: int, minor: int) -> bool:
+    try:
+        return tuple(int(part) for part in api.split(".")[:2]) >= (major, minor)
+    except ValueError:
+        return False
+
+
+def check_server(server: dict, api: str) -> None:
+    """The keys of API 0.4 of a `[[language-servers]]` table (Flux checks the rest when it reads the
+    manifest): `secondary` and `activation` need `api = "0.4"`; `activation`'s patterns are of file
+    names, without braces."""
+    name = server.get("id")
+    for key in ("secondary", "activation"):
+        if key in server and not api_at_least(api, 0, 4):
+            raise BuildError(f"language server {name!r}: `{key}` needs api = \"0.4\"")
+    if "secondary" in server and not isinstance(server["secondary"], bool):
+        raise BuildError(f"language server {name!r}: `secondary` is true or false")
+    activation = server.get("activation")
+    if activation is None:
+        return
+    if not isinstance(activation, dict) or set(activation) - {"files", "dependencies"}:
+        raise BuildError(f"language server {name!r}: activation = {{ files = [...], dependencies = [...] }}")
+    files, dependencies = activation.get("files", []), activation.get("dependencies", [])
+    if not files and not dependencies:
+        raise BuildError(f"language server {name!r}: activation names no `files` or `dependencies`")
+    for pattern in files:
+        if not isinstance(pattern, str) or not pattern or any(c in pattern for c in "/\\{}"):
+            raise BuildError(f"language server {name!r}: activation file {pattern!r} — a pattern of a file name, no folders or braces")
+    for package in dependencies:
+        if not isinstance(package, str) or not package or package.count("/") > 1:
+            raise BuildError(f"language server {name!r}: activation dependency {package!r} isn't a package name")
 
 
 def named_files(manifest: dict) -> list[str]:
