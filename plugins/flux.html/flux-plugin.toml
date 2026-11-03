@@ -1,10 +1,11 @@
 # HTML for Flux (stage 8.3): a language of the catalog. The grammar is the upstream
 # tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query
-# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines.
+# is the grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines. Plugin
+# API 0.4: the injections hand <script> and <style> to JavaScript and CSS.
 id = "flux.html"
 name = "HTML"
-version = "0.1.0"
-api = "0.2"
+version = "0.2.0"
+api = "0.4"
 authors = ["Egor Ageev"]
 description = "HTML: highlighting, and the HTML language server with errors, completion, hover and formatting."
 repository = "https://github.com/egor4geev/flux-plugins"
@@ -17,6 +18,7 @@ extensions = ["html", "htm", "xhtml"]
 aliases = ["htm", "xhtml"]
 grammar = "html"
 highlights = "languages/html/highlights.scm"
+injections = "languages/html/injections.scm"
 icon = "icons/html.svg"
 icon-color = "orange"
 

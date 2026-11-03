@@ -1,0 +1,2 @@
+# The Russian interface of the plugin: English text = translation (the manifest's strings).
+"Tailwind CSS in Flux: completion of classes with the CSS they make, the CSS of a class on hover, errors in classes and in Tailwind's at-rules, and their quick fixes — from the Tailwind CSS language server." = "Tailwind CSS во Flux: подсказки классов с их CSS, CSS класса при наведении, ошибки в классах и at-правилах Tailwind и их быстрые исправления — от языкового сервера Tailwind CSS."

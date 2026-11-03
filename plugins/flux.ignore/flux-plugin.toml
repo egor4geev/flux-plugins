@@ -1,0 +1,27 @@
+# Ignore files for Flux: a language of the catalog. The grammar is the upstream tree-sitter grammar
+# compiled to WebAssembly (`grammars.toml` says which); the highlighting query is written for Flux
+# on the grammar's node types.
+id = "flux.ignore"
+name = "Ignore Files"
+version = "0.1.0"
+api = "0.2"
+authors = ["Egor Ageev"]
+description = "Ignore files of Git and of the tools that read the same patterns — .gitignore, .dockerignore, .npmignore, .prettierignore, .eslintignore and others: highlighting of patterns, wildcards, negations and comments."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/ignore.svg"
+
+# The files of tools that take Git's patterns. `.hgignore` too: its `syntax: glob` lines are these
+# patterns (regular expressions read as patterns).
+[[languages]]
+id = "ignore"
+name = "Ignore File"
+file-names = [".gitignore", ".dockerignore", ".npmignore", ".prettierignore", ".eslintignore", ".stylelintignore", ".vercelignore", ".gcloudignore", ".hgignore", ".ignore"]
+aliases = ["gitignore"]
+grammar = "gitignore"
+highlights = "languages/ignore/highlights.scm"
+icon = "icons/ignore.svg"
+icon-color = "text-muted"
+
+[[grammars]]
+id = "gitignore"
+wasm = "grammars/gitignore.wasm"

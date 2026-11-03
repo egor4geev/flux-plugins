@@ -1,16 +1,18 @@
 # Markdown for Flux (stage 8.3): moved out of Flux into the catalog. The grammar is the
 # upstream tree-sitter grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting
-# query is the grammar's own (MIT).
+# query is the grammar's own (MIT). Plugin API 0.4: the injections hand code blocks to their
+# languages.
 id = "flux.markdown"
 name = "Markdown"
-version = "0.1.0"
-api = "0.2"
+version = "0.2.0"
+api = "0.4"
 authors = ["Egor Ageev"]
 description = "Markdown: highlighting of the document's structure, and Marksman with links between files, headings and completion."
 repository = "https://github.com/egor4geev/flux-plugins"
 icon = "icons/markdown.svg"
 
-# The block grammar only: inline markup and code in blocks would be injections.
+# The block grammar only: inline markup (emphasis, links, code spans) would be the inline grammar.
+# Code blocks, HTML blocks and the front matter are injections.
 [[languages]]
 id = "markdown"
 name = "Markdown"
@@ -18,6 +20,7 @@ extensions = ["md", "markdown"]
 aliases = ["md"]
 grammar = "markdown"
 highlights = "languages/markdown/highlights.scm"
+injections = "languages/markdown/injections.scm"
 icon = "icons/markdown.svg"
 icon-color = "indigo"
 

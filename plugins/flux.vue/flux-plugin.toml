@@ -1,0 +1,38 @@
+# Vue for Flux: a language of the catalog. The grammar is the upstream tree-sitter grammar compiled
+# to WebAssembly (`grammars.toml` says which); the highlighting query is written for Flux on the
+# grammar's node types and its own query (MIT) — see its first lines. Plugin API 0.4: the
+# injections hand <script>, <style> and the expressions of the template to their languages.
+id = "flux.vue"
+name = "Vue"
+version = "0.1.0"
+api = "0.4"
+authors = ["Egor Ageev"]
+description = "Vue single-file components: highlighting of the template, scripts and styles, and the Vue language server with errors, completion, hover and navigation."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/vue.svg"
+
+[[languages]]
+id = "vue"
+name = "Vue"
+extensions = ["vue"]
+grammar = "vue"
+highlights = "languages/vue/highlights.scm"
+injections = "languages/vue/injections.scm"
+icon = "icons/vue.svg"
+icon-color = "green"
+
+[[grammars]]
+id = "vue"
+wasm = "grammars/vue.wasm"
+
+# Vue language tools 2.2 on their own ("hybridMode = false"): the server checks and completes the
+# TypeScript of a component itself, with the TypeScript installed next to it. Version 3 only works
+# as a plugin inside the TypeScript server of the editor. `{server-dir}` is the server's folder
+# among the ones Flux installed: Flux runs its own copy, not a `vue-language-server` 3 from PATH.
+[[language-servers]]
+id = "vue-language-server"
+command = "{server-dir}/node_modules/.bin/vue-language-server"
+args = ["--stdio"]
+languages = ["vue"]
+initialization-options = { typescript = { tsdk = "{server-dir}/node_modules/typescript/lib" }, vue = { hybridMode = false } }
+install = { npm = ["@vue/language-server@2.2.12", "typescript@5.9"], bin = "vue-language-server" }

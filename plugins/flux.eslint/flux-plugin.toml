@@ -1,0 +1,60 @@
+# ESLint for Flux: a language server of the catalog, for the files of the languages other plugins
+# bring (JavaScript and TypeScript, Vue, Svelte, Astro).
+#
+# Plugin API 0.4: it needs a Flux that pulls a server's problems (`textDocument/diagnostic`: this
+# server publishes none); a secondary server — never a file's main one (by the plugins' order
+# "ESLint" comes before "Svelte" and "Vue") — that starts only in projects with ESLint.
+id = "flux.eslint"
+name = "ESLint"
+version = "0.1.0"
+api = "0.4"
+authors = ["Egor Ageev"]
+description = "ESLint in Flux: the problems of the project's ESLint rules as you type, and their quick fixes — fix a problem, all of its kind, or turn the rule off for a line."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/eslint.svg"
+
+# The server runs the project's own ESLint (`node_modules/eslint`). It starts in a project with an
+# ESLint config — flat (`eslint.config.*`, ESLint 9 and later) or legacy (`.eslintrc*`) — in the root
+# or next to the file's `package.json`, or with `eslint` among that `package.json`'s dependencies.
+[[language-servers]]
+id = "vscode-eslint-language-server"
+command = "vscode-eslint-language-server"
+args = ["--stdio"]
+languages = ["javascript", "jsx", "typescript", "tsx", "vue", "svelte", "astro"]
+install = { npm = ["vscode-langservers-extracted"], bin = "vscode-eslint-language-server" }
+secondary = true
+activation = { files = ["eslint.config.*", ".eslintrc*"], dependencies = ["eslint"] }
+
+# The server asks for the whole configuration of each document (`workspace/configuration` with
+# the section ""): these keys are its answer, and it reads each of them — none may be missing.
+# - `validate = "on"`: every file it gets is linted; ESLint 9's flat config skips the files no
+#   config object matches (`.vue` without a Vue plugin) silently, `onIgnoredFiles = "off"`.
+# - `useFlatConfig` is left out: ESLint 9 and later read `eslint.config.*`, 8.57 reads it when
+#   there is one, older versions `.eslintrc.*`. `experimental.useFlatConfig` is the old switch
+#   of ESLint 8.21–8.56, off.
+# - `workspaceFolder`: the project's root (`{ uri, name }`, as the server's own client sends it):
+#   a relative `nodePath` and the working directory fall back to it.
+# - `workingDirectory.mode = "auto"`: ESLint runs in the folder of the file's nearest
+#   `package.json` or config — each package of a monorepo with its own config.
+# - `nodePath = ""`: ESLint is looked up from the file's folder; `format = false`: formatting
+#   stays with the formatter; the documentation action is off — it opens a page Flux doesn't show.
+[language-servers.settings]
+validate = "on"
+run = "onType"
+packageManager = "npm"
+useESLintClass = false
+nodePath = ""
+quiet = false
+onIgnoredFiles = "off"
+format = false
+rulesCustomizations = []
+options = {}
+workingDirectory = { mode = "auto" }
+workspaceFolder = { uri = "{root-uri}", name = "{root}" }
+experimental = { useFlatConfig = false }
+problems = { shortenToSingleLine = false }
+codeActionOnSave = { enable = false, mode = "all" }
+
+[language-servers.settings.codeAction]
+disableRuleComment = { enable = true, location = "separateLine", commentStyle = "line" }
+showDocumentation = { enable = false }

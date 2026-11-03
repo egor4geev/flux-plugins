@@ -3,7 +3,8 @@
 
 For every folder of `plugins/` (a plugin, named by its id):
 
-1. its tree-sitter grammars (`grammars.toml`) are fetched at the pinned revision and compiled to
+1. its tree-sitter grammars (`grammars.toml`) are fetched at the pinned revision — or taken from
+   this repository's `grammars/` (`local`), the ones written for the catalog — and compiled to
    WebAssembly with the tree-sitter CLI (`tree-sitter build --wasm`), into the paths the manifest's
    `[[grammars]] wasm` names;
 2. a plugin with code (`Cargo.toml`) is built for `wasm32-wasip2`;
@@ -47,12 +48,13 @@ BUILD = ROOT / ".build"
 # The repository the packages are published in (GitHub Releases, a tag per plugin version).
 DEFAULT_REPO = "egor4geev/flux-plugins"
 # The plugin APIs this catalog takes: what Flux runs (a plugin built for an older API keeps working).
-API_VERSIONS = ("0.2", "0.3")
+API_VERSIONS = ("0.2", "0.3", "0.4")
 INDEX_FORMAT = 1
 
 ID = re.compile(r"^[a-z0-9]+([.-][a-z0-9]+)*$")
-# Files of a plugin's folder that are not part of its package: build inputs and outputs.
-EXCLUDED_TOP = {"grammars.toml", "Cargo.toml", "Cargo.lock", "src", "target", "build.rs", "mock"}
+# Files of a plugin's folder that are not part of its package: build inputs and outputs, and the
+# sample files a language's grammar and queries are checked on.
+EXCLUDED_TOP = {"grammars.toml", "Cargo.toml", "Cargo.lock", "src", "target", "build.rs", "mock", "samples"}
 
 
 class BuildError(Exception):
@@ -167,6 +169,41 @@ def check_manifest(folder: Path, manifest: dict) -> None:
     for grammar in manifest.get("grammars", []):
         if "builtin" in grammar:
             raise BuildError(f"grammar {grammar.get('id')!r}: catalog plugins bring their grammars (`wasm`), not Flux's built-in ones")
+    for server in manifest.get("language-servers", []):
+        check_server(server, manifest["api"])
+
+
+def api_at_least(api: str, major: int, minor: int) -> bool:
+    try:
+        return tuple(int(part) for part in api.split(".")[:2]) >= (major, minor)
+    except ValueError:
+        return False
+
+
+def check_server(server: dict, api: str) -> None:
+    """The keys of API 0.4 of a `[[language-servers]]` table (Flux checks the rest when it reads the
+    manifest): `secondary` and `activation` need `api = "0.4"`; `activation`'s patterns are of file
+    names, without braces."""
+    name = server.get("id")
+    for key in ("secondary", "activation"):
+        if key in server and not api_at_least(api, 0, 4):
+            raise BuildError(f"language server {name!r}: `{key}` needs api = \"0.4\"")
+    if "secondary" in server and not isinstance(server["secondary"], bool):
+        raise BuildError(f"language server {name!r}: `secondary` is true or false")
+    activation = server.get("activation")
+    if activation is None:
+        return
+    if not isinstance(activation, dict) or set(activation) - {"files", "dependencies"}:
+        raise BuildError(f"language server {name!r}: activation = {{ files = [...], dependencies = [...] }}")
+    files, dependencies = activation.get("files", []), activation.get("dependencies", [])
+    if not files and not dependencies:
+        raise BuildError(f"language server {name!r}: activation names no `files` or `dependencies`")
+    for pattern in files:
+        if not isinstance(pattern, str) or not pattern or any(c in pattern for c in "/\\{}"):
+            raise BuildError(f"language server {name!r}: activation file {pattern!r} — a pattern of a file name, no folders or braces")
+    for package in dependencies:
+        if not isinstance(package, str) or not package or package.count("/") > 1:
+            raise BuildError(f"language server {name!r}: activation dependency {package!r} isn't a package name")
 
 
 def named_files(manifest: dict) -> list[str]:
@@ -177,8 +214,9 @@ def named_files(manifest: dict) -> list[str]:
     if manifest.get("wasm"):
         files.append(manifest["wasm"])
     for language in manifest.get("languages", []):
-        highlights = language.get("highlights", [])
-        files.extend([highlights] if isinstance(highlights, str) else highlights)
+        for key in ("highlights", "injections"):
+            queries = language.get(key, [])
+            files.extend([queries] if isinstance(queries, str) else queries)
         if language.get("icon"):
             files.append(language["icon"])
     for grammar in manifest.get("grammars", []):
@@ -224,12 +262,23 @@ def build_grammars(folder: Path, manifest: dict, force: bool) -> None:
         if not output:
             raise BuildError(f"grammars.toml: {grammar_id!r} isn't a `wasm` grammar of the manifest")
         target = folder / output
-        if target.is_file() and not force:
-            continue
-        checkout = fetch_source(source)
-        grammar_dir = (checkout / source.get("path", ".")).resolve()
+        if source.get("local"):
+            # A grammar written for the catalog: its sources are in this repository.
+            grammar_dir = (ROOT / source["local"]).resolve()
+            if ROOT not in grammar_dir.parents:
+                raise BuildError(f"grammars.toml: {grammar_id!r}: `local` is a folder of this repository")
+            sources_changed = target.is_file() and any(
+                path.stat().st_mtime > target.stat().st_mtime for path in (grammar_dir / "src").glob("*.c")
+            )
+            if target.is_file() and not force and not sources_changed:
+                continue
+        else:
+            if target.is_file() and not force:
+                continue
+            checkout = fetch_source(source)
+            grammar_dir = (checkout / source.get("path", ".")).resolve()
         if not (grammar_dir / "src" / "parser.c").is_file():
-            raise BuildError(f"grammar {grammar_id!r}: no src/parser.c in {source.get('path', '.')}")
+            raise BuildError(f"grammar {grammar_id!r}: no src/parser.c in {source.get('local') or source.get('path', '.')}")
         target.parent.mkdir(parents=True, exist_ok=True)
         run([tree_sitter(), "build", "--wasm", "-o", str(target), str(grammar_dir)], f"grammar {grammar_id!r}")
 
@@ -344,6 +393,7 @@ def index_entry(folder: Path, manifest: dict, manifest_text: str, package: bytes
             "name": language.get("name", language["id"]),
             "extensions": [extension.lower() for extension in language.get("extensions", [])],
             "file_names": language.get("file-names", []),
+            "file_patterns": language.get("file-patterns", []),
         }
         for language in manifest.get("languages", [])
     ]

@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+/dist
+build/**/*.map
+*.log
+!important.log
+.env
+.env.*
+!.env.example
+debug?.txt
+[Bb]in/
+*.[!o]
+file[0-9].txt
+[[:digit:]]*.tmp
+\#not-a-comment
+\!not-a-negation
+foo\ bar
+**/logs/**

@@ -1,0 +1,25 @@
+// A stylesheet with everything the queries handle: check with `tree-sitter highlight`.
+@import (reference) "theme.less";
+@plugin "my-plugin";
+@primary: #42b883;
+@prop: color;
+@width: 2px;
+
+.bordered(@width: 2px, @style: solid) when (@width > 1px) {
+  border: @width @style darken(@primary, 10%);
+}
+
+.banner-@{prop} {
+  @{prop}: @primary;
+  .bordered(4px, dashed);
+  &:extend(.title all);
+  background+: url("one.png");
+  width: (@width * 2);
+  &:hover { color: fade(@primary, 50%); }
+}
+
+.guard {
+  /* a block comment */
+  @var: primary;
+  color: @@var;
+}

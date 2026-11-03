@@ -1,0 +1,8 @@
+# Where the grammars come from: the build compiles each into grammars/<id>.wasm
+# (tree-sitter CLI 0.27.1, `tree-sitter build --wasm`).
+
+[[grammars]]
+id = "angular"
+repo = "https://github.com/dlvandenberg/tree-sitter-angular"
+rev = "v0.9.2"  # 1446e647e50df96f6d4b1039f121b10b5c2b2976
+path = "."

@@ -17,4 +17,4 @@ where each one comes from, and installs, updates or removes it).
 ## Highlighting
 
 - [tree-sitter-html](https://github.com/tree-sitter/tree-sitter-html) v0.23.2, MIT — the grammar and its highlighting query, adapted to Flux's theme scopes (`licenses/`).
-- Flux has no language injections yet: the CSS of `<style>` and the JavaScript of `<script>` are not highlighted (the language server still understands them).
+- The languages inside a page are highlighted by their own plugins: the JavaScript of `<script>` (also `type="module"`; JSON for `type="importmap"` and `application/ld+json`; the language a `lang` names), the CSS of `<style>` and of `style="…"`, the JavaScript of event handlers (`onclick="…"`). Needs Flux 0.4 or later.

@@ -1,0 +1,16 @@
+# The Russian interface of the plugin: English text = translation (the manifest's strings, the
+# problems the plugin reports).
+
+# The manifest
+".env files: highlighting of keys, values, references and comments, and checks — keys set twice, files with values Git doesn't ignore, keys missing from .env.example." = "Файлы .env: подсветка ключей, значений, ссылок и комментариев и проверки — повторно заданные ключи, файлы со значениями, которые Git не игнорирует, ключи, которых не хватает по .env.example."
+"Warn about .env files Git doesn't ignore" = "Предупреждать о файлах .env, которые Git не игнорирует"
+"Files with values, other than templates (.env.example, .env.sample, .env.template)." = "Файлы со значениями, кроме шаблонов (.env.example, .env.sample, .env.template)."
+"Compare with .env.example" = "Сравнивать с .env.example"
+"Keys of .env.example (or .env.sample, .env.template) a file of its folder doesn't set, and keys the template doesn't list." = "Ключи .env.example (или .env.sample, .env.template), которые не заданы в файле из той же папки, и ключи, которых нет в шаблоне."
+
+# Problems
+"{0} is already set on line {1}" = "{0} уже задан в строке {1}"
+"Git doesn't ignore this file: its values can get into a commit. Add it to .gitignore." = "Git не игнорирует этот файл: его значения могут попасть в коммит. Добавьте его в .gitignore."
+"This file is committed to Git: its values are in the repository." = "Этот файл есть в Git: его значения хранятся в репозитории."
+"Not set here, but listed in {0}: {1}" = "Не заданы здесь, но есть в {0}: {1}"
+"{0} isn't listed in {1}" = "{0} нет в {1}"

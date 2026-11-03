@@ -1,0 +1,14 @@
+[user]
+	name = Anna Example
+	email = anna@example.com
+[core]
+	autocrlf = input
+	editor = vim
+[alias]
+	lg = log --graph --oneline
+[remote "origin"]
+	url = git@github.com:acme/app.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[submodule "vendor/lib"]
+	path = vendor/lib
+	url = https://github.com/acme/lib

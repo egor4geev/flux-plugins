@@ -1,0 +1,20 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "dotenv",
+      "camelcase": "Dotenv",
+      "title": "Dotenv",
+      "scope": "source.dotenv",
+      "file-types": [".env"],
+      "injection-regex": "^(dotenv|env)$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "dotenv files for tree-sitter: written for the Flux plugin catalog",
+    "authors": [{ "name": "Egor Ageev" }],
+    "links": { "repository": "https://github.com/egor4geev/flux-plugins" }
+  }
+}

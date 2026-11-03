@@ -1,0 +1,41 @@
+# Angular templates for Flux: a language of the catalog. The grammar is the upstream tree-sitter
+# grammar compiled to WebAssembly (`grammars.toml` says which); the highlighting query is the
+# grammar's own (MIT), adapted to the scopes Flux themes color — see its first lines. The grammar
+# reads Angular's expressions itself — bindings, `{{ }}`, pipes, `@if`/`@for` blocks — so the
+# injections (plugin API 0.4) only hand <script>, <style> and style="…" to their languages.
+id = "flux.angular"
+name = "Angular"
+version = "0.1.0"
+api = "0.4"
+authors = ["Egor Ageev"]
+description = "Angular templates: highlighting of bindings, pipes and control flow blocks, and the Angular language server with errors, completion, hover and navigation between templates and components."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/angular.svg"
+
+# An Angular template is HTML by its extension: only the names of the Angular style guide before
+# version 20 tell it apart (`*.component.html`).
+[[languages]]
+id = "angular"
+name = "Angular Template"
+file-patterns = ["*.component.html"]
+aliases = ["angular-html"]
+grammar = "angular"
+highlights = "languages/angular/highlights.scm"
+injections = "languages/angular/injections.scm"
+lsp-id = "html"
+icon = "icons/angular.svg"
+icon-color = "red"
+
+[[grammars]]
+id = "angular"
+wasm = "grammars/angular.wasm"
+
+# The server takes TypeScript and Angular's language service from the project when it has them
+# (`.` is the project's folder: the server runs there), otherwise the ones installed with it.
+# `{server-dir}` is the server's folder among the ones Flux installed.
+[[language-servers]]
+id = "angular-language-server"
+command = "{server-dir}/node_modules/.bin/ngserver"
+args = ["--stdio", "--tsProbeLocations", ".,{server-dir}", "--ngProbeLocations", ".,{server-dir}"]
+languages = ["angular"]
+install = { npm = ["@angular/language-server"], bin = "ngserver" }

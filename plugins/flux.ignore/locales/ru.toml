@@ -1,0 +1,4 @@
+# The Russian interface of the plugin: English text = translation (the manifest's strings).
+"Ignore files of Git and of the tools that read the same patterns — .gitignore, .dockerignore, .npmignore, .prettierignore, .eslintignore and others: highlighting of patterns, wildcards, negations and comments." = "Файлы исключений Git и инструментов, которые читают те же шаблоны, — .gitignore, .dockerignore, .npmignore, .prettierignore, .eslintignore и другие: подсветка шаблонов, подстановочных знаков, отрицаний и комментариев."
+"Ignore Files" = "Файлы исключений"
+"Ignore File" = "Файл исключений"

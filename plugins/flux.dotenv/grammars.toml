@@ -1,0 +1,7 @@
+# Where the grammars come from: the build compiles each into grammars/<id>.wasm
+# (tree-sitter CLI 0.27.1, `tree-sitter build --wasm`).
+
+# Written for the catalog: its sources (grammar.js and the generated src/) are in this repository.
+[[grammars]]
+id = "dotenv"
+local = "grammars/tree-sitter-dotenv"
