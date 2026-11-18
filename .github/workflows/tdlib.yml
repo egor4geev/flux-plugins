@@ -1,0 +1,315 @@
+# TDLib's static libraries for fluxgram-helper (helpers/fluxgram-helper/build.rs), built here once
+# for the four platforms Flux runs on and published as a release of this repository: the tag
+# `tdlib-v<version>` with `tdlib-<version>-<platform>.tar.gz` — a `tdlib/` folder: `lib/` with
+# TDLib's libraries (the names build.rs links), OpenSSL's and zlib's, and their licenses — and
+# SHA256SUMS. build.rs pins each archive's SHA-256.
+#
+# Built here rather than taken prebuilt so that the helper is one file on every system Flux runs on:
+# macOS — for macOS 12 (Flux's minimum: deployment target 12.0, libc++ as the system has it, OpenSSL
+# and zlib built for it too); Windows — the static C runtime (/MT: TDLib, and vcpkg's OpenSSL and
+# zlib), so the helper needs no Visual C++ runtime DLLs. TDLib's sources are generated first
+# (`prepare_cross_compiling`), then compiled a few files at a time: its largest take gigabytes.
+#
+# A release is never rebuilt or replaced (caches expire, a release stays): a new TDLib is a new
+# TDLIB_VERSION and TDLIB_COMMIT, then a push of this file. A platform's archive is kept in the
+# Actions cache between runs (its `recipe` in the key: raise it when its steps change), so a fix
+# for one platform doesn't rebuild the others.
+name: TDLib
+
+on:
+  push:
+    branches:
+      - fluxgram-helper-ci
+    paths:
+      - ".github/workflows/tdlib.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tdlib-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TDLIB_VERSION: "1.8.61"
+  # The commit `tdlib-rs` 1.4.0 built TDLib 1.8.61 from (its .github/workflows/build-tdlib.yml).
+  TDLIB_COMMIT: 6d509061574d684117f74133056aa43df89022fc
+  # macOS only (Windows takes vcpkg's, built for /MT by the triplet below).
+  OPENSSL_VERSION: "3.6.5"
+  OPENSSL_SHA256: a2157c2830efdec3788939b00c9b0638306d3f0bbb76dc4832ee503bb397df98
+  ZLIB_VERSION: "1.3.1"
+  ZLIB_SHA256: 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+jobs:
+  build:
+    name: TDLib ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each on its own processor: TDLib runs its generators while it builds. `jobs` — the
+          # files compiled at once (the runners' cores; Apple Silicon's has 7 GB for 3).
+          - platform: macos-aarch64
+            runner: macos-15
+            arch: arm64
+            jobs: 3
+            recipe: 1
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            arch: x86_64
+            jobs: 4
+            recipe: 1
+          - platform: windows-x86_64
+            runner: windows-latest
+            arch: x64
+            jobs: 4
+            recipe: 1
+          - platform: windows-aarch64
+            runner: windows-11-arm
+            arch: arm64
+            jobs: 4
+            recipe: 1
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      ARCH: ${{ matrix.arch }}
+      JOBS: ${{ matrix.jobs }}
+      ARCHIVE: tdlib-${{ matrix.platform }}.tar.gz
+    steps:
+      - name: Built before
+        id: cached
+        uses: actions/cache/restore@v4
+        with:
+          path: tdlib-${{ matrix.platform }}.tar.gz
+          key: tdlib-${{ env.TDLIB_VERSION }}-${{ matrix.platform }}-${{ matrix.recipe }}
+
+      - name: TDLib's sources
+        if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: tdlib/td
+          ref: ${{ env.TDLIB_COMMIT }}
+          path: td
+
+      # OpenSSL and zlib from their sources for the target and macOS 12: Homebrew's are built for
+      # the runner's own macOS.
+      - name: OpenSSL and zlib (macOS)
+        if: steps.cached.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          brew install gperf
+          deps="$RUNNER_TEMP/deps"
+          src="$RUNNER_TEMP/src"
+          mkdir -p "$deps" "$src" licenses
+          cd "$src"
+          fetch() {
+            curl -fsSL --retry 3 -o "$2" "$1"
+            echo "$3  $2" | shasum -a 256 -c -
+          }
+          fetch "https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.gz" \
+            zlib.tar.gz "$ZLIB_SHA256"
+          fetch "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz" \
+            openssl.tar.gz "$OPENSSL_SHA256"
+          tar -xzf zlib.tar.gz
+          tar -xzf openssl.tar.gz
+
+          cd "$src/zlib-$ZLIB_VERSION"
+          CFLAGS="-O2 -arch $ARCH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
+            ./configure --static --prefix="$deps"
+          make -j"$JOBS" install
+          cp LICENSE "$GITHUB_WORKSPACE/licenses/zlib-LICENSE.txt"
+
+          cd "$src/openssl-$OPENSSL_VERSION"
+          ./Configure "darwin64-$ARCH-cc" no-shared no-tests \
+            --prefix="$deps" --libdir=lib "-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+          make -j"$JOBS" build_libs
+          make install_dev
+          cp LICENSE.txt "$GITHUB_WORKSPACE/licenses/OpenSSL-LICENSE.txt"
+          ls -l "$deps/lib"
+          echo "DEPS=$deps" >> "$GITHUB_ENV"
+
+      - name: TDLib (macOS)
+        if: steps.cached.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cmake -S td -B td/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
+            -DOPENSSL_ROOT_DIR="$DEPS" \
+            -DOPENSSL_USE_STATIC_LIBS=TRUE \
+            -DZLIB_ROOT="$DEPS" \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/tdlib"
+          cmake --build td/build --target prepare_cross_compiling --parallel "$JOBS"
+          cmake --build td/build --target install --parallel "$JOBS"
+
+          mkdir -p pack/tdlib/lib
+          for name in tdjson_static tdjson_private tdclient tdcore tdapi tdmtproto tdnet tddb \
+            tdsqlite tde2e tdactor tdutils; do
+            cp "tdlib/lib/lib$name.a" pack/tdlib/lib/
+          done
+          cp "$DEPS/lib/libssl.a" "$DEPS/lib/libcrypto.a" "$DEPS/lib/libz.a" pack/tdlib/lib/
+
+      # The C runtime is the static one everywhere: vcpkg's triplet for OpenSSL and zlib (gperf is
+      # a tool of the build), CMake's runtime setting for TDLib (its CMakeLists predates the policy).
+      - name: MSVC
+        if: steps.cached.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: OpenSSL and zlib (Windows)
+        if: steps.cached.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          vcpkg=$(cygpath -m "${VCPKG_INSTALLATION_ROOT:-C:\\vcpkg}")
+          triplets=$(cygpath -m "$RUNNER_TEMP/triplets")
+          triplet="$ARCH-windows-flux"
+          mkdir -p "$triplets" licenses
+          printf '%s\n' \
+            "set(VCPKG_TARGET_ARCHITECTURE $ARCH)" \
+            "set(VCPKG_CRT_LINKAGE static)" \
+            "set(VCPKG_LIBRARY_LINKAGE static)" \
+            "set(VCPKG_BUILD_TYPE release)" > "$triplets/$triplet.cmake"
+          "$vcpkg/vcpkg.exe" install gperf openssl zlib \
+            --triplet "$triplet" --overlay-triplets="$triplets"
+          "$vcpkg/vcpkg.exe" list
+          installed="$vcpkg/installed/$triplet"
+          ls -l "$installed/lib"
+          cp "$installed/share/openssl/copyright" licenses/OpenSSL-LICENSE.txt
+          cp "$installed/share/zlib/copyright" licenses/zlib-LICENSE.txt
+          {
+            echo "VCPKG=$vcpkg"
+            echo "TRIPLET=$triplet"
+            echo "INSTALLED=$installed"
+          } >> "$GITHUB_ENV"
+
+      - name: TDLib (Windows)
+        if: steps.cached.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        env:
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          set -euo pipefail
+          cmake -S td -B td/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET="$TRIPLET" \
+            -DCMAKE_INSTALL_PREFIX="$(cygpath -m "$GITHUB_WORKSPACE/tdlib")"
+          cmake --build td/build --target prepare_cross_compiling --parallel "$JOBS"
+          cmake --build td/build --target install --parallel "$JOBS"
+
+          mkdir -p pack/tdlib/lib
+          for name in tdjson_static tdjson_private tdclient tdcore tdapi tdmtproto tdnet tddb \
+            tdsqlite tde2e tdactor tdutils; do
+            cp "tdlib/lib/$name.lib" pack/tdlib/lib/
+          done
+          cp "$INSTALLED/lib/libssl.lib" "$INSTALLED/lib/libcrypto.lib" "$INSTALLED/lib/zlib.lib" \
+            pack/tdlib/lib/
+
+      # What the helper's checks rely on, in the log: macOS — every object for macOS 12 (`minos`),
+      # and whether libc++'s `__libcpp_verbose_abort` (macOS 13.3+) is called; Windows — the C
+      # runtime the objects ask for (LIBCMT, never MSVCRT).
+      - name: Check
+        if: steps.cached.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          ls -l pack/tdlib/lib
+          if [ "$RUNNER_OS" = macOS ]; then
+            bad=0
+            for lib in pack/tdlib/lib/*.a; do
+              minos=$(otool -l "$lib" | awk '/LC_BUILD_VERSION/ { b = 1 } b && $1 == "minos" { print $2; b = 0 }' \
+                | sort -u | tr '\n' ' ')
+              echo "$(basename "$lib"): minos $minos"
+              if [ "$minos" != "$MACOSX_DEPLOYMENT_TARGET " ]; then bad=1; fi
+            done
+            lipo -info pack/tdlib/lib/libtdcore.a
+            echo "__libcpp_verbose_abort:"
+            nm -A pack/tdlib/lib/*.a 2>/dev/null | grep __libcpp_verbose_abort || echo "  not used"
+            if [ "$bad" = 1 ]; then
+              echo "::error title=Deployment target::a library isn't built for macOS $MACOSX_DEPLOYMENT_TARGET"
+              exit 1
+            fi
+          else
+            bad=0
+            for lib in pack/tdlib/lib/*.lib; do
+              dumpbin -nologo -directives "$lib" > "$RUNNER_TEMP/directives.txt"
+              runtimes=$( (grep -oiE 'DEFAULTLIB:"?[a-z0-9_]+' "$RUNNER_TEMP/directives.txt" || true) \
+                | tr -d '"' | tr 'A-Z' 'a-z' | sort -u | tr '\n' ' ')
+              echo "$(basename "$lib"): $runtimes"
+              if grep -qiE 'DEFAULTLIB:"?msvcp?rt' "$RUNNER_TEMP/directives.txt"; then bad=1; fi
+            done
+            if [ "$bad" = 1 ]; then
+              echo "::error title=C runtime::a library is built for the C runtime in DLLs (/MD)"
+              exit 1
+            fi
+          fi
+
+      - name: Pack
+        if: steps.cached.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cp td/LICENSE_1_0.txt pack/tdlib/TDLib-LICENSE.txt
+          cp licenses/* pack/tdlib/
+          tar -czf "$ARCHIVE" -C pack tdlib
+          ls -l "$ARCHIVE"
+
+      - name: Keep for the next runs
+        if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tdlib-${{ matrix.platform }}.tar.gz
+          key: ${{ steps.cached.outputs.cache-primary-key }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-${{ matrix.platform }}
+          path: tdlib-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+
+  # The release, once, when all four are built.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tdlib-*
+          path: dist
+          merge-multiple: true
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="tdlib-v$TDLIB_VERSION"
+          cd dist
+          for platform in macos-aarch64 macos-x86_64 windows-x86_64 windows-aarch64; do
+            mv "tdlib-$platform.tar.gz" "tdlib-$TDLIB_VERSION-$platform.tar.gz"
+          done
+          sha256sum tdlib-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          ls -l
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is released already: left as it is"
+            exit 0
+          fi
+          gh release create "$tag" tdlib-*.tar.gz SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --latest=false \
+            --title "TDLib $TDLIB_VERSION" \
+            --notes "TDLib $TDLIB_VERSION (commit ${TDLIB_COMMIT:0:7}) as static libraries for fluxgram-helper, with OpenSSL and zlib: macOS for 12.0 and later (arm64, x86_64), Windows with the static C runtime /MT (x64, ARM64). Built by .github/workflows/tdlib.yml; helpers/fluxgram-helper/build.rs pins the archives' SHA-256 (SHA256SUMS)."
