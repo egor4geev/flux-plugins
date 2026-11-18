@@ -1,0 +1,961 @@
+//! What needs no host, so it compiles and is tested natively (`cargo test`): the messages between
+//! the service and the windows, TDLib's authorization states and errors read into what the
+//! sign-in dialog shows, the masked phone number, the helper's output split into lines.
+//!
+//! Times that both sides read (when a code can be sent again) are the wall clock's seconds: the
+//! service and the windows are separate instances, but they share the clock.
+//!
+//! The service sends the windows structured values, not text: each window translates what it
+//! shows (`Problem::text` gives the English line, the window passes it through `tr`).
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+// --- The service ⇄ the windows ---
+
+/// What the service tells the windows: the whole state, small (a few accounts and the sign-in in
+/// progress), sent only when it changed — and to a window that has just started.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub accounts: Vec<AccountView>,
+    /// The sign-in in progress; none — the dialog has nothing to show.
+    pub sign_in: Option<SignIn>,
+}
+
+/// An account as the windows draw it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountView {
+    pub key: String,
+    pub name: String,
+    /// Masked: "+7 ••• •••-••-12".
+    pub phone: String,
+    /// "@username", when the account has one.
+    pub label: Option<String>,
+    /// One of the seven avatar colors.
+    pub color: u8,
+    /// The small profile photo, absolute; none — the initials.
+    pub photo: Option<String>,
+    /// Sign Out was confirmed: Telegram is ending the session.
+    pub signing_out: bool,
+}
+
+/// The sign-in dialog: its screen, whether a request is on its way, what went wrong.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignIn {
+    pub screen: Screen,
+    /// TDLib works on what the user asked (Next): the screen's main button is busy.
+    pub busy: bool,
+    /// The code is being sent again: the resend button is busy.
+    #[serde(default)]
+    pub resending: bool,
+    pub problem: Option<Problem>,
+}
+
+/// The sign-in dialog's screen. While TDLib works between two screens (the client starts, the
+/// account is read) the screen on show stays, its button busy: there is no screen of waiting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "screen", rename_all = "kebab-case")]
+pub enum Screen {
+    /// FluxGram has no app key with Telegram yet (`config::API_ID`).
+    NotSetUp,
+    /// The QR code of `link` for the phone's camera; an empty link — TDLib is getting one (the
+    /// client starts, the code is asked for): a placeholder of the code's size.
+    Qr { link: String },
+    /// The phone number.
+    Phone,
+    /// The code: where it went, how else it can come, and when it can be asked for that way —
+    /// the wall clock's seconds ([`unix_now`]).
+    Code {
+        phone: String,
+        sent: CodeSent,
+        resend: Option<CodeSent>,
+        #[serde(default)]
+        resend_at: u64,
+    },
+    /// The account's cloud password (2FA), with its hint.
+    Password { hint: String },
+    /// Telegram wants an email address for the codes.
+    EmailAddress,
+    /// The code sent to the email address `pattern` ("e***@mail.com").
+    EmailCode { pattern: String },
+    /// The number has no Telegram account: FluxGram doesn't sign up.
+    NoAccount,
+}
+
+/// Where a sign-in code went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodeSent {
+    /// A message in Telegram on the user's other device.
+    App,
+    Sms,
+    Call,
+    /// A call whose number is the code.
+    FlashCall,
+    /// A missed call: the code is the last digits of the calling number.
+    MissedCall,
+    /// An anonymous number bought on Telegram's marketplace.
+    Fragment,
+    Other,
+}
+
+/// What went wrong in the sign-in: a calm line under the field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "problem", content = "value", rename_all = "kebab-case")]
+pub enum Problem {
+    WrongCode,
+    CodeExpired,
+    WrongPassword,
+    InvalidPhone,
+    BannedPhone,
+    PhoneFlood,
+    InvalidEmail,
+    /// Telegram has no other way to send the code now.
+    NoOtherWay,
+    /// Too many attempts: minutes to wait.
+    TryLater(u64),
+    /// Telegram refused FluxGram's app key.
+    KeyRefused,
+    AlreadyAdded,
+    ConnectionLost,
+    /// Anything else: TDLib's message.
+    Failed(String),
+}
+
+impl Problem {
+    /// The English line: a template for `trf` with the value in `{0}`, and the value.
+    pub fn text(&self) -> (&'static str, Option<String>) {
+        match self {
+            Problem::WrongCode => ("Wrong code. Check it and try again.", None),
+            Problem::CodeExpired => ("The code has expired. Ask for a new one.", None),
+            Problem::WrongPassword => ("Wrong password.", None),
+            Problem::InvalidPhone => (
+                "That doesn't look like a phone number. Include the country code.",
+                None,
+            ),
+            Problem::BannedPhone => ("Telegram doesn't let this number sign in.", None),
+            Problem::PhoneFlood => (
+                "Too many codes were asked for this number. Try again later.",
+                None,
+            ),
+            Problem::InvalidEmail => ("That doesn't look like an email address.", None),
+            Problem::NoOtherWay => ("Telegram can't send the code another way now.", None),
+            Problem::TryLater(minutes) if *minutes <= 1 => {
+                ("Too many attempts. Try again in a minute.", None)
+            }
+            Problem::TryLater(minutes) => (
+                "Too many attempts. Try again in {0} min.",
+                Some(minutes.to_string()),
+            ),
+            Problem::KeyRefused => (
+                "Telegram refused FluxGram's app key. Update the plugin.",
+                None,
+            ),
+            Problem::AlreadyAdded => ("This account is already in FluxGram.", None),
+            Problem::ConnectionLost => ("FluxGram lost its connection. Try again.", None),
+            Problem::Failed(message) => ("Telegram couldn't do that: {0}", Some(message.clone())),
+        }
+    }
+}
+
+/// What a window asks of the service.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "do", rename_all = "kebab-case")]
+pub enum Request {
+    /// Send me the state (a window whose service has just started).
+    Hello,
+    /// Add Account: start a sign-in (or show the one in progress).
+    AddAccount,
+    /// Use Phone Number on the QR screen.
+    UsePhone,
+    /// Sign In with QR Code: from the phone or the code screen back to the QR code.
+    UseQr,
+    /// Back: the previous screen.
+    Back,
+    /// ↵ or Next: the screen's field.
+    Submit { text: String },
+    /// Send the code again (another way).
+    Resend,
+    /// Cancel, Esc, ×: the sign-in is dropped.
+    Cancel,
+    /// Sign Out of an account, confirmed.
+    SignOut { key: String },
+}
+
+// --- TDLib's authorization ---
+
+/// TDLib's authorization state of a client, as far as FluxGram tells them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Auth {
+    WaitParameters,
+    WaitPhone,
+    WaitQr {
+        link: String,
+    },
+    WaitCode {
+        phone: String,
+        sent: CodeSent,
+        next: Option<CodeSent>,
+        /// When `next` can be asked for: the wall clock's seconds.
+        resend_at: u64,
+    },
+    WaitPassword {
+        hint: String,
+    },
+    WaitEmail,
+    WaitEmailCode {
+        pattern: String,
+    },
+    /// The number has no account (or Telegram wants it to sign up some other way).
+    WaitRegistration,
+    Ready,
+    LoggingOut,
+    Closing,
+    Closed,
+    Other,
+}
+
+impl Auth {
+    /// Signed out: a state of a client without an account (or on its way to none).
+    pub fn is_signed_out(&self) -> bool {
+        !matches!(
+            self,
+            Auth::WaitParameters | Auth::Ready | Auth::Closing | Auth::Closed | Auth::Other
+        )
+    }
+
+    /// A state that comes once TDLib has taken the phone number: the phone screen is done.
+    pub fn after_phone(&self) -> bool {
+        matches!(
+            self,
+            Auth::WaitCode { .. }
+                | Auth::WaitPassword { .. }
+                | Auth::WaitEmail
+                | Auth::WaitEmailCode { .. }
+                | Auth::WaitRegistration
+                | Auth::Ready
+        )
+    }
+
+    /// TDLib takes a new phone number or a QR request in this state (no request pending).
+    pub fn takes_phone(&self) -> bool {
+        matches!(
+            self,
+            Auth::WaitPhone
+                | Auth::WaitCode { .. }
+                | Auth::WaitPassword { .. }
+                | Auth::WaitEmail
+                | Auth::WaitEmailCode { .. }
+                | Auth::WaitRegistration
+        )
+    }
+}
+
+fn text_of(value: &Value, key: &str) -> String {
+    value[key].as_str().unwrap_or_default().to_string()
+}
+
+/// Reads `authorization_state` of `updateAuthorizationState` that came at `now` (the wall clock's
+/// seconds): a code's timeout becomes the moment it ends.
+pub fn parse_auth(state: &Value, now: u64) -> Auth {
+    match state["@type"].as_str().unwrap_or_default() {
+        "authorizationStateWaitTdlibParameters" => Auth::WaitParameters,
+        "authorizationStateWaitPhoneNumber" => Auth::WaitPhone,
+        "authorizationStateWaitOtherDeviceConfirmation" => Auth::WaitQr {
+            link: text_of(state, "link"),
+        },
+        "authorizationStateWaitCode" => {
+            let info = &state["code_info"];
+            Auth::WaitCode {
+                phone: text_of(info, "phone_number"),
+                sent: code_sent(&info["type"]),
+                next: info
+                    .get("next_type")
+                    .filter(|next| next.is_object())
+                    .map(code_sent),
+                resend_at: now + info["timeout"].as_u64().unwrap_or_default(),
+            }
+        }
+        "authorizationStateWaitPassword" => Auth::WaitPassword {
+            hint: text_of(state, "password_hint"),
+        },
+        "authorizationStateWaitEmailAddress" => Auth::WaitEmail,
+        "authorizationStateWaitEmailCode" => Auth::WaitEmailCode {
+            pattern: text_of(&state["code_info"], "email_address_pattern"),
+        },
+        "authorizationStateWaitRegistration" | "authorizationStateWaitPremiumPurchase" => {
+            Auth::WaitRegistration
+        }
+        "authorizationStateReady" => Auth::Ready,
+        "authorizationStateLoggingOut" => Auth::LoggingOut,
+        "authorizationStateClosing" => Auth::Closing,
+        "authorizationStateClosed" => Auth::Closed,
+        _ => Auth::Other,
+    }
+}
+
+/// Where an `authenticationCodeType…` sends the code.
+fn code_sent(kind: &Value) -> CodeSent {
+    match kind["@type"].as_str().unwrap_or_default() {
+        "authenticationCodeTypeTelegramMessage" => CodeSent::App,
+        "authenticationCodeTypeSms"
+        | "authenticationCodeTypeSmsWord"
+        | "authenticationCodeTypeSmsPhrase"
+        | "authenticationCodeTypeFirebaseAndroid"
+        | "authenticationCodeTypeFirebaseIos" => CodeSent::Sms,
+        "authenticationCodeTypeCall" => CodeSent::Call,
+        "authenticationCodeTypeFlashCall" => CodeSent::FlashCall,
+        "authenticationCodeTypeMissedCall" => CodeSent::MissedCall,
+        "authenticationCodeTypeFragment" => CodeSent::Fragment,
+        _ => CodeSent::Other,
+    }
+}
+
+/// The dialog's screen for a sign-in in TDLib's state `auth`; `phone_mode` — the user chose the
+/// number over the QR code. None while TDLib works between two screens (the account is read, the
+/// client closes): the screen on show stays.
+pub fn screen(auth: &Auth, phone_mode: bool) -> Option<Screen> {
+    let screen = match auth {
+        // The client starts, or waits for the number or for the QR request's answer.
+        Auth::WaitParameters | Auth::WaitPhone if phone_mode => Screen::Phone,
+        Auth::WaitParameters | Auth::WaitPhone => Screen::Qr {
+            link: String::new(),
+        },
+        // A QR code that came after the user chose the number: its client is being replaced.
+        Auth::WaitQr { .. } if phone_mode => Screen::Phone,
+        Auth::WaitQr { link } => Screen::Qr { link: link.clone() },
+        Auth::WaitCode {
+            phone,
+            sent,
+            next,
+            resend_at,
+        } => Screen::Code {
+            phone: phone.clone(),
+            sent: *sent,
+            resend: *next,
+            resend_at: *resend_at,
+        },
+        Auth::WaitPassword { hint } => Screen::Password { hint: hint.clone() },
+        Auth::WaitEmail => Screen::EmailAddress,
+        Auth::WaitEmailCode { pattern } => Screen::EmailCode {
+            pattern: pattern.clone(),
+        },
+        Auth::WaitRegistration => Screen::NoAccount,
+        Auth::Ready | Auth::LoggingOut | Auth::Closing | Auth::Closed | Auth::Other => {
+            return None;
+        }
+    };
+    Some(screen)
+}
+
+/// What Telegram said of a sign-in code, for the log: how it was sent, how it can come next and
+/// after how long — never the number (nor the code, which never comes from TDLib).
+pub fn code_log(state: &Value) -> Option<String> {
+    if state["@type"] != "authorizationStateWaitCode" {
+        return None;
+    }
+    let info = &state["code_info"];
+    let kind = |kind: &Value| {
+        let name = kind["@type"].as_str().unwrap_or("?").to_string();
+        match kind["length"].as_u64().filter(|length| *length > 0) {
+            Some(length) => format!("{name} ({length} digits)"),
+            None => name,
+        }
+    };
+    let next = match &info["next_type"] {
+        next if next.is_object() => kind(next),
+        _ => "none".to_string(),
+    };
+    Some(format!(
+        "Sign-in: the code was sent as {}; next: {next}, in {} s",
+        kind(&info["type"]),
+        info["timeout"].as_u64().unwrap_or_default()
+    ))
+}
+
+/// The wall clock's seconds: when a code can be sent again, as both instances read it.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// A countdown's "0:58", "1:30", "12:00".
+pub fn countdown(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// What the service sends by itself when a sign-in's client comes to `auth`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Next {
+    /// `setTdlibParameters`.
+    Parameters,
+    /// `requestQrCodeAuthentication`.
+    RequestQr,
+    /// `setAuthenticationPhoneNumber` with the number typed before the client was ready.
+    SendPhone(String),
+    /// `getMe`: signed in.
+    GetMe,
+    /// A fresh client: a QR code came after the user chose the number, and TDLib doesn't take a
+    /// number while its QR code waits.
+    Renew,
+    Nothing,
+}
+
+/// The next request of a sign-in: `phone_mode` — the user chose the number over the QR code;
+/// `queued` — a number typed while the client was starting.
+pub fn next_step(auth: &Auth, phone_mode: bool, queued: Option<&str>) -> Next {
+    match auth {
+        Auth::WaitParameters => Next::Parameters,
+        Auth::WaitPhone => match queued {
+            Some(phone) => Next::SendPhone(phone.to_string()),
+            None if !phone_mode => Next::RequestQr,
+            None => Next::Nothing,
+        },
+        Auth::WaitQr { .. } if phone_mode => Next::Renew,
+        Auth::Ready => Next::GetMe,
+        _ => Next::Nothing,
+    }
+}
+
+/// TDLib's error (`code`, `message`) as a line for the user.
+pub fn problem(code: i64, message: &str) -> Problem {
+    if let Some(seconds) = flood_seconds(message) {
+        return Problem::TryLater(seconds.div_ceil(60).max(1));
+    }
+    let upper = message.to_ascii_uppercase();
+    let has = |what: &str| upper.contains(what);
+    if has("CODE_INVALID") || has("PHONE_CODE_EMPTY") {
+        Problem::WrongCode
+    } else if has("PHONE_CODE_EXPIRED") || has("CODE_EXPIRED") {
+        Problem::CodeExpired
+    } else if has("PASSWORD_HASH_INVALID") || has("PASSWORD_INVALID") {
+        Problem::WrongPassword
+    } else if has("PHONE_NUMBER_INVALID") || has("PHONE_NUMBER_EMPTY") {
+        Problem::InvalidPhone
+    } else if has("PHONE_NUMBER_BANNED") || has("PHONE_NUMBER_FROZEN") {
+        Problem::BannedPhone
+    } else if has("PHONE_NUMBER_FLOOD") || has("PHONE_PASSWORD_FLOOD") {
+        Problem::PhoneFlood
+    } else if has("EMAIL_INVALID") || has("EMAIL_ADDRESS_INVALID") {
+        Problem::InvalidEmail
+    } else if has("SEND_CODE_UNAVAILABLE") || has("CAN'T BE RESEN") {
+        // Telegram's own error, and TDLib's "Authentication code can't be resend".
+        Problem::NoOtherWay
+    } else if has("API_ID_INVALID") || has("API_ID_PUBLISHED_FLOOD") || has("API_HASH") {
+        Problem::KeyRefused
+    } else if code == 429 {
+        Problem::TryLater(1)
+    } else {
+        Problem::Failed(message.to_string())
+    }
+}
+
+/// The seconds of "FLOOD_WAIT_123" or TDLib's "Too Many Requests: retry after 123".
+fn flood_seconds(message: &str) -> Option<u64> {
+    let digits = ["FLOOD_WAIT_", "retry after "].iter().find_map(|prefix| {
+        let at = message.find(prefix)?;
+        Some(&message[at + prefix.len()..])
+    })?;
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end].parse().ok()
+}
+
+/// `setTdlibParameters` of an account: its folders, the database's key, the app key.
+pub struct Parameters<'a> {
+    /// `<data>/accounts/<key>`.
+    pub folder: &'a str,
+    /// The database's encryption key, base64.
+    pub database_key: &'a str,
+    pub language: &'a str,
+    pub test_dc: bool,
+    pub api_id: i32,
+    pub api_hash: &'a str,
+}
+
+impl Parameters<'_> {
+    pub fn request(&self) -> Value {
+        json!({
+            "@type": "setTdlibParameters",
+            "use_test_dc": self.test_dc,
+            "database_directory": format!("{}/db", self.folder),
+            "files_directory": format!("{}/files", self.folder),
+            "database_encryption_key": self.database_key,
+            "use_file_database": true,
+            "use_chat_info_database": true,
+            "use_message_database": true,
+            "use_secret_chats": false,
+            "api_id": self.api_id,
+            "api_hash": self.api_hash,
+            "system_language_code": self.language,
+            "device_model": "Flux",
+            "system_version": "",
+            "application_version": concat!("FluxGram ", env!("CARGO_PKG_VERSION")),
+        })
+    }
+}
+
+// --- Users ---
+
+/// What FluxGram keeps of the signed-in user (TDLib's `user`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Me {
+    pub id: i64,
+    pub first_name: String,
+    pub last_name: String,
+    pub username: Option<String>,
+    pub phone: String,
+    pub color: u8,
+    /// The small profile photo: TDLib's file id, and its path once it is downloaded.
+    pub photo: Option<(i64, Option<String>)>,
+}
+
+/// Reads TDLib's `user`; none when it isn't one.
+pub fn parse_user(user: &Value) -> Option<Me> {
+    if user["@type"] != "user" {
+        return None;
+    }
+    let id = user["id"].as_i64()?;
+    let username = user["usernames"]["active_usernames"]
+        .as_array()
+        .and_then(|names| names.first())
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    // Telegram's built-in name colors are 0–6, as the avatar colors; the rest are the
+    // Premium ones — the classic rule then.
+    let accent = user["accent_color_id"].as_i64().unwrap_or(-1);
+    let color = if (0..7).contains(&accent) {
+        accent as u8
+    } else {
+        id.rem_euclid(7) as u8
+    };
+    let small = &user["profile_photo"]["small"];
+    let photo = small["id"].as_i64().map(|file| (file, downloaded(small)));
+    Some(Me {
+        id,
+        first_name: text_of(user, "first_name"),
+        last_name: text_of(user, "last_name"),
+        username,
+        phone: text_of(user, "phone_number"),
+        color,
+        photo,
+    })
+}
+
+/// The path of TDLib's `file` once it is downloaded.
+pub fn downloaded(file: &Value) -> Option<String> {
+    let local = &file["local"];
+    let path = local["path"].as_str().unwrap_or_default();
+    (local["is_downloading_completed"] == true && !path.is_empty()).then(|| path.to_string())
+}
+
+/// "Egor Ageev"; the number when there is no name.
+pub fn full_name(first: &str, last: &str, phone: &str) -> String {
+    let name = format!("{first} {last}").trim().to_string();
+    if name.is_empty() {
+        mask_phone(phone)
+    } else {
+        name
+    }
+}
+
+/// The initials of an avatar: the name's first letter, as Telegram's small avatars show it.
+pub fn initials(name: &str) -> String {
+    name.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default()
+}
+
+// --- Phone numbers ---
+
+/// The two-digit country codes (the rest are one digit — 1, 7 — or three).
+const TWO_DIGIT_CODES: &[&str] = &[
+    "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45", "46", "47",
+    "48", "49", "51", "52", "53", "54", "55", "56", "57", "58", "60", "61", "62", "63", "64", "65",
+    "66", "81", "82", "84", "86", "90", "91", "92", "93", "94", "95", "98",
+];
+
+/// A phone number with only its country code and last two digits: "+7 ••• •••-••-12".
+pub fn mask_phone(phone: &str) -> String {
+    let digits: String = phone.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() < 5 {
+        return format!("+{}", "•".repeat(digits.len()));
+    }
+    let code = match digits.as_bytes()[0] {
+        b'1' | b'7' => 1,
+        _ if TWO_DIGIT_CODES.iter().any(|two| digits.starts_with(two)) => 2,
+        _ => 3,
+    };
+    let (code, national) = digits.split_at(code);
+    let tail = &national[national.len() - 2..];
+    let hidden = national.len() - 2;
+    let masked = if hidden >= 5 {
+        // The last seven digits as "•••-••-12", the rest before them.
+        let head = hidden - 5;
+        let lead = if head > 0 {
+            format!("{} ", "•".repeat(head))
+        } else {
+            String::new()
+        };
+        format!("{lead}•••-••-{tail}")
+    } else {
+        format!("{}{tail}", "•".repeat(hidden))
+    };
+    format!("+{code} {masked}")
+}
+
+/// Looks like a phone number: seven digits or more, nothing but digits, spaces, `+ - ( )`.
+pub fn looks_like_phone(text: &str) -> bool {
+    text.chars().filter(char::is_ascii_digit).count() >= 7
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || " +-().".contains(c))
+}
+
+// --- The helper's output ---
+
+/// The helper's output split into lines: `process-output` comes in chunks that may end in the
+/// middle of a line, which waits for its end.
+#[derive(Debug, Default)]
+pub struct Lines {
+    partial: Vec<u8>,
+}
+
+impl Lines {
+    /// The complete lines of `bytes`, the partial one before them first; empty lines are skipped.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut rest = bytes;
+        while let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
+            self.partial.extend_from_slice(&rest[..end]);
+            let line = String::from_utf8_lossy(&self.partial);
+            let line = line.trim_end_matches('\r');
+            if !line.is_empty() {
+                lines.push(line.to_string());
+            }
+            self.partial.clear();
+            rest = &rest[end + 1..];
+        }
+        self.partial.extend_from_slice(rest);
+        lines
+    }
+
+    /// Forgets a partial line: the program was restarted.
+    pub fn clear(&mut self) {
+        self.partial.clear();
+    }
+}
+
+/// The delay before the helper's restart after `failures` exits in a row, in seconds.
+pub fn restart_delay(failures: u32) -> u64 {
+    const DELAYS: [u64; 6] = [1, 2, 5, 10, 30, 60];
+    DELAYS[(failures.max(1) as usize - 1).min(DELAYS.len() - 1)]
+}
+
+/// TDLib's updates FluxGram uses (`fluxgram.keep`): the helper holds the rest back, so they never
+/// wake the plugin — TDLib has about 170 kinds, and new versions add more. The sign-in's states,
+/// the signed-in user's name and photo (`updateUser`), the photo's download (`updateFile`), the
+/// connection (`updateConnectionState`, to the log). The chats (part 3) add theirs.
+pub const KEPT: &[&str] = &[
+    "updateAuthorizationState",
+    "updateUser",
+    "updateFile",
+    "updateConnectionState",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masks_phones() {
+        assert_eq!(mask_phone("79001234512"), "+7 ••• •••-••-12");
+        assert_eq!(mask_phone("+7 900 123-45-12"), "+7 ••• •••-••-12");
+        assert_eq!(mask_phone("380501234567"), "+380 •• •••-••-67");
+        assert_eq!(mask_phone("4915112345678"), "+49 •••• •••-••-78");
+        assert_eq!(mask_phone("9996621471"), "+999 •••-••-71");
+        assert_eq!(mask_phone("12345"), "+1 ••45");
+        assert_eq!(mask_phone("123"), "+•••");
+        assert!(!mask_phone("79001234512").contains("900"));
+    }
+
+    #[test]
+    fn checks_phone_input() {
+        assert!(looks_like_phone("+7 (900) 123-45-12"));
+        assert!(!looks_like_phone("123"));
+        assert!(!looks_like_phone("call me 79001234512"));
+    }
+
+    #[test]
+    fn splits_lines() {
+        let mut lines = Lines::default();
+        assert_eq!(lines.push(b"{\"a\":1}\n{\"b\""), ["{\"a\":1}"]);
+        assert!(lines.push(b":2").is_empty());
+        assert_eq!(
+            lines.push(b"}\r\n\n{\"c\":3}\n"),
+            ["{\"b\":2}", "{\"c\":3}"]
+        );
+        assert!(lines.push(b"").is_empty());
+        // A multi-byte character split between two chunks stays whole.
+        let text = "{\"name\":\"Егор\"}\n".as_bytes();
+        assert!(lines.push(&text[..10]).is_empty());
+        assert_eq!(lines.push(&text[10..]), ["{\"name\":\"Егор\"}"]);
+        lines.push(b"half");
+        lines.clear();
+        assert_eq!(lines.push(b"new\n"), ["new"]);
+    }
+
+    #[test]
+    fn reads_auth_states() {
+        let qr = json!({"@type": "authorizationStateWaitOtherDeviceConfirmation", "link": "tg://login?token=x"});
+        assert_eq!(
+            parse_auth(&qr, 0),
+            Auth::WaitQr {
+                link: "tg://login?token=x".into()
+            }
+        );
+        let code = json!({"@type": "authorizationStateWaitCode", "code_info": {
+            "@type": "authenticationCodeInfo", "phone_number": "9996621471",
+            "type": {"@type": "authenticationCodeTypeSms", "length": 5},
+            "next_type": {"@type": "authenticationCodeTypeCall", "length": 0}, "timeout": 90}});
+        assert_eq!(
+            parse_auth(&code, 1000),
+            Auth::WaitCode {
+                phone: "9996621471".into(),
+                sent: CodeSent::Sms,
+                next: Some(CodeSent::Call),
+                resend_at: 1090,
+            }
+        );
+        let app = json!({"@type": "authorizationStateWaitCode", "code_info": {
+            "phone_number": "1", "type": {"@type": "authenticationCodeTypeTelegramMessage"}, "next_type": null}});
+        assert!(matches!(
+            parse_auth(&app, 1000),
+            Auth::WaitCode {
+                sent: CodeSent::App,
+                next: None,
+                resend_at: 1000,
+                ..
+            }
+        ));
+        let password = json!({"@type": "authorizationStateWaitPassword", "password_hint": "cat",
+            "has_recovery_email_address": false});
+        assert_eq!(
+            parse_auth(&password, 0),
+            Auth::WaitPassword { hint: "cat".into() }
+        );
+        assert_eq!(
+            parse_auth(&json!({"@type": "authorizationStateWaitRegistration"}), 0),
+            Auth::WaitRegistration
+        );
+        assert_eq!(
+            parse_auth(&json!({"@type": "authorizationStateSomethingNew"}), 0),
+            Auth::Other
+        );
+        assert!(Auth::WaitPhone.is_signed_out() && !Auth::Ready.is_signed_out());
+        assert!(Auth::Ready.after_phone() && !Auth::WaitPhone.after_phone());
+        assert!(
+            !Auth::WaitQr {
+                link: String::new()
+            }
+            .takes_phone()
+        );
+    }
+
+    #[test]
+    fn picks_screens_and_requests() {
+        let qr = Auth::WaitQr { link: "l".into() };
+        let waiting = Some(Screen::Qr {
+            link: String::new(),
+        });
+        assert_eq!(screen(&qr, false), Some(Screen::Qr { link: "l".into() }));
+        assert_eq!(screen(&qr, true), Some(Screen::Phone));
+        // No screen of waiting: the QR code's placeholder, or the phone screen at once.
+        assert_eq!(screen(&Auth::WaitParameters, false), waiting);
+        assert_eq!(screen(&Auth::WaitPhone, false), waiting);
+        assert_eq!(screen(&Auth::WaitParameters, true), Some(Screen::Phone));
+        assert_eq!(screen(&Auth::WaitPhone, true), Some(Screen::Phone));
+        // Between two screens the one on show stays.
+        assert_eq!(screen(&Auth::Ready, false), None);
+        assert_eq!(screen(&Auth::Closed, true), None);
+        assert_eq!(
+            screen(&Auth::WaitRegistration, false),
+            Some(Screen::NoAccount)
+        );
+        assert_eq!(
+            screen(&Auth::WaitPassword { hint: "h".into() }, false),
+            Some(Screen::Password { hint: "h".into() })
+        );
+        let code = Auth::WaitCode {
+            phone: "1".into(),
+            sent: CodeSent::App,
+            next: Some(CodeSent::Sms),
+            resend_at: 60,
+        };
+        assert_eq!(
+            screen(&code, true),
+            Some(Screen::Code {
+                phone: "1".into(),
+                sent: CodeSent::App,
+                resend: Some(CodeSent::Sms),
+                resend_at: 60,
+            })
+        );
+        assert_eq!(next_step(&qr, true, None), Next::Renew);
+        assert_eq!(
+            next_step(&Auth::WaitParameters, false, None),
+            Next::Parameters
+        );
+        assert_eq!(next_step(&Auth::WaitPhone, false, None), Next::RequestQr);
+        assert_eq!(next_step(&Auth::WaitPhone, true, None), Next::Nothing);
+        assert_eq!(
+            next_step(&Auth::WaitPhone, true, Some("79001234512")),
+            Next::SendPhone("79001234512".into())
+        );
+        assert_eq!(next_step(&Auth::Ready, true, None), Next::GetMe);
+        assert_eq!(next_step(&qr, false, None), Next::Nothing);
+    }
+
+    #[test]
+    fn maps_errors() {
+        assert_eq!(problem(400, "PHONE_CODE_INVALID"), Problem::WrongCode);
+        assert_eq!(
+            problem(400, "PASSWORD_HASH_INVALID"),
+            Problem::WrongPassword
+        );
+        assert_eq!(problem(400, "PHONE_NUMBER_INVALID"), Problem::InvalidPhone);
+        assert_eq!(problem(400, "PHONE_CODE_EXPIRED"), Problem::CodeExpired);
+        assert_eq!(problem(400, "API_ID_INVALID"), Problem::KeyRefused);
+        assert_eq!(problem(420, "FLOOD_WAIT_3600"), Problem::TryLater(60));
+        assert_eq!(
+            problem(429, "Too Many Requests: retry after 61"),
+            Problem::TryLater(2)
+        );
+        assert_eq!(problem(429, "FLOOD_WAIT_5"), Problem::TryLater(1));
+        assert_eq!(problem(429, "Too Many Requests"), Problem::TryLater(1));
+        assert_eq!(
+            problem(500, "Something odd"),
+            Problem::Failed("Something odd".into())
+        );
+        assert_eq!(problem(400, "SEND_CODE_UNAVAILABLE"), Problem::NoOtherWay);
+        assert_eq!(
+            problem(400, "Authentication code can't be resend"),
+            Problem::NoOtherWay
+        );
+        assert_eq!(Problem::TryLater(1).text().1, None);
+        assert_eq!(Problem::TryLater(5).text().1.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn reads_users() {
+        let user = json!({"@type": "user", "id": 777000123, "first_name": "Egor", "last_name": "Ageev",
+            "usernames": {"active_usernames": ["egor"]}, "phone_number": "79001234512",
+            "accent_color_id": 4, "profile_photo": {"small": {"id": 12,
+            "local": {"path": "/data/files/p.jpg", "is_downloading_completed": true}}}});
+        let me = parse_user(&user).unwrap();
+        assert_eq!(me.color, 4);
+        assert_eq!(me.username.as_deref(), Some("egor"));
+        assert_eq!(me.photo, Some((12, Some("/data/files/p.jpg".into()))));
+        let plain = json!({"@type": "user", "id": 15, "first_name": "", "last_name": "",
+            "phone_number": "79001234512", "accent_color_id": 9});
+        let plain = parse_user(&plain).unwrap();
+        assert_eq!((plain.color, plain.photo), (1, None));
+        assert_eq!(full_name("", "", "79001234512"), "+7 ••• •••-••-12");
+        assert_eq!(full_name("Egor", "", ""), "Egor");
+        assert_eq!(initials("егор"), "Е");
+        assert!(parse_user(&json!({"@type": "error"})).is_none());
+    }
+
+    #[test]
+    fn messages_round_trip() {
+        let snapshot = Snapshot {
+            accounts: vec![],
+            sign_in: Some(SignIn {
+                screen: Screen::Code {
+                    phone: "1".into(),
+                    sent: CodeSent::App,
+                    resend: Some(CodeSent::Sms),
+                    resend_at: 1_800_000_000,
+                },
+                busy: false,
+                resending: true,
+                problem: Some(Problem::TryLater(3)),
+            }),
+        };
+        let text = serde_json::to_string(&snapshot).unwrap();
+        assert_eq!(serde_json::from_str::<Snapshot>(&text).unwrap(), snapshot);
+        let request = Request::Submit {
+            text: "12345".into(),
+        };
+        let text = serde_json::to_string(&request).unwrap();
+        assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+        assert_eq!(
+            serde_json::to_string(&Request::UseQr).unwrap(),
+            r#"{"do":"use-qr"}"#
+        );
+    }
+
+    #[test]
+    fn logs_the_code_without_the_number() {
+        let state = json!({"@type": "authorizationStateWaitCode", "code_info": {
+            "@type": "authenticationCodeInfo", "phone_number": "79001234512",
+            "type": {"@type": "authenticationCodeTypeTelegramMessage", "length": 5},
+            "next_type": {"@type": "authenticationCodeTypeSms", "length": 5}, "timeout": 58}});
+        let line = code_log(&state).unwrap();
+        assert_eq!(
+            line,
+            "Sign-in: the code was sent as authenticationCodeTypeTelegramMessage (5 digits); \
+             next: authenticationCodeTypeSms (5 digits), in 58 s"
+        );
+        assert!(!line.contains("4512"));
+        let last = json!({"@type": "authorizationStateWaitCode", "code_info": {
+            "phone_number": "1", "type": {"@type": "authenticationCodeTypeCall", "length": 0},
+            "next_type": null, "timeout": 0}});
+        assert_eq!(
+            code_log(&last).unwrap(),
+            "Sign-in: the code was sent as authenticationCodeTypeCall; next: none, in 0 s"
+        );
+        assert_eq!(code_log(&json!({"@type": "authorizationStateReady"})), None);
+    }
+
+    #[test]
+    fn counts_down() {
+        assert_eq!(countdown(58), "0:58");
+        assert_eq!(countdown(90), "1:30");
+        assert_eq!(countdown(720), "12:00");
+        assert_eq!(countdown(0), "0:00");
+        assert!(unix_now() > 1_700_000_000);
+    }
+
+    #[test]
+    fn backs_off() {
+        assert_eq!(restart_delay(0), 1);
+        assert_eq!(restart_delay(1), 1);
+        assert_eq!(restart_delay(3), 5);
+        assert_eq!(restart_delay(50), 60);
+        assert!(!KEPT.contains(&"updateUserStatus"));
+        assert!(KEPT.contains(&"updateAuthorizationState"));
+        assert!(KEPT.contains(&"updateUser"));
+        assert!(KEPT.contains(&"updateFile"));
+        assert!(KEPT.contains(&"updateConnectionState"));
+    }
+
+    #[test]
+    fn builds_parameters() {
+        let request = Parameters {
+            folder: "/data/accounts/a1",
+            database_key: "a2V5",
+            language: "ru",
+            test_dc: true,
+            api_id: 1,
+            api_hash: "h",
+        }
+        .request();
+        assert_eq!(request["database_directory"], "/data/accounts/a1/db");
+        assert_eq!(request["files_directory"], "/data/accounts/a1/files");
+        assert_eq!(request["use_test_dc"], true);
+    }
+}

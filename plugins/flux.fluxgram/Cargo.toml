@@ -1,0 +1,35 @@
+[package]
+name = "flux-fluxgram"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "FluxGram: Telegram chats in Flux, an unofficial client through the Telegram API."
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+# Development: the SDK of the Flux tree next to this repository (branch feature/fluxgram, API 0.5).
+# Pinned to the Flux commit by `rev` before the pull request, as the other plugins are.
+flux-plugin-api = { path = "../../../flux/crates/flux-plugin-api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Each account's database key: 32 random bytes, base64, in Flux's secrets.
+getrandom = "0.3"
+base64 = "0.22"
+
+[features]
+# Telegram's test servers with TDLib's example credentials (src/config.rs): development only.
+test-dc = []
+
+# Plugins are small: Flux compiles the component when it loads it.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+# A plugin is a project of its own: `cargo build --release --target wasm32-wasip2`.
+[workspace]

@@ -6,3 +6,4 @@
 /plugins/*/target/
 __pycache__/
 .DS_Store
+/helpers/*/target/

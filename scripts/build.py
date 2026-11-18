@@ -48,7 +48,7 @@ BUILD = ROOT / ".build"
 # The repository the packages are published in (GitHub Releases, a tag per plugin version).
 DEFAULT_REPO = "egor4geev/flux-plugins"
 # The plugin APIs this catalog takes: what Flux runs (a plugin built for an older API keeps working).
-API_VERSIONS = ("0.2", "0.3", "0.4")
+API_VERSIONS = ("0.2", "0.3", "0.4", "0.5")
 INDEX_FORMAT = 1
 
 ID = re.compile(r"^[a-z0-9]+([.-][a-z0-9]+)*$")

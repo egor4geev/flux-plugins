@@ -1,0 +1,4 @@
+# Flux runs on macOS 12 and later: so does its helper. TDLib's prebuilt libraries say macOS 15
+# (the linker warns about it), but use nothing newer than 12 has — see `libcpp_verbose_abort`.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "12.0"

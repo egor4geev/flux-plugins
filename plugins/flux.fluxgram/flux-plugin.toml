@@ -1,0 +1,48 @@
+# FluxGram: Telegram chats in Flux — an unofficial client that works through the Telegram API
+# (TDLib in the plugin's own program, helpers/fluxgram-helper). Several accounts, signed in with a
+# QR code from the phone or with the number, the code and the password; the chats you add, in the
+# window on the left and a tab each (part 3). The service holds the program and the accounts; the
+# windows draw them.
+id = "flux.fluxgram"
+name = "FluxGram"
+version = "0.1.0"
+api = "0.5"
+authors = ["Egor Ageev"]
+description = "Unofficial Telegram client: works through the Telegram API. Your chats and groups in Flux — several accounts, only the chats you add."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/fluxgram.svg"
+wasm = "target/wasm32-wasip2/release/flux_fluxgram.wasm"
+# One instance for the whole app holds the program and the accounts: TDLib opens a database once.
+service = true
+
+# The plugin's program: TDLib (helpers/fluxgram-helper, built by this repository's CI). Its files
+# and checksums come with its first release; until then Flux takes a developer's build from
+# FLUX_DEV_HELPERS.
+[[helpers]]
+name = "fluxgram-helper"
+
+[helpers.platforms]
+
+[[commands]]
+id = "add-account"
+title = "Add Telegram Account…"
+category = "FluxGram"
+
+# The chats, on the left island in place of the project tree: the accounts' switcher on top.
+[[tool-windows]]
+id = "fluxgram"
+title = "FluxGram"
+icon = "icons/fluxgram.svg"
+location = "left"
+
+# Settings → FluxGram: the accounts, each with Sign Out, and Add Account.
+[[tool-windows]]
+id = "accounts"
+title = "Accounts"
+location = "settings"
+
+# Adding an account: the QR code for the phone's camera, or the number, the code and the password.
+[[tool-windows]]
+id = "sign-in"
+title = "Add Account"
+location = "dialog"

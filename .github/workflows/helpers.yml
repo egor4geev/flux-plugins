@@ -1,0 +1,183 @@
+# The plugins' own programs (helpers/): fluxgram-helper, FluxGram's TDLib behind JSON lines. Every
+# change is built for the four platforms Flux runs on, run where the runner can run it (a smoke
+# test without the network: `fluxgram.ready`, then `getOption version` answered, then a clean
+# end), and gzipped — the files the plugin's manifest names ([[helpers]]).
+#
+# A push to main releases a new version of the crate once: `fluxgram-helper-v<version>` with the
+# four `fluxgram-helper-<platform>.gz` and SHA256SUMS (the checksums of the .gz files: Flux checks
+# the downloaded bytes). A released version is never rebuilt or replaced; other branches never
+# release.
+name: Helpers
+
+on:
+  pull_request:
+    paths:
+      - "helpers/**"
+      - ".github/workflows/helpers.yml"
+  push:
+    paths:
+      - "helpers/**"
+      - ".github/workflows/helpers.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helpers-${{ github.ref }}
+  # A newer push replaces a run in progress, except on main, which may be releasing.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: fluxgram-helper ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The macOS runner is Apple Silicon: x86_64 is a cross build, run with Rosetta.
+          - platform: macos-aarch64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - platform: macos-x86_64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+          - platform: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          # Built and run on Windows on Arm itself.
+          - platform: windows-aarch64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+        working-directory: helpers/fluxgram-helper
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Windows on Arm image may come without Rust: rustup installs it.
+      - name: Rust
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -fsSL -o "$RUNNER_TEMP/rustup-init.exe" \
+              "https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe"
+            "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal --default-toolchain stable
+            echo "$USERPROFILE\\.cargo\\bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustc --version
+
+      # The code's checks once: they don't depend on the platform.
+      - name: Format, lints, unit tests
+        if: matrix.platform == 'macos-aarch64'
+        run: |
+          cargo fmt --check
+          cargo clippy --release --all-targets -- -D warnings
+          cargo test --release
+
+      # build.rs downloads TDLib's static libraries for the target and checks their SHA-256.
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Program file
+        run: |
+          exe="target/${{ matrix.target }}/release/fluxgram-helper"
+          if [ -f "$exe.exe" ]; then exe="$exe.exe"; fi
+          ls -l "$exe"
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+
+      # One file: on macOS nothing but the system's libraries; on Windows, the DLLs it needs are
+      # listed (TDLib's prebuilt Windows libraries are built for the C runtime in DLLs, /MD).
+      - name: Libraries
+        run: |
+          if [ "${{ runner.os }}" = macOS ]; then
+            otool -L "$EXE"
+            otool -l "$EXE" | grep -A4 LC_BUILD_VERSION | grep -E 'minos|sdk'
+            if otool -L "$EXE" | tail -n +2 | grep -vE '^\s*/(usr/lib|System/Library)/'; then
+              echo "::error title=Libraries::fluxgram-helper links a library outside the system"
+              exit 1
+            fi
+          else
+            dlls=$(grep -aoiE '[a-z0-9_.-]+\.dll' "$EXE" | tr 'A-Z' 'a-z' | sort -u)
+            echo "$dlls"
+            if echo "$dlls" | grep -qE '^(vcruntime140(_1)?|msvcp140)\.dll$'; then
+              echo "::warning title=C runtime::fluxgram-helper needs the Visual C++ runtime DLLs (TDLib's prebuilt libraries are /MD)"
+            fi
+          fi
+
+      # Without the network: TDLib starts, a client answers `getOption version` before
+      # setTdlibParameters, and the end of input closes it (fluxgram.closed, exit 0).
+      - name: Smoke test
+        run: |
+          run=""
+          if [ "${{ matrix.platform }}" = macos-x86_64 ]; then
+            if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+              echo "::notice title=Smoke test::no Rosetta on this runner: macos-x86_64 isn't run"
+              exit 0
+            fi
+            run="arch -x86_64"
+          fi
+          printf '%s\n' '{"@client":"smoke","@type":"getOption","name":"version","@extra":1}' \
+            | $run "$EXE" > smoke.out
+          cat smoke.out
+          head -n 1 smoke.out | grep -q '"@type":"fluxgram.ready"'
+          grep -q '"@client":"smoke","@type":"optionValueString","value":"1.8.61","@extra":1' smoke.out
+          grep -q '"@type":"fluxgram.closed","@client":"smoke"' smoke.out
+
+      - name: Gzip
+        run: |
+          mkdir -p dist
+          gzip -9 -n -c "$EXE" > "dist/fluxgram-helper-${{ matrix.platform }}.gz"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fluxgram-helper-${{ matrix.platform }}
+          path: helpers/fluxgram-helper/dist/fluxgram-helper-${{ matrix.platform }}.gz
+          if-no-files-found: error
+
+  # A new version of the crate, from main only, with all four files.
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fluxgram-helper-*
+          path: dist
+          merge-multiple: true
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' helpers/fluxgram-helper/Cargo.toml | head -n 1)
+          tag="fluxgram-helper-v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is released already: left as it is"
+            exit 0
+          fi
+          cd dist
+          for platform in macos-aarch64 macos-x86_64 windows-x86_64 windows-aarch64; do
+            test -s "fluxgram-helper-$platform.gz"
+          done
+          sha256sum fluxgram-helper-*.gz > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$tag" fluxgram-helper-*.gz SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "fluxgram-helper $version" \
+            --notes "FluxGram's program: TDLib 1.8.61 behind JSON lines (helpers/fluxgram-helper). The plugin's manifest names these files with their SHA-256 (SHA256SUMS)."
