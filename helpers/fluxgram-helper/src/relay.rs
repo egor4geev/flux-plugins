@@ -18,6 +18,11 @@ pub enum Input {
     Execute { query: String, extra: Option<Value> },
     /// `fluxgram.keep` or `fluxgram.drop`: which updates pass from now on.
     Filter(Filter),
+    /// `fluxgram.chats`: the chats whose updates pass for the account `key`; none — every chat's.
+    Chats {
+        key: String,
+        chats: Option<HashSet<i64>>,
+    },
     /// `fluxgram.quit`.
     Quit,
     /// An empty line: nothing to do.
@@ -101,6 +106,34 @@ pub fn parse_input(line: &[u8]) -> Result<Input, InputError> {
                     )
                 })
             }
+            "chats" => {
+                let key = match object.get("@client") {
+                    Some(Value::String(key)) if !key.is_empty() => key.clone(),
+                    _ => {
+                        return Err(InputError::new(
+                            "fluxgram.chats needs \"@client\": the account's key",
+                            extra.as_ref(),
+                        ));
+                    }
+                };
+                let chats = match object.get("chats") {
+                    Some(Value::Null) => Some(None),
+                    Some(Value::Array(ids)) => ids
+                        .iter()
+                        .map(Value::as_i64)
+                        .collect::<Option<HashSet<_>>>()
+                        .map(Some),
+                    _ => None,
+                };
+                chats
+                    .map(|chats| Input::Chats { key, chats })
+                    .ok_or_else(|| {
+                        InputError::new(
+                            "fluxgram.chats needs \"chats\": an array of chat ids, or null",
+                            extra.as_ref(),
+                        )
+                    })
+            }
             "quit" => Ok(Input::Quit),
             _ => Err(InputError::new(
                 format!("Unknown request {kind}"),
@@ -174,6 +207,10 @@ pub struct Clients {
     /// The key of every client made, as a JSON string (a closed one's late messages keep theirs).
     keys: HashMap<i32, String>,
     filter: Filter,
+    /// The chats whose updates pass, by the account's key as a JSON string (`fluxgram.chats`); an
+    /// account without — every chat's. It may come before the client is made; it goes when the
+    /// client closes.
+    chats: HashMap<String, HashSet<i64>>,
 }
 
 impl Clients {
@@ -203,6 +240,25 @@ impl Clients {
         self.filter = filter;
     }
 
+    /// A new `fluxgram.chats` of the account `key`: the chats whose updates pass; none — every
+    /// chat's.
+    pub fn set_chats(&mut self, key: &str, chats: Option<HashSet<i64>>) {
+        let key = Value::from(key).to_string();
+        match chats {
+            Some(chats) => self.chats.insert(key, chats),
+            None => self.chats.remove(&key),
+        };
+    }
+
+    /// An update of the client `key` passes its chat filter: it is about a listed chat, or about
+    /// no chat at all (a user, a file, a group's members), or the account has no filter.
+    fn chat_passes(&self, key: Option<&String>, raw: &str) -> bool {
+        let Some(listed) = key.and_then(|key| self.chats.get(key)) else {
+            return true;
+        };
+        update_chat(raw).is_none_or(|chat| listed.contains(&chat))
+    }
+
     /// Puts TDLib's message `raw` into `batch` as the plugin gets it: `"@client": <key>` in place
     /// of `@client_id`, unless it's an update the filter holds back. After a client's
     /// `authorizationStateClosed` comes `fluxgram.closed`, and the key is free for a new client:
@@ -211,9 +267,11 @@ impl Clients {
         let Message { kind, members, id } = Message::read(raw);
         let closed = kind == "updateAuthorizationState"
             && raw.contains("\"@type\":\"authorizationStateClosed\"");
-        let held_back = kind.starts_with("update") && !closed && !self.filter.passes(&kind);
-
         let key = id.and_then(|id| self.keys.get(&id));
+        let held_back = kind.starts_with("update")
+            && !closed
+            && (!self.filter.passes(&kind) || !self.chat_passes(key, raw));
+
         if !held_back {
             let comma = if members.is_empty() { "" } else { "," };
             match key {
@@ -225,12 +283,29 @@ impl Clients {
         if closed && let Some(id) = id {
             if let Some(key) = self.keys.get(&id) {
                 batch.push_parts(&["{\"@type\":\"fluxgram.closed\",\"@client\":", key, "}"]);
+                // The filter goes with its client: a new one starts without.
+                self.chats.remove(key);
             }
             self.live.retain(|_, live| *live != id);
             return true;
         }
         false
     }
+}
+
+/// The chat an update is about: its `chat_id`, its message's (`updateNewMessage`,
+/// `updateMessageSendSucceeded`), the new chat's (`updateNewChat`), or the person's of
+/// `updateUserStatus` (a person's chat has the person's id); none — an update of no chat.
+fn update_chat(raw: &str) -> Option<i64> {
+    let update: Value = serde_json::from_str(raw).ok()?;
+    update["chat_id"]
+        .as_i64()
+        .or_else(|| update["message"]["chat_id"].as_i64())
+        .or_else(|| match update["@type"].as_str()? {
+            "updateNewChat" => update["chat"]["id"].as_i64(),
+            "updateUserStatus" => update["user_id"].as_i64(),
+            _ => None,
+        })
 }
 
 /// What the program reads of TDLib's message.
@@ -660,6 +735,149 @@ mod tests {
             &mut batch,
         );
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn the_chats_filter_is_read() {
+        assert_eq!(
+            parse_input(
+                br#"{"@type":"fluxgram.chats","@client":"a1","chats":[101,-1000000001001]}"#
+            ),
+            Ok(Input::Chats {
+                key: "a1".to_string(),
+                chats: Some(HashSet::from([101, -1000000001001])),
+            })
+        );
+        assert_eq!(
+            parse_input(br#"{"@type":"fluxgram.chats","@client":"a1","chats":[]}"#),
+            Ok(Input::Chats {
+                key: "a1".to_string(),
+                chats: Some(HashSet::new()),
+            })
+        );
+        assert_eq!(
+            parse_input(br#"{"@type":"fluxgram.chats","@client":"a1","chats":null}"#),
+            Ok(Input::Chats {
+                key: "a1".to_string(),
+                chats: None,
+            })
+        );
+        assert!(
+            error(r#"{"@type":"fluxgram.chats","chats":[1],"@extra":5}"#)
+                .message
+                .contains("@client")
+        );
+        assert!(
+            error(r#"{"@type":"fluxgram.chats","@client":"a1","chats":["x"]}"#)
+                .message
+                .contains("chat ids")
+        );
+        assert!(
+            error(r#"{"@type":"fluxgram.chats","@client":"a1"}"#)
+                .message
+                .contains("chat ids")
+        );
+    }
+
+    #[test]
+    fn only_the_listed_chats_updates_pass() {
+        let mut clients = Clients::default();
+        // The filter may come before the client.
+        clients.set_chats("a1", Some(HashSet::from([101, -201])));
+        clients.client("a1", || 1);
+        clients.client("a2", || 2);
+        fn passes(clients: &mut Clients, line: &str) -> bool {
+            let mut batch = Batch::default();
+            clients.relay(line, &mut batch);
+            batch.lines() == 1
+        }
+        // By `chat_id`.
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateChatReadInbox","chat_id":101,"unread_count":0,"@client_id":1}"#
+        ));
+        assert!(!passes(
+            &mut clients,
+            r#"{"@type":"updateChatReadInbox","chat_id":102,"unread_count":0,"@client_id":1}"#
+        ));
+        // By the message's chat; a quote of a listed chat inside doesn't count.
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateNewMessage","message":{"id":1,"chat_id":-201},"@client_id":1}"#
+        ));
+        assert!(!passes(
+            &mut clients,
+            r#"{"@type":"updateNewMessage","message":{"id":1,"chat_id":-202,"reply_to":{"chat_id":101}},"@client_id":1}"#
+        ));
+        // By the new chat's id, and the person's of a status.
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateNewChat","chat":{"id":101,"title":"Anna"},"@client_id":1}"#
+        ));
+        assert!(!passes(
+            &mut clients,
+            r#"{"@type":"updateNewChat","chat":{"id":102,"title":"Dima"},"@client_id":1}"#
+        ));
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateUserStatus","user_id":101,"status":{},"@client_id":1}"#
+        ));
+        assert!(!passes(
+            &mut clients,
+            r#"{"@type":"updateUserStatus","user_id":102,"status":{},"@client_id":1}"#
+        ));
+        // Updates of no chat pass, and so do answers, whatever chat they are of.
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateUser","user":{"id":102},"@client_id":1}"#
+        ));
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateFile","file":{"id":7},"@client_id":1}"#
+        ));
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"chat","id":102,"@extra":3,"@client_id":1}"#
+        ));
+        // Another account has no filter.
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateChatReadInbox","chat_id":102,"@client_id":2}"#
+        ));
+        // The type filter still comes first.
+        clients.set_filter(Filter::Keep(HashSet::from(["updateChatTitle".to_string()])));
+        assert!(!passes(
+            &mut clients,
+            r#"{"@type":"updateChatReadInbox","chat_id":101,"@client_id":1}"#
+        ));
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateChatTitle","chat_id":101,"title":"A","@client_id":1}"#
+        ));
+        clients.set_filter(Filter::default());
+        // An empty list passes no chat's updates; null — every chat's.
+        clients.set_chats("a1", Some(HashSet::new()));
+        assert!(!passes(
+            &mut clients,
+            r#"{"@type":"updateChatReadInbox","chat_id":101,"@client_id":1}"#
+        ));
+        clients.set_chats("a1", None);
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateChatReadInbox","chat_id":102,"@client_id":1}"#
+        ));
+        // The filter goes with its client.
+        clients.set_chats("a1", Some(HashSet::new()));
+        let mut batch = Batch::default();
+        clients.relay(
+            r#"{"@type":"updateAuthorizationState","authorization_state":{"@type":"authorizationStateClosed"},"@client_id":1}"#,
+            &mut batch,
+        );
+        clients.client("a1", || 3);
+        assert!(passes(
+            &mut clients,
+            r#"{"@type":"updateChatReadInbox","chat_id":102,"@client_id":3}"#
+        ));
     }
 
     #[test]

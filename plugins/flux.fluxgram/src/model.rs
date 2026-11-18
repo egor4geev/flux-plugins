@@ -6,15 +6,19 @@
 //! service and the windows are separate instances, but they share the clock.
 //!
 //! The service sends the windows structured values, not text: each window translates what it
-//! shows (`Problem::text` gives the English line, the window passes it through `tr`).
+//! shows (`Problem::text` gives the English line, the window passes it through `tr`). The chats
+//! (part 3) are the exception where the service has the words: a list's last line and a feed's
+//! messages are made once, in the service, through [`Words`] (the host's `tr` there, English in
+//! the tests).
 
+use flux_plugin_api::conversation::{AvatarSpec, Change, Composed};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 // --- The service ⇄ the windows ---
 
-/// What the service tells the windows: the whole state, small (a few accounts and the sign-in in
-/// progress), sent only when it changed — and to a window that has just started.
+/// The accounts and the sign-in, small (a few accounts and the sign-in in progress): sent as
+/// [`Note::State`] only when it changed — and to a window that has just started.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub accounts: Vec<AccountView>,
@@ -37,6 +41,45 @@ pub struct AccountView {
     pub photo: Option<String>,
     /// Sign Out was confirmed: Telegram is ending the session.
     pub signing_out: bool,
+}
+
+impl AccountView {
+    /// The name's first word.
+    pub fn first_name(&self) -> &str {
+        self.name.split_whitespace().next().unwrap_or(&self.name)
+    }
+}
+
+/// What tells the accounts apart where there are several (a chat's header, the Add Chat popup's
+/// groups), by key: the first name; the full name where two share it; the masked number after
+/// it where two share that too.
+pub fn account_labels(accounts: &[AccountView]) -> std::collections::HashMap<String, String> {
+    fn first(account: &AccountView) -> &str {
+        account.first_name()
+    }
+    fn full(account: &AccountView) -> &str {
+        &account.name
+    }
+    let shared = |label: fn(&AccountView) -> &str, account: &AccountView| {
+        accounts
+            .iter()
+            .filter(|other| label(other) == label(account))
+            .count()
+            > 1
+    };
+    accounts
+        .iter()
+        .map(|account| {
+            let label = if !shared(first, account) {
+                account.first_name().to_string()
+            } else if !shared(full, account) {
+                account.name.clone()
+            } else {
+                format!("{} · {}", account.name, account.phone)
+            };
+            (account.key.clone(), label)
+        })
+        .collect()
 }
 
 /// The sign-in dialog: its screen, whether a request is on its way, what went wrong.
@@ -173,13 +216,277 @@ pub enum Request {
     /// Back: the previous screen.
     Back,
     /// ↵ or Next: the screen's field.
-    Submit { text: String },
+    Submit {
+        text: String,
+    },
     /// Send the code again (another way).
     Resend,
     /// Cancel, Esc, ×: the sign-in is dropped.
     Cancel,
     /// Sign Out of an account, confirmed.
-    SignOut { key: String },
+    SignOut {
+        key: String,
+    },
+
+    // --- The list (part 3, `chats.rs`) ---
+    /// Add a chat to the account's list (the Add Chat popup's choice).
+    AddChat {
+        key: ChatKey,
+    },
+    /// Remove a chat from the list: FluxGram stops showing it; it stays in Telegram.
+    RemoveChat {
+        key: ChatKey,
+    },
+    /// The Add Chat popup's query (empty — the recent chats): the answer is [`Note::Found`] with
+    /// the same `request`, to this window only.
+    SearchChats {
+        account: String,
+        query: String,
+        request: u64,
+    },
+    /// A chat's tab came into sight, or went out of it: no notifications for a chat in sight.
+    InSight {
+        key: ChatKey,
+        in_sight: bool,
+    },
+
+    // --- A chat (part 3, `feed.rs`) ---
+    /// A chat's tab opened (or came back with the project): the service sends this window the
+    /// chat's [`Note::Header`] and its feed ([`Note::Feed`]) from where the user stopped reading,
+    /// then every change of them, until [`Request::CloseChat`].
+    OpenChat {
+        key: ChatKey,
+    },
+    /// The chat's tab closed in this window.
+    CloseChat {
+        key: ChatKey,
+    },
+    /// The feed scrolled near its oldest (`older`) or newest loaded message: a page more.
+    LoadOlder {
+        key: ChatKey,
+    },
+    LoadNewer {
+        key: ChatKey,
+    },
+    /// The messages the user sees, the first and the last (the conversation's `visible`): they
+    /// are read, and their pictures go first.
+    Visible {
+        key: ChatKey,
+        first: String,
+        last: String,
+    },
+    /// The field was sent: the text, the files, the message answered.
+    Send {
+        key: ChatKey,
+        composed: Composed,
+    },
+    /// A message's new text (the field in editing).
+    Edit {
+        key: ChatKey,
+        message: String,
+        text: String,
+    },
+    /// Delete a message, confirmed by the user.
+    Delete {
+        key: ChatKey,
+        message: String,
+    },
+    /// A part the user clicked that isn't there yet: a file, a picture, a video — download it.
+    Download {
+        key: ChatKey,
+        message: String,
+        part: u32,
+    },
+    /// A quote's message isn't loaded: load the feed around it, then reveal it.
+    JumpTo {
+        key: ChatKey,
+        message: String,
+    },
+    /// The field's text changed: "typing…" to the chat, and the draft kept in Telegram.
+    Draft {
+        key: ChatKey,
+        text: String,
+    },
+
+    /// The reply over the field quotes a part of its message (the selected text and where it
+    /// starts in the message's text, in UTF-16 units), or the whole message again (none): the
+    /// next message sent in reply to `message` carries the quote.
+    Quote {
+        key: ChatKey,
+        message: String,
+        quote: Option<(String, u32)>,
+    },
+
+    // --- Profiles and media (part 3+, `profile.rs`) ---
+    /// What the profile dialog asks: a person's or a group's profile, the members, the media.
+    Profile(crate::profile::ProfileAsk),
+
+    // --- Search in a chat, hidden chats (part 3+, `feed.rs`, `chats.rs`) ---
+    /// A chat's search: the matches of a query, the next one.
+    Search(crate::feed::SearchAsk),
+    /// The hidden chats: the phrase typed in the list's search, hide or show a chat.
+    Hidden(crate::chats::HiddenAsk),
+
+    // --- FluxGram's folders (`chats.rs`) ---
+    /// Create, rename, delete a folder; put a chat in one, or take it out.
+    Folders(crate::chats::FolderAsk),
+}
+
+// --- The chats (part 3) ---
+
+/// A chat of an account: a tab's key (`<account>:<chat id>`), the list's row, a request's subject.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ChatKey {
+    pub account: String,
+    pub chat: i64,
+}
+
+impl ChatKey {
+    pub fn new(account: &str, chat: i64) -> Self {
+        ChatKey {
+            account: account.to_string(),
+            chat,
+        }
+    }
+
+    /// The key of the chat's tab, `<account>:<chat id>`: the window `chat/<key>`.
+    pub fn tab(&self) -> String {
+        format!("{}:{}", self.account, self.chat)
+    }
+
+    /// The chat of a tab's key.
+    pub fn parse(tab: &str) -> Option<Self> {
+        let (account, chat) = tab.split_once(':')?;
+        Some(ChatKey::new(account, chat.parse().ok()?))
+    }
+}
+
+/// What the service tells the windows: the whole state ([`Snapshot`]), an account's list, a
+/// chat's header and feed, the Add Chat popup's answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "note", rename_all = "kebab-case")]
+pub enum Note {
+    /// The accounts and the sign-in: to every window, when it changed.
+    State(Snapshot),
+    /// The list of an account: the chats the user added, in Telegram's order (pinned first, then
+    /// the newest); to every window, when it changed.
+    Chats { account: String, rows: Vec<ChatRow> },
+    /// A chat's header: to the windows that have the chat open, when it changed.
+    Header { key: ChatKey, header: ChatHeader },
+    /// Changes of a chat's feed, in order: to the windows that have the chat open. The window
+    /// hands them to its conversation as they are (`conversation::update`).
+    Feed { key: ChatKey, changes: Vec<Change> },
+    /// The chats found for the Add Chat popup's `request`: to the window that asked.
+    Found { request: u64, chats: Vec<FoundChat> },
+    /// The profile dialog's answers (`profile.rs`): to the window that asked.
+    Profile(crate::profile::ProfileTold),
+    /// A chat's search's answers (`feed.rs`): to the window that asked.
+    Search(crate::feed::SearchTold),
+    /// The hidden chats' state (`chats.rs`): to every window.
+    Hidden(crate::chats::HiddenTold),
+    /// FluxGram's folders, whole (`chats.rs`): to every window when they changed, and to a window
+    /// that has just started.
+    Folders { folders: Vec<crate::chats::Folder> },
+}
+
+/// A row of the list on the left.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatRow {
+    pub chat: i64,
+    pub title: String,
+    pub avatar: AvatarSpec,
+    /// The last message in a line, in the interface's language: "Petya: Release on Friday?",
+    /// "You: See you at 11?", "Photo"; none — no messages.
+    pub last: Option<String>,
+    /// The last message's time (seconds since 1970-01-01 UTC): the window shows "14:32",
+    /// "Yesterday", "Mon", a date. 0 — none.
+    pub date: i64,
+    /// The last message is the user's: its mark (✓, ✓✓, a clock, a red one).
+    pub delivery: Option<flux_plugin_api::conversation::Delivery>,
+    pub unread: u32,
+    /// Mentions of the user among the unread ones.
+    pub mentions: u32,
+    pub muted: bool,
+    /// Pinned in Telegram's main list.
+    pub pinned: bool,
+    /// The user's unsent draft: the row shows "Draft: …" in place of the last message.
+    pub draft: Option<String>,
+}
+
+/// A chat's header in its tab: the title, the picture, who it is and what is going on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatHeader {
+    pub title: String,
+    pub avatar: AvatarSpec,
+    /// The line under the title, without the typing: "online", "last seen at 14:32",
+    /// "5 members" — in the interface's language.
+    pub status: String,
+    /// The status line is "online": the accent color.
+    pub online: bool,
+    /// Who is typing (or sending a photo…), in the interface's language: "Petya is typing…";
+    /// none — nobody. It takes the status line's place.
+    pub typing: Option<String>,
+    /// The user may write here: the field; otherwise a feed only.
+    pub can_send: bool,
+    pub muted: bool,
+}
+
+/// A chat the Add Chat popup offers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FoundChat {
+    pub chat: i64,
+    pub title: String,
+    pub avatar: AvatarSpec,
+    /// Dim after the title: "@anna", "5 members", "group".
+    pub detail: Option<String>,
+    /// Already in the list.
+    pub added: bool,
+}
+
+/// The words of the chats the service makes: the host's translation in the plugin, English in
+/// the tests ([`English`]).
+pub trait Words {
+    /// The text in the interface's language.
+    fn tr(&self, text: &str) -> String;
+    /// A template with `{0}`, `{1}`… replaced by `values`, translated first.
+    fn trf(&self, template: &str, values: &[&str]) -> String;
+    /// A count in words, `{0}` the number: "1 member", "5 members". English takes `one` for 1 and
+    /// `other` for the rest; Russian has three forms, translated as `"<other>|one"`,
+    /// `"<other>|few"` and `"<other>|many"` in `ru.toml` ("{0} members|few" = "{0} участника").
+    fn count(&self, n: u64, one: &str, other: &str) -> String;
+}
+
+/// The Russian plural form of `n`: "one" (1, 21, 101), "few" (2–4, 22–24), "many" (the rest).
+pub fn russian_form(n: u64) -> &'static str {
+    match (n % 10, n % 100) {
+        (1, rest) if rest != 11 => "one",
+        (2..=4, rest) if !(12..=14).contains(&rest) => "few",
+        _ => "many",
+    }
+}
+
+/// The words as they are written: for the tests.
+#[cfg(test)]
+pub struct English;
+
+#[cfg(test)]
+impl Words for English {
+    fn tr(&self, text: &str) -> String {
+        text.to_string()
+    }
+
+    fn trf(&self, template: &str, values: &[&str]) -> String {
+        let mut text = template.to_string();
+        for (index, value) in values.iter().enumerate() {
+            text = text.replace(&format!("{{{index}}}"), value);
+        }
+        text
+    }
+
+    fn count(&self, n: u64, one: &str, other: &str) -> String {
+        let template = if n == 1 { one } else { other };
+        template.replace("{0}", &n.to_string())
+    }
 }
 
 // --- TDLib's authorization ---
@@ -657,13 +964,32 @@ pub fn restart_delay(failures: u32) -> u64 {
 
 /// TDLib's updates FluxGram uses (`fluxgram.keep`): the helper holds the rest back, so they never
 /// wake the plugin — TDLib has about 170 kinds, and new versions add more. The sign-in's states,
-/// the signed-in user's name and photo (`updateUser`), the photo's download (`updateFile`), the
-/// connection (`updateConnectionState`, to the log). The chats (part 3) add theirs.
+/// the users' names and photos (`updateUser`), the files' downloads (`updateFile`), the
+/// connection (`updateConnectionState`, to the log), and what [`crate::store::Store`] keeps of the
+/// chats. The list (`chats::KEPT`) and the feed (`feed::KEPT`) add theirs; the service sends the
+/// union. Updates of chats that aren't in a list or open don't pass at all (`fluxgram.chats`).
 pub const KEPT: &[&str] = &[
     "updateAuthorizationState",
     "updateUser",
     "updateFile",
     "updateConnectionState",
+    // The store (part 3).
+    "updateNewChat",
+    "updateChatTitle",
+    "updateChatPhoto",
+    "updateChatAccentColors",
+    "updateChatPermissions",
+    "updateChatLastMessage",
+    "updateChatPosition",
+    "updateChatReadInbox",
+    "updateChatReadOutbox",
+    "updateChatUnreadMentionCount",
+    "updateChatNotificationSettings",
+    "updateChatDraftMessage",
+    "updateScopeNotificationSettings",
+    "updateBasicGroup",
+    "updateSupergroup",
+    "updateUserStatus",
 ];
 
 #[cfg(test)]
@@ -922,6 +1248,30 @@ mod tests {
     }
 
     #[test]
+    fn tells_accounts_apart() {
+        let account = |key: &str, name: &str, phone: &str| AccountView {
+            key: key.into(),
+            name: name.into(),
+            phone: phone.into(),
+            label: None,
+            color: 0,
+            photo: None,
+            signing_out: false,
+        };
+        let labels = account_labels(&[
+            account("a", "Egor Ageev", "+7 ••• •••-••-12"),
+            account("b", "Egor Petrov", "+7 ••• •••-••-34"),
+            account("c", "Test", "+7 ••• •••-••-56"),
+            account("d", "Test", "+7 ••• •••-••-78"),
+            account("e", "Anna", "+7 ••• •••-••-90"),
+        ]);
+        assert_eq!(labels["a"], "Egor Ageev");
+        assert_eq!(labels["b"], "Egor Petrov");
+        assert_eq!(labels["c"], "Test · +7 ••• •••-••-56");
+        assert_eq!(labels["e"], "Anna");
+    }
+
+    #[test]
     fn counts_down() {
         assert_eq!(countdown(58), "0:58");
         assert_eq!(countdown(90), "1:30");
@@ -931,12 +1281,31 @@ mod tests {
     }
 
     #[test]
+    fn counts_in_russian() {
+        let forms: Vec<&str> = [1, 2, 5, 11, 12, 21, 22, 25, 101, 111, 0]
+            .into_iter()
+            .map(russian_form)
+            .collect();
+        assert_eq!(
+            forms,
+            [
+                "one", "few", "many", "many", "many", "one", "few", "many", "one", "many", "many"
+            ]
+        );
+        assert_eq!(English.count(1, "{0} member", "{0} members"), "1 member");
+        assert_eq!(English.count(5, "{0} member", "{0} members"), "5 members");
+    }
+
+    #[test]
     fn backs_off() {
         assert_eq!(restart_delay(0), 1);
         assert_eq!(restart_delay(1), 1);
         assert_eq!(restart_delay(3), 5);
         assert_eq!(restart_delay(50), 60);
-        assert!(!KEPT.contains(&"updateUserStatus"));
+        // Every user's "online" would wake the plugin: it passes only for the chats in a list or
+        // open (`fluxgram.chats` takes a person's id as their chat's).
+        assert!(KEPT.contains(&"updateUserStatus"));
+        assert!(!KEPT.contains(&"updateOption"));
         assert!(KEPT.contains(&"updateAuthorizationState"));
         assert!(KEPT.contains(&"updateUser"));
         assert!(KEPT.contains(&"updateFile"));

@@ -23,6 +23,10 @@ The rules, by the number:
 - `fluxgram.keep` and `fluxgram.drop` filter the updates as the helper does;
 - FAKE_SLOW=<seconds> — the sign-in's requests (the number, the code, the password, a resend, the
   QR code) are answered that much later, as a slow network: for a look at the busy buttons.
+
+The chats (part 3): a signed-in account sees the people, groups and messages of `fake_world.py`;
+the requests this file doesn't answer go to the handlers `fake_chats.py` (the list) and
+`fake_feed.py` (a chat) register there.
 """
 
 from __future__ import annotations
@@ -36,15 +40,38 @@ import threading
 import time
 import zlib
 
+import fake_world
+import fake_chats  # noqa: F401 — registers the list's handlers
+import fake_feed  # noqa: F401 — registers a chat's handlers
+import fake_search  # noqa: F401 — registers the search in a chat
+import fake_profile  # noqa: F401 — registers the profiles: people, groups, members, muting
+
 LOCK = threading.Lock()
 # The helper's filter: ("keep", types) — only these updates pass; ("drop", types) — all but these.
 FILTER: tuple[str, set[str]] = ("drop", set())
+# The helper's chat filter of each client (`fluxgram.chats`): only these chats' updates pass; a client
+# without — every chat's. It goes with the client (`fluxgram.closed`).
+CHAT_FILTERS: dict[str, set[int]] = {}
 CLIENTS: dict[str, "Client"] = {}
 # How a sign-in code comes: the first way, then each next one (resendAuthenticationCode).
 CODE_WAYS = ["authenticationCodeTypeTelegramMessage", "authenticationCodeTypeSms", "authenticationCodeTypeCall"]
 # The requests FAKE_SLOW delays.
 SLOW = {"setAuthenticationPhoneNumber", "checkAuthenticationCode", "checkAuthenticationPassword",
         "resendAuthenticationCode", "requestQrCodeAuthentication"}
+
+
+def update_chat(obj: dict) -> int | None:
+    """The chat an update is about, as the helper reads it; none — an update of no chat."""
+    if isinstance(obj.get("chat_id"), int):
+        return obj["chat_id"]
+    message = obj.get("message")
+    if isinstance(message, dict) and isinstance(message.get("chat_id"), int):
+        return message["chat_id"]
+    if obj.get("@type") == "updateNewChat":
+        return (obj.get("chat") or {}).get("id")
+    if obj.get("@type") == "updateUserStatus":
+        return obj.get("user_id")
+    return None
 
 
 def passes(obj: dict) -> bool:
@@ -54,7 +81,11 @@ def passes(obj: dict) -> bool:
     if kind == "updateAuthorizationState" and obj["authorization_state"]["@type"] == "authorizationStateClosed":
         return True
     mode, types = FILTER
-    return (kind in types) == (mode == "keep")
+    if (kind in types) != (mode == "keep"):
+        return False
+    listed = CHAT_FILTERS.get(obj.get("@client", ""))
+    chat = update_chat(obj)
+    return listed is None or chat is None or chat in listed
 
 
 def emit(obj: dict) -> None:
@@ -63,6 +94,8 @@ def emit(obj: dict) -> None:
     with LOCK:
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         sys.stdout.flush()
+    if obj.get("@type") == "fluxgram.closed":
+        CHAT_FILTERS.pop(obj.get("@client", ""), None)
 
 
 def png(path: str, color: tuple[int, int, int]) -> None:
@@ -125,6 +158,8 @@ class Client:
         self.send({"@type": "updateUserStatus", "user_id": 42, "status": {"@type": "userStatusOnline", "expires": 0}})
         self.send({"@type": "updateUser", "user": self.user})
         self.send({"@type": "updateConnectionState", "state": {"@type": "connectionStateReady"}})
+        for hook in fake_world.ON_READY:
+            hook(self)
         revoke = os.path.join(self.params["database_directory"], "revoke")
         if os.path.exists(revoke):
             threading.Timer(2.0, self.revoked).start()
@@ -266,6 +301,9 @@ class Client:
             if not self.user:
                 return self.error(request, 401, "Unauthorized")
             self.answer(request, self.user)
+        elif kind == "downloadFile" and "downloadFile" in fake_world.HANDLERS:
+            # The chats' media: fake_feed downloads them (with progress), the photos too.
+            fake_world.HANDLERS["downloadFile"](self, request)
         elif kind == "downloadFile":
             file_id = int(request.get("file_id", 0))
             done = self.file(file_id, True)
@@ -283,6 +321,8 @@ class Client:
         elif kind == "close":
             self.ok(request)
             self.close_now()
+        elif kind in fake_world.HANDLERS:
+            fake_world.HANDLERS[kind](self, request)
         else:
             self.error(request, 400, f"The fake helper doesn't know {kind}")
 
@@ -318,6 +358,13 @@ def main() -> int:
         kind = request.get("@type", "")
         if kind in ("fluxgram.keep", "fluxgram.drop"):
             FILTER = (kind.removeprefix("fluxgram."), set(request.get("types", [])))
+            continue
+        if kind == "fluxgram.chats":
+            chats = request.get("chats")
+            if chats is None:
+                CHAT_FILTERS.pop(request.get("@client", ""), None)
+            else:
+                CHAT_FILTERS[request.get("@client", "")] = set(chats)
             continue
         if kind == "fluxgram.quit":
             break

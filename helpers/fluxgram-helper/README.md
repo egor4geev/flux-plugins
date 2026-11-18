@@ -71,6 +71,21 @@ the program's own messages (start, a failure) go to stderr.
   {"@type": "fluxgram.drop", "types": ["updateUserStatus", "updateChatAction"]}
   ```
 
+- **`fluxgram.chats`** — the chats of an account whose updates pass: the chats the plugin shows
+  (in its list, or open). For that account's client an update about another chat is held back, so
+  the rest of Telegram (a busy group, a channel) never wakes the plugin. The update's chat is its
+  `chat_id`, else its message's (`updateNewMessage`, `updateMessageSendSucceeded`), else the new
+  chat's (`updateNewChat`), and for `updateUserStatus` the person's (`user_id`: a person's chat has
+  the person's id). Updates about no chat (`updateUser`, `updateFile`, `updateSupergroup`…) pass,
+  and answers always do — `getChat` of any chat is answered. `"chats": null` lets every chat's
+  updates pass again, an empty list none. It may come before the account's client is made (the
+  start's burst is filtered already) and goes with the client (`fluxgram.closed`): a new client of
+  the key starts without one. It works after `fluxgram.keep` or `fluxgram.drop`, not instead.
+
+  ```json
+  {"@type": "fluxgram.chats", "@client": "a1", "chats": [101, -1000000001001]}
+  ```
+
 - **`fluxgram.quit`** — closes every client and exits with 0, as the end of input does.
 
 ### Program → plugin
@@ -91,7 +106,8 @@ the program's own messages (start, a failure) go to stderr.
   key still goes to the closing client (TDLib answers it with an error): wait for it.
 - **`fluxgram.error`** — a line the program couldn't take (not JSON, not an object, no `@client` or
   not a non-empty string, an unknown `fluxgram.*`, a `fluxgram.execute` without `query`, a
-  `fluxgram.keep` or `fluxgram.drop` without its `types`):
+  `fluxgram.keep` or `fluxgram.drop` without its `types`, a `fluxgram.chats` without `@client` or
+  `chats`):
   `{"@type": "fluxgram.error", "message": "…", "@extra": …}` (`@extra` when the line had one). Empty
   lines are skipped.
 

@@ -6,36 +6,61 @@
 //! FluxGram window on the left, the accounts in Settings and the Add Account dialog, and passes
 //! what the user does to the service.
 //!
-//! - [`model`] — what needs no host: the messages, TDLib's states and errors, the masked numbers;
-//! - [`service`] — the helper, the accounts, the sign-in;
-//! - [`window`] — the three places of a window;
+//! - [`model`] — what needs no host: the messages between the service and the windows, TDLib's
+//!   states and errors, the masked numbers;
+//! - [`store`] — what the service knows of an account's Telegram: users, chats, groups, files;
+//! - [`service`] — the helper, the accounts, the sign-in; the chats' lines go to the store, the
+//!   list and the feed;
+//! - [`chats`] — the service's list: the chats the user added, the Add Chat popup, notifications;
+//! - [`feed`] — the service's open chats: their messages, what the user sends;
+//! - [`hidden`] — the hidden chats' list, sealed with a key derived from the user's phrase;
+//! - [`convert`] — TDLib's messages as Flux shows them (no host: tested natively);
+//! - [`summary`] — a message in one line: the list's last line, a notification, a quote;
+//! - [`profile`] / [`profile_view`] — the profile dialog: a person, a group and its members, the
+//!   chat's media;
+//! - [`window`] — a window's instance: the accounts in Settings, the Add Account dialog, and the
+//!   routing to [`list`] (the window on the left) and [`chat`] (a chat's tab);
 //! - [`config`] — FluxGram's app key with Telegram.
 
+mod chat;
+mod chats;
 mod config;
+mod convert;
+mod feed;
+mod hidden;
+mod list;
 mod model;
+mod profile;
+mod profile_view;
 mod service;
+mod store;
+mod summary;
 mod window;
 
 use flux_plugin_api::{CommandContext, Event, Plugin, register_plugin};
 
 /// The plugin's instance: the service, or a window's.
 enum FluxGram {
-    Service(service::Service),
-    Window(window::Window),
+    // Both are large (the service's stores, a window's lists and tabs) and made once.
+    Service(Box<service::Service>),
+    Window(Box<window::Window>),
 }
 
 impl Plugin for FluxGram {
     fn new() -> Self {
         if flux_plugin_api::service::is_service() {
-            FluxGram::Service(service::Service::new())
+            FluxGram::Service(Box::new(service::Service::new()))
         } else {
-            FluxGram::Window(window::Window::new())
+            FluxGram::Window(Box::new(window::Window::new()))
         }
     }
 
     fn activate(&mut self) {
         match self {
-            FluxGram::Service(service) => service.activate(),
+            FluxGram::Service(service) => {
+                store::write_saved_icon(&flux_plugin_api::storage::dir());
+                service.activate()
+            }
             FluxGram::Window(window) => window.activate(),
         }
     }
@@ -46,9 +71,9 @@ impl Plugin for FluxGram {
         }
     }
 
-    fn run_command(&mut self, command: &str, _context: &CommandContext) {
+    fn run_command(&mut self, command: &str, context: &CommandContext) {
         if let FluxGram::Window(window) = self {
-            window.run_command(command);
+            window.run_command(command, context.argument.as_deref());
         }
     }
 

@@ -1,8 +1,8 @@
 # FluxGram: Telegram chats in Flux — an unofficial client that works through the Telegram API
 # (TDLib in the plugin's own program, helpers/fluxgram-helper). Several accounts, signed in with a
 # QR code from the phone or with the number, the code and the password; the chats you add, in the
-# window on the left and a tab each (part 3). The service holds the program and the accounts; the
-# windows draw them.
+# window on the left and a tab each. The service holds the program, the accounts and their chats;
+# the windows draw them.
 id = "flux.fluxgram"
 name = "FluxGram"
 version = "0.1.0"
@@ -28,6 +28,19 @@ id = "add-account"
 title = "Add Telegram Account…"
 category = "FluxGram"
 
+# Add Chat…: the popup of the current account's people and groups.
+[[commands]]
+id = "add-chat"
+title = "Add Chat…"
+category = "FluxGram"
+
+# A notification's Open: the chat's tab (the argument is its key).
+[[commands]]
+id = "open-chat"
+title = "Open Chat"
+category = "FluxGram"
+palette = false
+
 # The chats, on the left island in place of the project tree: the accounts' switcher on top.
 [[tool-windows]]
 id = "fluxgram"
@@ -35,11 +48,37 @@ title = "FluxGram"
 icon = "icons/fluxgram.svg"
 location = "left"
 
+# A chat per tab among the editor's tabs: `chat/<account>:<chat id>`.
+[[tool-windows]]
+id = "chat"
+title = "Chat"
+icon = "icons/fluxgram.svg"
+location = "editor"
+tabs = true
+
 # Settings → FluxGram: the accounts, each with Sign Out, and Add Account.
 [[tool-windows]]
 id = "accounts"
 title = "Accounts"
 location = "settings"
+
+# Settings → FluxGram: the hidden chats — the phrase that shows them in the list's search.
+[[tool-windows]]
+id = "hidden-chats"
+title = "Hidden Chats"
+location = "settings"
+
+# A person's or a group's profile over Flux: the info, the members, the chat's media.
+[[tool-windows]]
+id = "profile"
+title = "Profile"
+location = "dialog"
+
+# Hide Chat when the hidden chats aren't open: the phrase that hides it.
+[[tool-windows]]
+id = "hide-chat"
+title = "Hide Chat"
+location = "dialog"
 
 # Adding an account: the QR code for the phone's camera, or the number, the code and the password.
 [[tool-windows]]

@@ -185,6 +185,9 @@ fn read_input() {
                 write_out(relay::executed_line(result.as_deref(), extra.as_ref()).as_bytes());
             }
             Ok(Input::Filter(filter)) => SHARED.clients.lock().unwrap().set_filter(filter),
+            Ok(Input::Chats { key, chats }) => {
+                SHARED.clients.lock().unwrap().set_chats(&key, chats)
+            }
             Ok(Input::Quit) => return,
             Ok(Input::Nothing) => {}
             Err(error) => write_out(error.line().as_bytes()),

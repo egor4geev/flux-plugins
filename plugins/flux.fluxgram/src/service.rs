@@ -1,11 +1,17 @@
 //! The service: one instance for the whole app (`service = true`). It runs the helper (TDLib behind
 //! JSON lines, `helpers/fluxgram-helper/README.md`), keeps a TDLib client per account and the
-//! sign-in in progress, and tells the windows' instances what changed (a [`Snapshot`], only when
-//! it differs). It has no window: the windows draw, ask the user and pass on what the user does
-//! ([`Request`]).
+//! sign-in in progress, and tells the windows' instances what changed ([`Note`]s: the accounts'
+//! [`Snapshot`] only when it differs). It has no window: the windows draw, ask the user and pass
+//! on what the user does ([`Request`]).
 //!
 //! Accounts: the list in the plugin's storage (`accounts`), each database's encryption key in
 //! Flux's secrets (`database/<key>`), the files in `<data>/accounts/<key>/{db,files}`.
+//!
+//! The chats (part 3): every line of an account's client goes to its [`Store`] first, then to the
+//! list ([`chats`]: the chats the user added, the Add Chat popup, the notifications) and to the
+//! feed ([`feed`]: the open chats' messages, sending); answers go to whoever asked. At the end of
+//! a batch both send what changed, and the helper's filter (`fluxgram.chats`) follows the chats in
+//! a list or open, so the rest of Telegram never wakes the plugin.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -16,12 +22,13 @@ use flux_plugin_api::{Event, host, log, notify, secrets, service, storage, timer
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::config;
 use crate::model::{
-    AccountView, Auth, KEPT, Lines, Me, Next, Parameters, Problem, Request, Screen, SignIn,
-    Snapshot, code_log, full_name, looks_like_phone, mask_phone, next_step, parse_auth, parse_user,
-    problem, restart_delay, screen, unix_now,
+    AccountView, Auth, KEPT, Lines, Me, Next, Note, Parameters, Problem, Request, Screen, SignIn,
+    Snapshot, Words, code_log, full_name, looks_like_phone, mask_phone, next_step, parse_auth,
+    parse_user, problem, restart_delay, russian_form, screen, unix_now,
 };
+use crate::store::Store;
+use crate::{chats, config, feed, profile};
 
 /// The helper's name in the manifest's `[[helpers]]`.
 const HELPER: &str = "fluxgram-helper";
@@ -134,20 +141,101 @@ impl Pending {
 }
 
 /// What an `@extra` asked.
-enum Asked {
+pub enum Asked {
     /// `getMe` of a client.
     Me(String),
     /// A sign-in request of the pending client: its error goes under the dialog's field.
     SignIn(String),
     /// The pending client's phone number: its error goes back to the phone screen.
     Phone(String),
+    /// A request of the list: its answer goes there.
+    Chats(chats::Ask),
+    /// A request of the feed: its answer goes there.
+    Feed(feed::Ask),
+    /// A request of the profiles: its answer goes there.
+    Profile(profile::Ask),
     /// Anything else: an error goes to the log.
     Other(&'static str),
 }
 
-pub struct Service {
+/// The helper as the service and its parts talk to it: the process, and what each `@extra` asked.
+#[derive(Default)]
+pub struct Td {
     /// The helper's process.
     helper: Option<u64>,
+    asked: HashMap<u64, Asked>,
+    next_extra: u64,
+}
+
+impl Td {
+    /// The helper runs: requests go somewhere.
+    pub fn running(&self) -> bool {
+        self.helper.is_some()
+    }
+
+    /// A line to the helper as it is (`fluxgram.*`).
+    pub fn write(&mut self, value: &Value) {
+        let Some(helper) = self.helper else {
+            return;
+        };
+        let mut line = value.to_string();
+        line.push('\n');
+        if let Err(err) = process::write(helper, line.as_bytes()) {
+            log::warn(&format!("Couldn't write to the helper: {err}"));
+        }
+    }
+
+    /// A TDLib request of the client `key`; `asked` — what its answer is for.
+    pub fn send(&mut self, key: &str, mut request: Value, asked: Asked) {
+        if self.helper.is_none() {
+            return;
+        }
+        self.next_extra += 1;
+        request["@client"] = json!(key);
+        request["@extra"] = json!(self.next_extra);
+        self.asked.insert(self.next_extra, asked);
+        self.write(&request);
+    }
+}
+
+/// What the list and the feed work with: the helper and the accounts' stores.
+pub struct Cx<'a> {
+    pub td: &'a mut Td,
+    pub stores: &'a mut HashMap<String, Store>,
+}
+
+/// The words of the chats through the host's translations ([`Words`]).
+pub struct HostWords;
+
+impl Words for HostWords {
+    fn tr(&self, text: &str) -> String {
+        tr(text)
+    }
+
+    fn trf(&self, template: &str, values: &[&str]) -> String {
+        let values: Vec<&dyn std::fmt::Display> = values
+            .iter()
+            .map(|value| value as &dyn std::fmt::Display)
+            .collect();
+        trf(template, &values)
+    }
+
+    fn count(&self, n: u64, one: &str, other: &str) -> String {
+        let template = if host::i18n::language() == "ru" {
+            let key = format!("{other}|{}", russian_form(n));
+            let form = tr(&key);
+            if form == key { tr(other) } else { form }
+        } else if n == 1 {
+            tr(one)
+        } else {
+            tr(other)
+        };
+        template.replace("{0}", &n.to_string())
+    }
+}
+
+pub struct Service {
+    td: Td,
     lines: Lines,
     started: Option<Instant>,
     /// Exits of the helper in a row.
@@ -164,16 +252,24 @@ pub struct Service {
     /// Clients being closed whose folders go once they are (cancelled sign-ins, duplicates,
     /// signed out elsewhere).
     discarded: HashSet<String>,
-    asked: HashMap<u64, Asked>,
-    next_extra: u64,
     /// The last snapshot sent, as JSON.
     sent: Option<String>,
+    /// What the service knows of each signed-in account's Telegram, while the helper runs.
+    stores: HashMap<String, Store>,
+    /// The list: the chats the user added, the Add Chat popup, the notifications.
+    chats: chats::Chats,
+    /// The open chats' feeds and what the user sends.
+    feed: feed::Feed,
+    /// The profile dialog's people, groups, members and media.
+    profiles: profile::Profiles,
+    /// The helper's chat filter of each account, as last sent (`fluxgram.chats`).
+    filters: HashMap<String, Vec<i64>>,
 }
 
 impl Service {
     pub fn new() -> Self {
         Service {
-            helper: None,
+            td: Td::default(),
             lines: Lines::default(),
             started: None,
             failures: 0,
@@ -185,14 +281,19 @@ impl Service {
             pending: None,
             not_set_up: false,
             discarded: HashSet::new(),
-            asked: HashMap::new(),
-            next_extra: 0,
             sent: None,
+            stores: HashMap::new(),
+            chats: chats::Chats::new(),
+            feed: feed::Feed::new(),
+            profiles: profile::Profiles::new(),
+            filters: HashMap::new(),
         }
     }
 
     pub fn activate(&mut self) {
         self.accounts = storage::get(ACCOUNTS).unwrap_or_default();
+        let keys: Vec<String> = self.accounts.iter().map(|a| a.key.clone()).collect();
+        self.chats.activate(&keys);
         self.start_helper();
         // Windows that started before the service learn the state now.
         self.publish();
@@ -202,7 +303,7 @@ impl Service {
     /// closes every client, so the databases are left whole.
     pub fn deactivate(&mut self) {
         self.stopping = true;
-        if let Some(helper) = self.helper.take() {
+        if let Some(helper) = self.td.helper.take() {
             process::close_stdin(helper);
         }
     }
@@ -210,22 +311,39 @@ impl Service {
     pub fn on_event(&mut self, event: Event) {
         match event {
             Event::ProcessOutput(output) => self.output(output),
-            Event::ProcessExited((id, code)) if Some(id) == self.helper => self.exited(code),
+            Event::ProcessExited((id, code)) if Some(id) == self.td.helper => self.exited(code),
             Event::Timer(id) if Some(id) == self.restart => {
                 self.restart = None;
                 self.start_helper();
                 self.publish();
             }
-            Event::WindowOpened(window) => {
-                let _ = service::send_json_to(window, &self.snapshot());
+            Event::Timer(id) => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                if !self.chats.timer(&mut cx, id) {
+                    self.feed.timer(&mut cx, id);
+                }
+                self.flush();
+            }
+            Event::WindowOpened(window) => self.hello(window),
+            Event::WindowClosed(window) => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                self.chats.window_closed(&mut cx, window);
+                self.feed.window_closed(&mut cx, window);
+                self.profiles.window_closed(window);
+                self.flush();
             }
             Event::ServiceMessage((Some(window), text)) => match service::parse(&text) {
-                Some(Request::Hello) => {
-                    let _ = service::send_json_to(window, &self.snapshot());
-                }
+                Some(Request::Hello) => self.hello(window),
                 Some(request) => {
-                    self.request(request);
+                    self.request(window, request);
                     self.publish();
+                    self.flush();
                 }
                 None => log::warn(&format!("An unknown message from a window: {text}")),
             },
@@ -233,10 +351,78 @@ impl Service {
         }
     }
 
+    /// A window that has just started (or whose service has): the state, then the lists.
+    fn hello(&mut self, window: u64) {
+        let _ = service::send_json_to(window, &Note::State(self.snapshot()));
+        let mut cx = Cx {
+            td: &mut self.td,
+            stores: &mut self.stores,
+        };
+        self.chats.window_opened(&mut cx, window);
+    }
+
+    /// The end of a batch (of the helper's output, a window's request, a timer): the list and the
+    /// feed send what changed, and the helper's filter follows the chats in a list or open.
+    fn flush(&mut self) {
+        let mut cx = Cx {
+            td: &mut self.td,
+            stores: &mut self.stores,
+        };
+        self.chats.flush(&mut cx);
+        self.feed.flush(&mut cx);
+        self.profiles.flush(&mut cx);
+        self.sync_filters();
+    }
+
+    /// `fluxgram.chats` of each account whose chats in a list or open changed: the helper passes
+    /// only their updates (and those of no chat).
+    fn sync_filters(&mut self) {
+        if !self.td.running() {
+            return;
+        }
+        for account in &self.accounts {
+            let mut wanted = self.chats.listed(&account.key);
+            wanted.extend(self.feed.open(&account.key));
+            // A profile on show: its person's status, its muting.
+            wanted.extend(self.profiles.chats(&account.key));
+            wanted.sort_unstable();
+            wanted.dedup();
+            if self.filters.get(&account.key) == Some(&wanted) {
+                continue;
+            }
+            self.td
+                .write(&json!({"@type": "fluxgram.chats", "@client": account.key,
+                "chats": wanted}));
+            self.filters.insert(account.key.clone(), wanted);
+        }
+    }
+
+    /// The account's client is ready (signed in now, or again after the helper's start): the
+    /// list and the feed load what they show.
+    fn account_ready(&mut self, key: &str, me: i64) {
+        self.stores.entry(key.to_string()).or_default().me = Some(me);
+        self.sync_filters();
+        let mut cx = Cx {
+            td: &mut self.td,
+            stores: &mut self.stores,
+        };
+        self.chats.account_ready(&mut cx, key);
+        self.feed.account_ready(&mut cx, key);
+    }
+
+    /// The account is gone (signed out): its store, list and feeds go.
+    fn account_gone(&mut self, key: &str) {
+        self.stores.remove(key);
+        self.filters.remove(key);
+        self.chats.account_gone(key);
+        self.feed.account_gone(key);
+        self.profiles.account_gone(key);
+    }
+
     // --- The helper ---
 
     fn start_helper(&mut self) {
-        if self.helper.is_some() || self.stopping {
+        if self.td.helper.is_some() || self.stopping {
             return;
         }
         let dir = storage::dir();
@@ -254,12 +440,30 @@ impl Service {
                 return;
             }
         };
-        self.helper = Some(id);
+        self.td.helper = Some(id);
         self.started = Some(Instant::now());
         self.lines.clear();
         self.live.clear();
-        self.asked.clear();
-        self.write(&json!({"@type": "fluxgram.keep", "types": KEPT}));
+        self.td.asked.clear();
+        // A new TDLib: what it told the stores is told again as the clients start (before their
+        // `getMe` is answered: the stores take the start's burst).
+        self.stores = self
+            .accounts
+            .iter()
+            .map(|account| (account.key.clone(), Store::default()))
+            .collect();
+        self.filters.clear();
+        let kept: Vec<&str> = KEPT
+            .iter()
+            .chain(chats::KEPT)
+            .chain(feed::KEPT)
+            .chain(profile::KEPT)
+            .copied()
+            .collect();
+        self.td
+            .write(&json!({"@type": "fluxgram.keep", "types": kept}));
+        // The filters before the clients: their start's burst is filtered already.
+        self.sync_filters();
         let keys: Vec<String> = self.accounts.iter().map(|a| a.key.clone()).collect();
         for key in keys {
             self.live.insert(key.clone(), Live::default());
@@ -276,9 +480,9 @@ impl Service {
     /// The helper ended: everything it held is gone; it starts again after a pause that grows
     /// with exits in a row.
     fn exited(&mut self, code: Option<i32>) {
-        self.helper = None;
+        self.td.helper = None;
         self.live.clear();
-        self.asked.clear();
+        self.td.asked.clear();
         // The closing clients' folders are left: no TDLib holds them now.
         for key in std::mem::take(&mut self.discarded) {
             remove_folder(&key);
@@ -318,32 +522,9 @@ impl Service {
         self.restart = Some(timers::after(Duration::from_secs(delay)));
     }
 
-    fn write(&mut self, value: &Value) {
-        let Some(helper) = self.helper else {
-            return;
-        };
-        let mut line = value.to_string();
-        line.push('\n');
-        if let Err(err) = process::write(helper, line.as_bytes()) {
-            log::warn(&format!("Couldn't write to the helper: {err}"));
-        }
-    }
-
-    /// A TDLib request of the client `key`; `asked` — what its answer is for.
-    fn send(&mut self, key: &str, mut request: Value, asked: Asked) {
-        if self.helper.is_none() {
-            return;
-        }
-        self.next_extra += 1;
-        request["@client"] = json!(key);
-        request["@extra"] = json!(self.next_extra);
-        self.asked.insert(self.next_extra, asked);
-        self.write(&request);
-    }
-
     /// The first request of a key makes its client; TDLib then asks for the parameters.
     fn open_client(&mut self, key: &str) {
-        self.send(
+        self.td.send(
             key,
             json!({"@type": "getOption", "name": "version"}),
             Asked::Other("getOption"),
@@ -351,7 +532,7 @@ impl Service {
     }
 
     fn output(&mut self, output: ProcessOutput) {
-        if Some(output.process) != self.helper {
+        if Some(output.process) != self.td.helper {
             return;
         }
         if output.channel == OutputChannel::Stderr {
@@ -367,12 +548,18 @@ impl Service {
                 Err(err) => log::warn(&format!("Not JSON from the helper ({err}): {line}")),
             }
         }
-        // One snapshot for the whole batch, if it changed.
+        // One snapshot for the whole batch, if it changed; the list's and the feed's changes too.
         self.publish();
+        self.flush();
     }
 
     fn line(&mut self, value: Value) {
         let client = value["@client"].as_str().unwrap_or_default().to_string();
+        // A signed-in account's line: its store takes it, then the list and the feed (answers go
+        // to whoever asked).
+        if self.stores.contains_key(&client) {
+            self.account_line(&client, &value);
+        }
         match value["@type"].as_str().unwrap_or_default() {
             "fluxgram.ready" => log::info(&format!(
                 "The helper {} is ready: TDLib {}",
@@ -408,8 +595,36 @@ impl Service {
         }
     }
 
+    /// A line of a signed-in account's client, for the chats.
+    fn account_line(&mut self, key: &str, value: &Value) {
+        let Some(store) = self.stores.get_mut(key) else {
+            return;
+        };
+        let touched = store.apply(value);
+        let mut cx = Cx {
+            td: &mut self.td,
+            stores: &mut self.stores,
+        };
+        if let Some(extra) = value["@extra"].as_u64() {
+            match cx.td.asked.remove(&extra) {
+                Some(Asked::Chats(ask)) => self.chats.answer(&mut cx, key, ask, value),
+                Some(Asked::Feed(ask)) => self.feed.answer(&mut cx, key, ask, value),
+                Some(Asked::Profile(ask)) => self.profiles.answer(&mut cx, key, ask, value),
+                // The sign-in's and the account's own: `answer` takes them.
+                Some(asked) => {
+                    cx.td.asked.insert(extra, asked);
+                }
+                None => {}
+            }
+            return;
+        }
+        self.chats.update(&mut cx, key, value, touched);
+        self.feed.update(&mut cx, key, value, touched);
+        self.profiles.update(&mut cx, key, value, touched);
+    }
+
     fn answer(&mut self, client: &str, extra: u64, value: &Value) {
-        let Some(asked) = self.asked.remove(&extra) else {
+        let Some(asked) = self.td.asked.remove(&extra) else {
             return;
         };
         let error = (value["@type"] == "error").then(|| {
@@ -422,7 +637,16 @@ impl Service {
         match (asked, error) {
             (Asked::Me(key), None) => {
                 if let Some(me) = parse_user(value) {
+                    let id = me.id;
                     self.user(&key, me, true);
+                    // Signed in now, or a stored account's client started: the chats load.
+                    if self
+                        .accounts
+                        .iter()
+                        .any(|a| a.key == key && a.user_id == id)
+                    {
+                        self.account_ready(&key, id);
+                    }
                 }
             }
             (Asked::SignIn(key) | Asked::Phone(key), Some((code, message))) => {
@@ -464,14 +688,17 @@ impl Service {
             Auth::WaitParameters => match secrets::get(&secret_key(key)) {
                 Some(database_key) => {
                     let request = parameters(key, &database_key);
-                    self.send(key, request, Asked::Other("setTdlibParameters"));
+                    self.td
+                        .send(key, request, Asked::Other("setTdlibParameters"));
                 }
                 None => {
                     log::warn(&format!("No database key of {key}"));
                     self.forget(key, true);
                 }
             },
-            Auth::Ready => self.send(key, json!({"@type": "getMe"}), Asked::Me(key.into())),
+            Auth::Ready => self
+                .td
+                .send(key, json!({"@type": "getMe"}), Asked::Me(key.into())),
             Auth::LoggingOut | Auth::Closing | Auth::Closed | Auth::Other => {}
             // No session any more: ended on another device, or by Telegram.
             signed_out if signed_out.is_signed_out() => self.forget(key, true),
@@ -533,7 +760,7 @@ impl Service {
                     return;
                 }
             };
-        self.send(&key, request, asked);
+        self.td.send(&key, request, asked);
     }
 
     /// The user's own account came: a sign-in ends, or a stored account's name and photo change.
@@ -583,7 +810,8 @@ impl Service {
             // The same account twice: this new session goes.
             notify::info(&tr("This account is already in FluxGram."));
             self.discarded.insert(key.to_string());
-            self.send(key, json!({"@type": "logOut"}), Asked::Other("logOut"));
+            self.td
+                .send(key, json!({"@type": "logOut"}), Asked::Other("logOut"));
             return;
         }
         if let Err(err) = secrets::set(&secret_key(key), &pending.database_key) {
@@ -602,6 +830,7 @@ impl Service {
         let name = account.name();
         self.accounts.push(account);
         self.live.insert(key.to_string(), Live::default());
+        self.stores.insert(key.to_string(), Store::default());
         self.save();
         notify::success(&trf("Signed in as {0}", &[&name]));
         if let Some((file, None)) = me.photo {
@@ -617,7 +846,7 @@ impl Service {
             return;
         }
         live.photo_file = Some(file);
-        self.send(
+        self.td.send(
             key,
             json!({"@type": "downloadFile", "file_id": file, "priority": 1, "offset": 0,
                 "limit": 0, "synchronous": false}),
@@ -672,13 +901,15 @@ impl Service {
             return;
         };
         let name = account.name();
+        self.account_gone(key);
         self.accounts.retain(|a| a.key != key);
         self.live.remove(key);
         let _ = secrets::remove(&secret_key(key));
         self.save();
-        if self.helper.is_some() {
+        if self.td.helper.is_some() {
             self.discarded.insert(key.to_string());
-            self.send(key, json!({"@type": "close"}), Asked::Other("close"));
+            self.td
+                .send(key, json!({"@type": "close"}), Asked::Other("close"));
         } else {
             remove_folder(key);
         }
@@ -691,6 +922,7 @@ impl Service {
 
     /// After `logOut`'s `fluxgram.closed`: the account, its folder and its key go.
     fn remove_account(&mut self, key: &str) {
+        self.account_gone(key);
         self.accounts.retain(|a| a.key != key);
         self.live.remove(key);
         let _ = secrets::remove(&secret_key(key));
@@ -704,9 +936,61 @@ impl Service {
 
     // --- The windows' requests ---
 
-    fn request(&mut self, request: Request) {
+    fn request(&mut self, window: u64, request: Request) {
         match request {
             Request::Hello => {}
+            Request::Profile(ask) => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                self.profiles.request(&mut cx, window, ask);
+            }
+            Request::Search(ask) => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                self.feed.search(&mut cx, window, ask);
+            }
+            Request::Hidden(ask) => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                self.chats.hidden(&mut cx, window, ask);
+            }
+            Request::Folders(ask) => self.chats.folders(ask),
+            // The list's.
+            Request::AddChat { .. }
+            | Request::RemoveChat { .. }
+            | Request::SearchChats { .. }
+            | Request::InSight { .. } => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                self.chats.request(&mut cx, window, request);
+            }
+            // The feed's.
+            Request::OpenChat { .. }
+            | Request::CloseChat { .. }
+            | Request::LoadOlder { .. }
+            | Request::LoadNewer { .. }
+            | Request::Visible { .. }
+            | Request::Send { .. }
+            | Request::Edit { .. }
+            | Request::Delete { .. }
+            | Request::Download { .. }
+            | Request::JumpTo { .. }
+            | Request::Draft { .. }
+            | Request::Quote { .. } => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                self.feed.request(&mut cx, window, request);
+            }
             Request::AddAccount => self.add_account(),
             Request::UsePhone => {
                 if let Some(pending) = &mut self.pending {
@@ -729,7 +1013,7 @@ impl Service {
                     pending.resending = true;
                     pending.problem = None;
                     let key = pending.key.clone();
-                    self.send(
+                    self.td.send(
                         &key,
                         json!({"@type": "resendAuthenticationCode", "reason": null}),
                         Asked::SignIn(key.clone()),
@@ -751,7 +1035,7 @@ impl Service {
         }
         let key = new_key();
         self.pending = Some(Pending::new(key.clone()));
-        if self.helper.is_none() && self.restart.is_none() {
+        if self.td.helper.is_none() && self.restart.is_none() {
             self.start_helper();
         } else {
             self.open_client(&key);
@@ -775,9 +1059,10 @@ impl Service {
 
     /// Closes a client whose folder goes once it is closed.
     fn discard(&mut self, key: &str) {
-        if self.helper.is_some() {
+        if self.td.helper.is_some() {
             self.discarded.insert(key.to_string());
-            self.send(key, json!({"@type": "close"}), Asked::Other("close"));
+            self.td
+                .send(key, json!({"@type": "close"}), Asked::Other("close"));
         } else {
             remove_folder(key);
         }
@@ -815,7 +1100,7 @@ impl Service {
         } else if pending.auth.takes_phone() {
             pending.qr_asked = true;
             let key = pending.key.clone();
-            self.send(&key, qr_request(), Asked::SignIn(key.clone()));
+            self.td.send(&key, qr_request(), Asked::SignIn(key.clone()));
         }
     }
 
@@ -876,7 +1161,7 @@ impl Service {
         } else {
             Asked::SignIn(key.clone())
         };
-        self.send(&key, request, asked);
+        self.td.send(&key, request, asked);
     }
 
     fn cancel(&mut self) {
@@ -891,9 +1176,10 @@ impl Service {
             return;
         }
         match self.live.get_mut(key) {
-            Some(live) if self.helper.is_some() => {
+            Some(live) if self.td.helper.is_some() => {
                 live.signing_out = true;
-                self.send(key, json!({"@type": "logOut"}), Asked::Other("logOut"));
+                self.td
+                    .send(key, json!({"@type": "logOut"}), Asked::Other("logOut"));
             }
             // No helper to tell Telegram: the account goes from this computer.
             _ => self.remove_account(key),
@@ -949,7 +1235,7 @@ impl Service {
         if self.sent.as_deref() == Some(text.as_str()) {
             return;
         }
-        let _ = service::broadcast(&text);
+        let _ = service::broadcast_json(&Note::State(self.snapshot()));
         self.sent = Some(text);
     }
 }

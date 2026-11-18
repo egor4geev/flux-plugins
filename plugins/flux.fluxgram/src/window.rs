@@ -1,7 +1,8 @@
-//! A window's instance: draws what the service tells ([`Snapshot`]) and passes on what the user
-//! does ([`Request`]). Three places: the FluxGram window on the left (the accounts for now — the
-//! chats come in the next part), the accounts' block in Settings → FluxGram, and the Add Account
-//! dialog (a QR code, or the number, the code and the password).
+//! A window's instance: draws what the service tells ([`Note`]s) and passes on what the user does
+//! ([`Request`]). Its places: the FluxGram window on the left ([`List`]: the accounts and their
+//! chats), a chat's tab ([`Tabs`]), the accounts' block in Settings → FluxGram, and the Add Account
+//! dialog (a QR code, or the number, the code and the password). This module draws the last two
+//! and routes the rest.
 //!
 //! A view is set only when it differs from the one set before, and the countdowns (the QR code's
 //! refresh, the code's other way) tick only while their screen is on show: an idle window costs
@@ -15,9 +16,13 @@ use flux_plugin_api::host::ui::{self, View};
 use flux_plugin_api::view::*;
 use flux_plugin_api::{Event, UiEvent, service, timers, tr, trf};
 
+use crate::chat::{self, TabGo, Tabs};
+use crate::list::{Go, HIDDEN, HIDE, List};
 use crate::model::{
-    AccountView, CodeSent, Request, Screen, SignIn, Snapshot, countdown, initials, unix_now,
+    AccountView, ChatKey, CodeSent, Note, Request, Screen, SignIn, Snapshot, countdown, initials,
+    unix_now,
 };
+use crate::profile_view::{PROFILE, ProfileGo, ProfileView, Section};
 
 /// The window on the left.
 pub const MAIN: &str = "fluxgram";
@@ -30,8 +35,12 @@ const QR_LIFETIME: u64 = 30;
 
 pub struct Window {
     state: Snapshot,
-    /// The account shown on the left (of several).
-    current: Option<String>,
+    /// The window on the left.
+    list: List,
+    /// The chats' tabs.
+    tabs: Tabs,
+    /// The profile dialog.
+    profile: ProfileView,
     /// The dialog is open in this window.
     dialog: bool,
     /// What is typed into the dialog's fields, by field.
@@ -52,7 +61,9 @@ impl Window {
     pub fn new() -> Self {
         Window {
             state: Snapshot::default(),
-            current: None,
+            list: List::new(),
+            tabs: Tabs::new(),
+            profile: ProfileView::new(),
             dialog: false,
             typed: HashMap::new(),
             link: None,
@@ -69,21 +80,49 @@ impl Window {
         let _ = service::send_json(&Request::Hello);
     }
 
-    pub fn run_command(&mut self, command: &str) {
-        if command == "add-account" {
-            self.add_account();
+    /// A command: Add Telegram Account…, Add Chat…, and `open-chat` (a notification's Open: the
+    /// argument is the chat's tab key).
+    pub fn run_command(&mut self, command: &str, argument: Option<&str>) {
+        match command {
+            "add-account" => self.add_account(),
+            "add-chat" => self.list.add_chat(),
+            "open-chat" => {
+                if let Some(key) = argument.and_then(ChatKey::parse) {
+                    let title = self.list.title(&key);
+                    self.tabs.open(&key, title.as_deref());
+                    self.list.tab_opened(&key);
+                }
+            }
+            _ => {}
         }
     }
 
     pub fn on_event(&mut self, event: Event) {
         match event {
-            Event::ServiceMessage((None, text)) => {
-                if let Some(state) = service::parse::<Snapshot>(&text) {
-                    self.update(state);
+            Event::ServiceMessage((None, text)) => match service::parse::<Note>(&text) {
+                Some(Note::State(state)) => self.update(state),
+                Some(Note::Chats { account, rows }) => {
+                    // The profile dialog offers Add to FluxGram or Remove by the list.
+                    self.profile
+                        .listed(&account, rows.iter().map(|row| row.chat));
+                    self.list.chats(&account, rows)
                 }
-            }
+                Some(Note::Found { request, chats }) => self.list.found(request, chats),
+                Some(Note::Header { key, header }) => self.tabs.header(&key, header),
+                Some(Note::Feed { key, changes }) => self.tabs.feed(&key, changes),
+                Some(Note::Profile(told)) => self.profile.told(told),
+                Some(Note::Search(told)) => self.tabs.search_told(told),
+                Some(Note::Hidden(told)) => {
+                    let go = self.list.hidden_told(told);
+                    self.go(go);
+                }
+                Some(Note::Folders { folders }) => self.list.folders(folders),
+                None => {}
+            },
             Event::ServiceStarted => {
                 let _ = service::send_json(&Request::Hello);
+                self.tabs.service_started();
+                self.list.service_started();
             }
             Event::ToolWindowShown(window) if window == SIGN_IN => {
                 self.dialog = true;
@@ -97,7 +136,25 @@ impl Window {
                     self.ask(Request::Cancel);
                 }
             }
+            Event::ToolWindowShown(window) if chat::is_tab(&window) => {
+                self.tabs.in_sight(&window, true)
+            }
+            Event::ToolWindowHidden(window) if chat::is_tab(&window) => {
+                self.tabs.in_sight(&window, false)
+            }
+            Event::ToolWindowHidden(window) if window == HIDE => self.list.hide_dialog_closed(),
+            Event::ToolWindowShown(window) if window == PROFILE => self.profile.shown(true),
+            Event::ToolWindowHidden(window) if window == PROFILE => self.profile.shown(false),
+            Event::ToolWindowShown(window) if window == MAIN => self.list.shown(true),
+            Event::ToolWindowHidden(window) if window == MAIN => self.list.shown(false),
+            Event::TabClosed(window) => self.tabs.closed(&window),
             Event::Timer(id) if Some(id) == self.tick => self.render_dialog(),
+            Event::Timer(id) => {
+                if !self.list.timer(id) && !self.profile.timer(id) {
+                    self.tabs.timer(id);
+                }
+                self.tabs_go();
+            }
             Event::DialogAnswered((id, answer))
                 if self.asked.as_ref().is_some_and(|a| a.0 == id) =>
             {
@@ -106,6 +163,25 @@ impl Window {
                     self.ask(Request::SignOut { key });
                 }
             }
+            Event::DialogAnswered((id, answer)) => {
+                if !self.tabs.dialog_answered(id, answer) {
+                    self.list.dialog_answered(id, answer);
+                }
+            }
+            // A folder's name (New Folder, Rename…): the list's.
+            Event::TextAnswered((id, text)) => self.list.text_answered(id, text),
+            // A tab's menu (⋯) is the tabs'; the Add Chat popup is the list's.
+            Event::PickerQuery((picker, query)) if !self.tabs.owns_picker(picker) => {
+                self.list.picker_query(picker, &query)
+            }
+            Event::PickerChosen((picker, key)) if self.tabs.owns_picker(picker) => {
+                self.tabs.picker_chosen(picker, key);
+                self.tabs_go();
+            }
+            Event::PickerChosen((picker, key)) => {
+                let go = self.list.picker_chosen(picker, key);
+                self.go(go);
+            }
             Event::Ui(input) => match (input.window.as_str(), input.event) {
                 (ACCOUNTS, UiEvent::Clicked) if input.element == "accounts-add" => {
                     self.add_account()
@@ -113,18 +189,72 @@ impl Window {
                 (ACCOUNTS, UiEvent::RowAction((key, action))) if action == "sign-out" => {
                     self.confirm_sign_out(&key)
                 }
-                (MAIN, UiEvent::Clicked) => {
-                    if input.element == "main-add" {
-                        self.add_account();
-                    } else if let Some(key) = input.element.strip_prefix("main-switch/") {
-                        self.current = Some(key.to_string());
-                        self.render_main();
-                    }
+                (MAIN, event) => {
+                    let go = self.list.ui(&input.element, event);
+                    self.go(go);
                 }
                 (SIGN_IN, event) => self.dialog_input(&input.element, event),
+                (PROFILE, event) => {
+                    let go = self.profile.ui(&input.element, event);
+                    self.profile_go(go);
+                }
+                (HIDDEN, event) => self.list.hidden_ui(&input.element, event),
+                (HIDE, event) => self.list.hide_dialog_ui(&input.element, event),
+                (window, event) if chat::is_tab(window) => {
+                    self.tabs.ui(window, &input.element, event);
+                    self.tabs_go();
+                }
                 _ => {}
             },
             _ => {}
+        }
+    }
+
+    /// What the chats' tabs asked the window for: the profile dialog's parts, hiding the chat.
+    fn tabs_go(&mut self) {
+        for go in self.tabs.take_go() {
+            match go {
+                TabGo::Profile(key) => self.profile.open(&key, Section::Info),
+                TabGo::Media(key) => self.profile.open(&key, Section::Media),
+                TabGo::Mute(key, muted) => self.profile.mute(&key, muted),
+                TabGo::Hide(key) => self.list.hide(&key),
+                TabGo::Unhide(key) => self.list.unhide(&key),
+                TabGo::Folder(key) => self.list.folder_menu(&key, true),
+            }
+        }
+    }
+
+    /// What the profile dialog asks the window for.
+    fn profile_go(&mut self, go: Vec<ProfileGo>) {
+        for go in go {
+            match go {
+                ProfileGo::Open(key) => {
+                    let title = self.list.title(&key);
+                    self.tabs.open(&key, title.as_deref());
+                    self.list.tab_opened(&key);
+                }
+            }
+        }
+    }
+
+    /// What the list asks the window for.
+    fn go(&mut self, go: Vec<Go>) {
+        for go in go {
+            match go {
+                Go::Open(key) => {
+                    let title = self.list.title(&key);
+                    self.tabs.open(&key, title.as_deref());
+                    self.list.tab_opened(&key);
+                }
+                Go::OpenHidden(key) => {
+                    let title = self.list.title(&key);
+                    self.tabs.open_hidden(&key, title.as_deref());
+                }
+                Go::Close(key) => self.tabs.close(&key),
+                Go::CloseHidden => self.tabs.close_hidden(),
+                Go::MarkHidden(key, hidden) => self.tabs.set_hidden(&key, hidden),
+                Go::AddAccount => self.add_account(),
+            }
         }
     }
 
@@ -141,6 +271,8 @@ impl Window {
             self.dialog = false;
             ui::hide(SIGN_IN);
         }
+        self.list.state(&self.state);
+        self.tabs.accounts(&self.state.accounts);
         self.render();
     }
 
@@ -212,7 +344,7 @@ impl Window {
 
     fn render(&mut self) {
         self.render_accounts();
-        self.render_main();
+        self.list.render();
         self.render_dialog();
     }
 
@@ -269,68 +401,6 @@ impl Window {
                 .into()],
         ));
         self.put(ACCOUNTS, column("accounts-root", children));
-    }
-
-    // --- The window on the left ---
-
-    fn render_main(&mut self) {
-        let accounts = &self.state.accounts;
-        let root = if accounts.is_empty() {
-            column(
-                "main-root",
-                [
-                    text(
-                        "main-empty",
-                        [
-                            span(&tr("Sign in to Telegram to see your chats here."))
-                                .tone(Tone::Dim),
-                        ],
-                    ),
-                    row(
-                        "main-buttons",
-                        [button("main-add", &tr("Add Account"))
-                            .icon("plus")
-                            .primary()
-                            .into()],
-                    ),
-                ],
-            )
-        } else {
-            let current = self
-                .current
-                .as_ref()
-                .and_then(|key| accounts.iter().find(|a| &a.key == key))
-                .unwrap_or(&accounts[0]);
-            let mut children = Vec::new();
-            if accounts.len() > 1 {
-                let switcher = accounts.iter().map(|account| {
-                    let first = account.name.split_whitespace().next().unwrap_or_default();
-                    let chip = button(&format!("main-switch/{}", account.key), first)
-                        .tooltip(&account.name);
-                    if account.key == current.key {
-                        chip.primary().into()
-                    } else {
-                        chip.into()
-                    }
-                });
-                children.push(row("main-switcher", switcher));
-            }
-            // The account by its picture, name and @username: its own number needs no showing
-            // (Settings has it, masked).
-            let mut tree = Tree::new().two_line();
-            let mut account = RowSpec::new(&current.key, &current.name).avatar(avatar_of(current));
-            if let Some(label) = &current.label {
-                account = account.subtitle(vec![span(label)]);
-            }
-            tree.add(account);
-            children.push(tree.into_element("main-account"));
-            children.push(text(
-                "main-later",
-                [span(&tr("Your chats come with the next FluxGram update.")).tone(Tone::Muted)],
-            ));
-            column("main-root", children)
-        };
-        self.put(MAIN, root);
     }
 
     // --- The Add Account dialog ---
@@ -562,7 +632,8 @@ fn about(line: &str) -> Element {
     text("sign-in-about", [span(line).tone(Tone::Dim)])
 }
 
-fn avatar_of(account: &AccountView) -> AvatarSpec {
+/// An account's picture: its photo, or its initials on its color.
+pub fn avatar_of(account: &AccountView) -> AvatarSpec {
     AvatarSpec {
         image: account.photo.clone(),
         initials: initials(&account.name),
