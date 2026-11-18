@@ -26,7 +26,10 @@ The rules, by the number:
 
 The chats (part 3): a signed-in account sees the people, groups and messages of `fake_world.py`;
 the requests this file doesn't answer go to the handlers `fake_chats.py` (the list) and
-`fake_feed.py` (a chat) register there.
+`fake_feed.py` (a chat) register there. Media (part 4): `fake_media.py` — the panel's stickers and
+GIFs, @gif, opening a voice message, `fluxgram.render`.
+
+FAKE_LOG=<path>: every request is appended there as it came (a scenario checks what was asked).
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ import fake_chats  # noqa: F401 — registers the list's handlers
 import fake_feed  # noqa: F401 — registers a chat's handlers
 import fake_search  # noqa: F401 — registers the search in a chat
 import fake_profile  # noqa: F401 — registers the profiles: people, groups, members, muting
+import fake_media  # registers the panel's stickers and GIFs, @gif, opening media; renders
 
 LOCK = threading.Lock()
 # The helper's filter: ("keep", types) — only these updates pass; ("drop", types) — all but these.
@@ -355,7 +359,17 @@ def main() -> int:
         except json.JSONDecodeError:
             emit({"@type": "fluxgram.error", "message": "not JSON"})
             continue
+        log = os.environ.get("FAKE_LOG")
+        if log:
+            with open(log, "a") as out:
+                out.write(raw + "\n")
         kind = request.get("@type", "")
+        if kind == "fluxgram.render":
+            answer = fake_media.render(request)
+            if "@extra" in request:
+                answer["@extra"] = request["@extra"]
+            emit(answer)
+            continue
         if kind in ("fluxgram.keep", "fluxgram.drop"):
             FILTER = (kind.removeprefix("fluxgram."), set(request.get("types", [])))
             continue

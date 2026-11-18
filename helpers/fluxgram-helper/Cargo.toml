@@ -1,17 +1,23 @@
 [package]
 name = "fluxgram-helper"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 publish = false
-description = "FluxGram's program: TDLib behind JSON lines on stdin and stdout, a client per account."
+description = "FluxGram's program: TDLib behind JSON lines on stdin and stdout, a client per account; animated stickers rendered to frames."
 
 [dependencies]
 serde_json = "1"
+# Animated stickers (`fluxgram.render`): TGS is Lottie in gzip (Rust's own inflate, no C zlib);
+# the frames are LZ4 blocks, as Flux's reader of FXA files (flux-media) takes them.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
 
 # build.rs checks the downloaded archive of TDLib's static libraries against its pinned SHA-256.
 [build-dependencies]
 sha2 = "0.10"
+# rlottie and libvpx from their sources in native/.
+cc = "1"
 
 # One file the plugin downloads: small and fast.
 [profile.release]

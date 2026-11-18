@@ -305,7 +305,7 @@ impl Chats {
     /// The chats in the account's list, and its hidden ones while some window has them open:
     /// the helper passes their updates.
     ///
-    /// Claude (part 5) must never see the hidden chats: what it is given of the chats comes from
+    /// Claude (part 6) must never see the hidden chats: what it is given of the chats comes from
     /// the account's list (`List::chats`), never from this function or [`Unlocked`].
     pub fn listed(&self, account: &str) -> Vec<i64> {
         let mut chats = self

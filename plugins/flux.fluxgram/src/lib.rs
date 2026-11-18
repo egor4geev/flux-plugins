@@ -12,7 +12,9 @@
 //! - [`service`] — the helper, the accounts, the sign-in; the chats' lines go to the store, the
 //!   list and the feed;
 //! - [`chats`] — the service's list: the chats the user added, the Add Chat popup, notifications;
-//! - [`feed`] — the service's open chats: their messages, what the user sends;
+//! - [`feed`] — the service's open chats: their messages, what the user sends, the media's
+//!   downloads and the stickers' animations;
+//! - [`panel`] — the field's panel: the account's stickers and GIFs, their search, sending them;
 //! - [`hidden`] — the hidden chats' list, sealed with a key derived from the user's phrase;
 //! - [`convert`] — TDLib's messages as Flux shows them (no host: tested natively);
 //! - [`summary`] — a message in one line: the list's last line, a notification, a quote;
@@ -30,6 +32,7 @@ mod feed;
 mod hidden;
 mod list;
 mod model;
+mod panel;
 mod profile;
 mod profile_view;
 mod service;

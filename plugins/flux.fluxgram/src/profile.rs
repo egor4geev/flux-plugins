@@ -197,6 +197,12 @@ pub struct MediaItem {
     /// A video's length, "GIF": in a pill with ▶.
     pub label: Option<String>,
     pub play: bool,
+    /// A video's or a GIF's length in seconds (part 4: the square is a video Flux plays).
+    #[serde(default)]
+    pub duration: u32,
+    /// The video is a GIF: plays by itself, without sound.
+    #[serde(default)]
+    pub gif: bool,
     /// A row: the file's name, the link's title, the voice's sender.
     pub title: String,
     /// The date: "12 Nov".
@@ -1410,6 +1416,8 @@ pub fn media_item(
         preview: None,
         label: None,
         play: false,
+        duration: 0,
+        gif: false,
         title: String::new(),
         detail: short_date(date, at, words),
         subtitle: String::new(),
@@ -1466,6 +1474,8 @@ pub fn media_item(
                 convert::duration(media["duration"].as_i64().unwrap_or_default())
             });
             item.play = true;
+            item.duration = media["duration"].as_u64().unwrap_or_default() as u32;
+            item.gif = animation;
             item.path = path_of(store, file);
             item.progress = progress_of(store, file);
         }

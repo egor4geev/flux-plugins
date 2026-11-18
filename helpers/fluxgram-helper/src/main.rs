@@ -4,10 +4,16 @@
 //! Two threads: this one reads the plugin's lines and passes them to TDLib (`td_send` takes any
 //! thread); the receiver waits in `td_receive` — no timers: an idle program sleeps — and writes
 //! what's ready at once as one batch. At the end of input every client is closed first, so the
-//! accounts' databases are left whole.
+//! accounts' databases are left whole. Animated stickers are rendered on threads of their own
+//! (`render`), their answers written as whole lines between the batches.
 
+mod fxa;
+mod pixels;
 mod relay;
+mod render;
 mod td;
+mod tgs;
+mod webm;
 
 use std::ffi::c_int;
 use std::io::{self, BufRead, Write};
@@ -188,6 +194,7 @@ fn read_input() {
             Ok(Input::Chats { key, chats }) => {
                 SHARED.clients.lock().unwrap().set_chats(&key, chats)
             }
+            Ok(Input::Render { render, extra }) => render::submit(render, extra, write_out),
             Ok(Input::Quit) => return,
             Ok(Input::Nothing) => {}
             Err(error) => write_out(error.line().as_bytes()),
@@ -233,8 +240,8 @@ fn receive(stats: bool) {
     }
 }
 
-/// The end: every client is closed (TDLib's `close`: the databases are left whole), up to
-/// [`CLOSE_TIMEOUT`] for all of them, then the program exits with 0.
+/// The end: every client is closed (TDLib's `close`: the databases are left whole) and the renders
+/// asked for are done, up to [`CLOSE_TIMEOUT`] for all of it, then the program exits with 0.
 fn finish() -> ! {
     let live = SHARED.clients.lock().unwrap().live_ids();
     for client in live {
@@ -255,6 +262,7 @@ fn finish() -> ! {
             .0;
     }
     drop(clients);
+    render::finish(deadline);
     // Waits for the receiver's write in progress.
     let _ = io::stdout().lock().flush();
     // `_exit`: TDLib's threads are still there, and its static objects aren't destroyed under

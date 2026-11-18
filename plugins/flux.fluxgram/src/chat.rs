@@ -16,6 +16,11 @@
 //! chat), Hide Chat (or Unhide), Remove from FluxGram. With two accounts or more, the header's line
 //! ends with the chat's account's first name.
 //!
+//! The field has its panel (part 4): Flux's emoji, the account's stickers and GIFs — the service
+//! fills the tabs ([`PanelAsk`]) and sends what is chosen, answering the quote over the field. A
+//! voice or round message played for the first time is told to the service, which marks it
+//! listened to in Telegram.
+//!
 //! A tab Flux brings back with the project comes as `tool-window-shown` of a tab this instance
 //! doesn't know: it is filled again from its key. A tab whose account is gone stays, and says so.
 //!
@@ -29,7 +34,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use flux_plugin_api::UiEvent;
-use flux_plugin_api::conversation::{self as conv, Change, Composed, Message, MessageQuote, Part};
+use flux_plugin_api::conversation::{
+    self as conv, Change, Composed, Message, MessageQuote, PanelTab, Part, VideoKind,
+};
 use flux_plugin_api::dialog::Ask;
 use flux_plugin_api::host::ui::{self, ButtonSpec, ElementKind, View};
 use flux_plugin_api::view::*;
@@ -40,6 +47,7 @@ use crate::convert::{
 };
 use crate::feed::{SearchAsk, SearchTold};
 use crate::model::{AccountView, ChatHeader, ChatKey, Request, account_labels, initials};
+use crate::panel::PanelAsk;
 
 /// The window of the chats' tabs (`tabs = true`).
 pub const CHAT: &str = "chat";
@@ -105,6 +113,9 @@ struct Tab {
     hidden: bool,
     /// The search bar, while it is open.
     find: Option<Find>,
+    /// The message the quote over the field answers: a sticker or a GIF of the panel answers it
+    /// too.
+    reply: Option<String>,
     /// The view set last: an unchanged one isn't set again.
     view: Option<View>,
 }
@@ -359,6 +370,7 @@ impl Tabs {
                 in_sight: false,
                 hidden: false,
                 find: None,
+                reply: None,
                 view: None,
             },
         );
@@ -471,8 +483,12 @@ impl Tabs {
             (FEED, UiEvent::Visible((first, last))) => ask(&Request::Visible { key, first, last }),
             (FEED, UiEvent::Composed(composed)) => {
                 if !composed.text.trim().is_empty() || !composed.files.is_empty() {
-                    ask(&Request::Send { key, composed });
+                    ask(&Request::Send {
+                        key: key.clone(),
+                        composed,
+                    });
                 }
+                self.set_reply(&key, None);
                 conv::update(&window, FEED, vec![conv::reply_to(None)]);
             }
             (FEED, UiEvent::DraftChanged(text)) => ask(&Request::Draft { key, text }),
@@ -504,7 +520,43 @@ impl Tabs {
                 }
             }
             (FEED, UiEvent::ReplyCancelled) => {
+                self.set_reply(&key, None);
                 conv::update(&window, FEED, vec![conv::reply_to(None)])
+            }
+            // A voice or round message played for the first time: listened to in Telegram.
+            (FEED, UiEvent::MediaPlayed((message, part))) => {
+                ask(&Request::MediaPlayed { key, message, part })
+            }
+            // The field's panel: its tabs' content comes from the service.
+            (FEED, UiEvent::PanelOpened(tab)) => {
+                ask(&Request::Panel(PanelAsk::Opened { key, tab }))
+            }
+            (FEED, UiEvent::PanelSearched((tab, text))) => {
+                ask(&Request::Panel(PanelAsk::Searched { key, tab, text }))
+            }
+            (FEED, UiEvent::PanelVisible((tab, first, last))) => {
+                ask(&Request::Panel(PanelAsk::Visible {
+                    key,
+                    tab,
+                    first,
+                    last,
+                }))
+            }
+            (FEED, UiEvent::PanelLoadMore(tab)) => {
+                ask(&Request::Panel(PanelAsk::LoadMore { key, tab }))
+            }
+            // A sticker or a GIF: sent, answering the quote over the field (which goes then).
+            (FEED, UiEvent::PanelChosen((tab, item))) => {
+                let reply_to = self.set_reply(&key, None);
+                if reply_to.is_some() {
+                    conv::update(&window, FEED, vec![conv::reply_to(None)]);
+                }
+                ask(&Request::Panel(PanelAsk::Chosen {
+                    key,
+                    tab,
+                    item,
+                    reply_to,
+                }));
             }
             (FEED, UiEvent::PartClicked((message, part))) => {
                 ask(&Request::Download { key, message, part })
@@ -575,6 +627,7 @@ impl Tabs {
                     quote: selected,
                 });
                 conv::update(&tab.window, FEED, vec![conv::reply_to(Some(quote))]);
+                self.set_reply(key, Some(message.to_string()));
             }
             EDIT => {
                 // As Markdown: saving parses it back, so the bold and the links stay.
@@ -600,6 +653,12 @@ impl Tabs {
             }
             _ => {}
         }
+    }
+
+    /// The message the quote over the field answers (none — no quote); the one before.
+    fn set_reply(&mut self, key: &ChatKey, reply: Option<String>) -> Option<String> {
+        let tab = self.tabs.get_mut(key)?;
+        std::mem::replace(&mut tab.reply, reply)
     }
 
     /// A link that isn't a web one: a person's mention opens their chat, a bot's command goes
@@ -1029,8 +1088,14 @@ impl Tabs {
                 .message_action(DELETE, &tr("Delete"), Some("trash"))
                 .message_action(DELETE_FOR_ME, &tr("Delete"), Some("trash"));
             if can_send {
-                // Formatting wraps the selection in Telegram's Markdown; sending parses it.
-                spec = spec.composer(conv::composer(&tr("Message…")).attachments().formatting());
+                // Formatting wraps the selection in Telegram's Markdown; sending parses it. The
+                // panel: Flux's emoji, the account's stickers and GIFs.
+                spec = spec.composer(
+                    conv::composer(&tr("Message…"))
+                        .attachments()
+                        .formatting()
+                        .panel([PanelTab::Emoji, PanelTab::Stickers, PanelTab::Gifs]),
+                );
             }
             children.push(conversation(FEED, spec));
             // Before the header comes nothing is said: the chat may well take messages.
@@ -1109,6 +1174,12 @@ fn quote_of(message: &Message, tab: &Tab, tr: &dyn Fn(&str) -> String) -> Messag
                 Part::Image(spec) if spec.play => tr("Video"),
                 Part::Image(_) => tr("Photo"),
                 Part::Sticker(_) => tr("Sticker"),
+                Part::Voice(_) => tr("Voice message"),
+                Part::Video(video) => match video.kind {
+                    VideoKind::Video => tr("Video"),
+                    VideoKind::Gif => tr("GIF"),
+                    VideoKind::Round => tr("Video message"),
+                },
                 Part::File(file) => file.name.clone(),
                 Part::Link(link) => link.url.clone(),
                 _ => String::new(),
@@ -1147,6 +1218,7 @@ mod tests {
             in_sight: true,
             hidden: false,
             find: None,
+            reply: None,
             view: None,
         }
     }

@@ -22,13 +22,14 @@ use flux_plugin_api::{Event, host, log, notify, secrets, service, storage, timer
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::convert::MediaOptions;
 use crate::model::{
     AccountView, Auth, KEPT, Lines, Me, Next, Note, Parameters, Problem, Request, Screen, SignIn,
     Snapshot, Words, code_log, full_name, looks_like_phone, mask_phone, next_step, parse_auth,
     parse_user, problem, restart_delay, russian_form, screen, unix_now,
 };
 use crate::store::Store;
-use crate::{chats, config, feed, profile};
+use crate::{chats, config, feed, panel, profile};
 
 /// The helper's name in the manifest's `[[helpers]]`.
 const HELPER: &str = "fluxgram-helper";
@@ -38,6 +39,10 @@ const ACCOUNTS: &str = "accounts";
 const HEALTHY: Duration = Duration::from_secs(60);
 /// After this many exits in a row the user is told (once).
 const WARN_AFTER: u32 = 3;
+/// The cache's size is looked at when a download ends, at most this often.
+const CACHE_CHECK_EVERY: Duration = Duration::from_secs(600);
+/// The cache's limit when the setting has none, in GB.
+const CACHE_LIMIT_GB: u64 = 2;
 
 /// An account signed in, as kept in the plugin's storage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,6 +159,12 @@ pub enum Asked {
     Feed(feed::Ask),
     /// A request of the profiles: its answer goes there.
     Profile(profile::Ask),
+    /// A request of the field's panel: its answer goes there.
+    Panel(panel::Ask),
+    /// The helper's render of an animation (`fluxgram.render`): its output.
+    Render(String),
+    /// The size of an account's cache (`getStorageStatisticsFast`): over the limit — optimized.
+    Cache(String),
     /// Anything else: an error goes to the log.
     Other(&'static str),
 }
@@ -183,6 +194,18 @@ impl Td {
         if let Err(err) = process::write(helper, line.as_bytes()) {
             log::warn(&format!("Couldn't write to the helper: {err}"));
         }
+    }
+
+    /// A request of the helper itself (`fluxgram.render`): its answer comes with the `@extra`,
+    /// without a client.
+    pub fn ask(&mut self, mut request: Value, asked: Asked) {
+        if self.helper.is_none() {
+            return;
+        }
+        self.next_extra += 1;
+        request["@extra"] = json!(self.next_extra);
+        self.asked.insert(self.next_extra, asked);
+        self.write(&request);
     }
 
     /// A TDLib request of the client `key`; `asked` — what its answer is for.
@@ -262,6 +285,10 @@ pub struct Service {
     feed: feed::Feed,
     /// The profile dialog's people, groups, members and media.
     profiles: profile::Profiles,
+    /// The field's panel: stickers and GIFs (part 4).
+    panels: panel::Panels,
+    /// When each account's cache was last looked at.
+    cache_checked: HashMap<String, Instant>,
     /// The helper's chat filter of each account, as last sent (`fluxgram.chats`).
     filters: HashMap<String, Vec<i64>>,
 }
@@ -286,11 +313,14 @@ impl Service {
             chats: chats::Chats::new(),
             feed: feed::Feed::new(),
             profiles: profile::Profiles::new(),
+            panels: panel::Panels::new(),
+            cache_checked: HashMap::new(),
             filters: HashMap::new(),
         }
     }
 
     pub fn activate(&mut self) {
+        self.feed.set_media(media_options());
         self.accounts = storage::get(ACCOUNTS).unwrap_or_default();
         let keys: Vec<String> = self.accounts.iter().map(|a| a.key.clone()).collect();
         self.chats.activate(&keys);
@@ -328,6 +358,17 @@ impl Service {
                 self.flush();
             }
             Event::WindowOpened(window) => self.hello(window),
+            Event::SettingsChanged => {
+                self.feed.set_media(media_options());
+                self.panels.set_media(&self.feed.media);
+                // A lower limit applies at once.
+                self.cache_checked.clear();
+                let keys: Vec<String> = self.stores.keys().cloned().collect();
+                for key in keys {
+                    self.check_cache(&key);
+                }
+                self.flush();
+            }
             Event::WindowClosed(window) => {
                 let mut cx = Cx {
                     td: &mut self.td,
@@ -336,6 +377,7 @@ impl Service {
                 self.chats.window_closed(&mut cx, window);
                 self.feed.window_closed(&mut cx, window);
                 self.profiles.window_closed(window);
+                self.panels.window_closed(window);
                 self.flush();
             }
             Event::ServiceMessage((Some(window), text)) => match service::parse(&text) {
@@ -371,6 +413,7 @@ impl Service {
         self.chats.flush(&mut cx);
         self.feed.flush(&mut cx);
         self.profiles.flush(&mut cx);
+        self.panels.flush(&mut cx, &mut self.feed);
         self.sync_filters();
     }
 
@@ -408,6 +451,8 @@ impl Service {
         };
         self.chats.account_ready(&mut cx, key);
         self.feed.account_ready(&mut cx, key);
+        self.panels.account_ready(key);
+        self.check_cache(key);
     }
 
     /// The account is gone (signed out): its store, list and feeds go.
@@ -417,6 +462,8 @@ impl Service {
         self.chats.account_gone(key);
         self.feed.account_gone(key);
         self.profiles.account_gone(key);
+        self.panels.account_gone(key);
+        self.cache_checked.remove(key);
     }
 
     // --- The helper ---
@@ -567,7 +614,9 @@ impl Service {
                 value["tdlib"].as_str().unwrap_or("?")
             )),
             "fluxgram.closed" => self.closed(&client),
-            "fluxgram.error" => log::warn(&format!("The helper: {}", value["message"])),
+            "fluxgram.error" if value["@extra"].is_null() => {
+                log::warn(&format!("The helper: {}", value["message"]))
+            }
             "updateAuthorizationState" => {
                 let state = &value["authorization_state"];
                 if self.pending.as_ref().is_some_and(|p| p.key == client)
@@ -586,7 +635,12 @@ impl Service {
                     self.user(&client, me, false);
                 }
             }
-            "updateFile" => self.file(&client, &value["file"]),
+            "updateFile" => {
+                self.file(&client, &value["file"]);
+                if value["file"]["local"]["is_downloading_completed"] == true {
+                    self.check_cache(&client);
+                }
+            }
             _ => {
                 if let Some(extra) = value["@extra"].as_u64() {
                     self.answer(&client, extra, &value);
@@ -610,6 +664,9 @@ impl Service {
                 Some(Asked::Chats(ask)) => self.chats.answer(&mut cx, key, ask, value),
                 Some(Asked::Feed(ask)) => self.feed.answer(&mut cx, key, ask, value),
                 Some(Asked::Profile(ask)) => self.profiles.answer(&mut cx, key, ask, value),
+                Some(Asked::Panel(ask)) => {
+                    self.panels.answer(&mut cx, &mut self.feed, key, ask, value)
+                }
                 // The sign-in's and the account's own: `answer` takes them.
                 Some(asked) => {
                     cx.td.asked.insert(extra, asked);
@@ -621,6 +678,7 @@ impl Service {
         self.chats.update(&mut cx, key, value, touched);
         self.feed.update(&mut cx, key, value, touched);
         self.profiles.update(&mut cx, key, value, touched);
+        self.panels.update(key, touched);
     }
 
     fn answer(&mut self, client: &str, extra: u64, value: &Value) {
@@ -668,8 +726,87 @@ impl Service {
             (Asked::Other(what), Some((code, message))) => {
                 log::warn(&format!("{what} of {client}: {code} {message}"));
             }
+            (Asked::Render(output), _) => {
+                let ok = value["@type"] == "fluxgram.rendered";
+                if !ok {
+                    log::warn(&format!("A sticker didn't render: {}", value["message"]));
+                }
+                self.feed.rendered(&output, ok);
+                self.panels.rendered(&output, ok);
+            }
+            (Asked::Cache(key), None) => self.cache_size(&key, value),
             _ => {}
         }
+    }
+
+    // --- The cache (part 4) ---
+
+    /// Looks at the account's cache when a download ends (at most every `CACHE_CHECK_EVERY`):
+    /// over the limit, TDLib deletes the files used longest ago.
+    fn check_cache(&mut self, key: &str) {
+        if !self.stores.contains_key(key)
+            || self
+                .cache_checked
+                .get(key)
+                .is_some_and(|at| at.elapsed() < CACHE_CHECK_EVERY)
+        {
+            return;
+        }
+        self.cache_checked.insert(key.to_string(), Instant::now());
+        self.td.send(
+            key,
+            json!({"@type": "getStorageStatisticsFast"}),
+            Asked::Cache(key.to_string()),
+        );
+    }
+
+    /// The cache's size: over the limit — `optimizeStorage` down to it (files of the last hour
+    /// stay: they are on screen).
+    fn cache_size(&mut self, key: &str, statistics: &Value) {
+        let size = statistics["files_size"].as_u64().unwrap_or_default();
+        let limit = cache_limit();
+        if limit == 0 || size <= limit {
+            return;
+        }
+        log::info(&format!(
+            "{key}: the cache is {} MB, over its {} MB: optimizing",
+            size >> 20,
+            limit >> 20
+        ));
+        self.td.send(
+            key,
+            json!({"@type": "optimizeStorage", "size": limit, "ttl": 10 * 365 * 86_400,
+                "count": 1_000_000, "immunity_delay": -1, "file_types": [], "chat_ids": [],
+                "exclude_chat_ids": [], "return_deleted_file_statistics": false,
+                "chat_limit": 0}),
+            Asked::Other("optimizeStorage"),
+        );
+    }
+
+    /// Clear Cache (Settings, confirmed): every account's media files and the rendered
+    /// animations go; the open chats download what they show again.
+    fn clear_cache(&mut self) {
+        let keys: Vec<String> = self.stores.keys().cloned().collect();
+        for key in keys {
+            self.td.send(
+                &key,
+                json!({"@type": "optimizeStorage", "size": 0, "ttl": 0, "count": 0,
+                    "immunity_delay": 0, "file_types": CLEARED.iter()
+                        .map(|kind| json!({"@type": kind})).collect::<Vec<Value>>(),
+                    "chat_ids": [], "exclude_chat_ids": [],
+                    "return_deleted_file_statistics": false, "chat_limit": 0}),
+                Asked::Other("optimizeStorage"),
+            );
+        }
+        let frames = frames_dir();
+        if let Err(err) = std::fs::remove_dir_all(&frames)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn(&format!("Couldn't clear the animations: {err}"));
+        }
+        self.feed.cache_cleared();
+        self.panels.cache_cleared();
+        notify::success(&tr("The cache is cleared"));
     }
 
     // --- Authorization ---
@@ -961,6 +1098,14 @@ impl Service {
                 self.chats.hidden(&mut cx, window, ask);
             }
             Request::Folders(ask) => self.chats.folders(ask),
+            Request::Panel(ask) => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                self.panels.request(&mut cx, &mut self.feed, window, ask);
+            }
+            Request::ClearCache => self.clear_cache(),
             // The list's.
             Request::AddChat { .. }
             | Request::RemoveChat { .. }
@@ -984,6 +1129,7 @@ impl Service {
             | Request::Download { .. }
             | Request::JumpTo { .. }
             | Request::Draft { .. }
+            | Request::MediaPlayed { .. }
             | Request::Quote { .. } => {
                 let mut cx = Cx {
                     td: &mut self.td,
@@ -1238,6 +1384,47 @@ impl Service {
         let _ = service::broadcast_json(&Note::State(self.snapshot()));
         self.sent = Some(text);
     }
+}
+
+/// The file types Clear Cache deletes: the media of messages and their stickers (the small
+/// thumbnails and profile photos stay — the lists look right at once).
+const CLEARED: &[&str] = &[
+    "fileTypePhoto",
+    "fileTypeVideo",
+    "fileTypeVoiceNote",
+    "fileTypeVideoNote",
+    "fileTypeAnimation",
+    "fileTypeAudio",
+    "fileTypeDocument",
+    "fileTypeSticker",
+];
+
+/// The plugin's media settings (`[[settings]]` of the manifest), with the folder of the rendered
+/// animations.
+fn media_options() -> MediaOptions {
+    let on = |key: &str| flux_plugin_api::setting::<bool>(key).unwrap_or(true);
+    MediaOptions {
+        autoplay: on("autoplay"),
+        loop_stickers: on("loop-stickers"),
+        photos: on("download-photos"),
+        voice: on("download-voice"),
+        gifs: on("download-gifs"),
+        frames: frames_dir(),
+        rendered: Default::default(),
+    }
+}
+
+/// The cache's limit in bytes (the setting is in GB; 0 — none).
+fn cache_limit() -> u64 {
+    let gb = flux_plugin_api::setting::<String>("cache-limit")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(CACHE_LIMIT_GB);
+    gb << 30
+}
+
+/// The rendered animations: `<data>/cache/frames`.
+pub fn frames_dir() -> String {
+    format!("{}/cache/frames", storage::dir())
 }
 
 /// `setTdlibParameters` of the client `key`.

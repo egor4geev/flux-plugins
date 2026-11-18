@@ -4,6 +4,10 @@
 //! one's own build: the same libraries).
 //!
 //! The download needs `curl` and `tar` (both come with macOS and Windows 10+).
+//!
+//! The renderers of animated stickers (`fluxgram.render`) are built from their sources in `native/`:
+//! rlottie (TGS) and libvpx's VP9 decoder (WEBM) — only the files compiled, portable C and C++ with
+//! no assembly or SIMD of their own, so the one list builds for every target (README.md → Building).
 
 use std::env;
 use std::fs;
@@ -71,6 +75,8 @@ fn main() {
         ),
     };
 
+    build_native(&os);
+
     let lib = match env::var_os("TDLIB_DIR") {
         Some(dir) => PathBuf::from(dir).join("lib"),
         None => fetch(platform),
@@ -101,6 +107,100 @@ fn main() {
         // static one (/MT): one runtime in the program, the DLLs', as Rust's default.
         println!("cargo:rustc-link-arg=/NODEFAULTLIB:libcmt.lib");
     }
+}
+
+/// rlottie, libvpx's VP9 decoder and the program's door to it (`native/vp9.c`), as static
+/// libraries: every source file in their folders is compiled (they hold only what is).
+fn build_native(os: &str) {
+    let native = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("native");
+    println!("cargo:rerun-if-changed=native");
+    let msvc = env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|target_env| target_env == "msvc");
+
+    // rlottie as its CMake builds it: C++14, no exceptions or RTTI where the compiler allows, the
+    // options of its `config.h` off (native/rlottie/config.h).
+    let rlottie = native.join("rlottie");
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .std("c++14")
+        .warnings(false)
+        .cargo_warnings(false)
+        .define("NDEBUG", None)
+        .include(&rlottie)
+        .include(rlottie.join("inc"))
+        // Its C API's functions are defined, not imported from a DLL.
+        .define("RLOTTIE_BUILD", None)
+        .files(sources(&rlottie, "cpp"));
+    for dir in [
+        "src/lottie",
+        "src/lottie/zip",
+        "src/vector",
+        "src/vector/freetype",
+        "src/vector/stb",
+        "src/binding/c",
+    ] {
+        build.include(rlottie.join(dir));
+    }
+    // Apple's clang says `__ARM_NEON__` on arm64, and rlottie takes its NEON drawing — 32-bit ARM
+    // assembly — then: its portable code instead, as on every other target.
+    if msvc {
+        build
+            .flag("/EHsc")
+            .flag("/U__ARM_NEON__")
+            .define("_USE_MATH_DEFINES", None)
+            .define("NOMINMAX", None)
+            .define("_CRT_SECURE_NO_WARNINGS", None);
+    } else {
+        build
+            .flag("-fno-exceptions")
+            .flag("-fno-rtti")
+            .flag("-U__ARM_NEON__");
+    }
+    build.compile("rlottie");
+
+    // libvpx's VP9 decoder in portable C: its configure's headers for the generic target are
+    // kept with the sources (native/libvpx/vpx_config.h and the *_rtcd.h).
+    let libvpx = native.join("libvpx");
+    let mut build = cc::Build::new();
+    build
+        .warnings(false)
+        .cargo_warnings(false)
+        .define("NDEBUG", None)
+        .include(&libvpx)
+        .files(sources(&libvpx, "c"))
+        .file(native.join("vp9.c"));
+    if msvc {
+        build.define("_CRT_SECURE_NO_WARNINGS", None);
+    } else {
+        build.flag("-std=gnu11");
+    }
+    build.compile("vpx");
+
+    if os == "macos" {
+        // rlottie is C++ (TDLib's line below says so too).
+        println!("cargo:rustc-link-lib=c++");
+    } else {
+        // rlottie resolves a picture's path with PathCanonicalizeW.
+        println!("cargo:rustc-link-lib=dylib=shlwapi");
+    }
+}
+
+/// The files with the extension under `dir`, in a stable order.
+fn sources(dir: &Path, extension: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|ext| ext == extension) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 /// Passes the archives by their full paths: a system library of the same name (macOS has a libz,

@@ -19,10 +19,20 @@
 //!   ids (newest first, with Telegram's count) to that window only ([`SearchTold`]); the window
 //!   jumps to them (`JumpTo`) and marks the words itself — the messages here stay as they are.
 //!
+//! Media (part 4): what downloads by itself follows the plugin's settings ([`MediaOptions`]:
+//! photos; voice and round messages; GIFs and stickers up to a few MB), the messages on screen
+//! first; videos and files wait for a click, and a click while one downloads cancels it. A file's
+//! progress puts its message at most a few times a second. An animated sticker's file, once
+//! downloaded, goes to the helper to be rendered into Flux's file of frames (`fluxgram.render`,
+//! once per sticker and size: the files stay in the plugin's cache), then its message is put
+//! again with the animation; a failed render leaves the still picture. A voice or round message
+//! played for the first time is opened in Telegram (`openMessageContent`): its unheard mark goes.
+//!
 //! The changes of a batch (the helper's lines, a request, a timer) are coalesced: one
 //! [`Note::Feed`] per chat at [`Feed::flush`], a message converted again only when something it
 //! shows changed, and put only when it came out different; the header only when it changed. The
-//! one timer that may run is the typing's expiry, and only while someone types.
+//! timers that may run are the typing's expiry, only while someone types, and the progress's
+//! next put, only while a file downloads.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -32,7 +42,7 @@ use flux_plugin_api::system::LocalTime;
 use flux_plugin_api::{log, notify, service, system, timers};
 use serde_json::{Value, json};
 
-use crate::convert::{self, Context, Converted};
+use crate::convert::{self, Context, Converted, MediaOptions};
 use crate::model::{ChatHeader, ChatKey, Note, Request, Words, unix_now};
 use crate::service::{Asked, Cx, HostWords};
 use crate::store::{ChatKind, Status, Store, Touched, UserKind};
@@ -81,6 +91,8 @@ pub const KEPT: &[&str] = &[
     "updateMessageInteractionInfo",
     "updateDeleteMessages",
     "updateChatAction",
+    // A voice or round message listened to (part 4), here or on another device.
+    "updateMessageContentOpened",
 ];
 
 /// A page of history.
@@ -105,6 +117,10 @@ const PICTURES: &[&str] = &["jpg", "jpeg", "png", "webp", "heic"];
 const ALBUM: usize = 10;
 /// A page of a chat's search's matches (TDLib's most).
 const SEARCH_PAGE: u32 = 100;
+/// A message whose file downloads is put at most this often (its progress).
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
+/// The animations' frame rate the helper renders at, at most.
+const RENDER_FPS: u32 = 30;
 
 /// What a request of the feed asked: its answer comes to [`Feed::answer`].
 #[derive(Debug)]
@@ -135,6 +151,69 @@ pub enum Ask {
         what: &'static str,
         told: Option<&'static str>,
     },
+}
+
+/// The animations of animated stickers (part 4): rendered by the helper once per sticker and
+/// size into the plugin's cache (`<cache>/frames`), shared by the feed and the panel.
+#[derive(Default)]
+pub struct Frames {
+    /// The renders on their way: their output.
+    pending: HashSet<String>,
+    /// The renders that failed this session: the still picture stays, no retries.
+    failed: HashSet<String>,
+    /// The outputs looked for on disk already.
+    checked: HashSet<String>,
+}
+
+impl Frames {
+    /// The animation `output` is on disk: looked for once (a render of an earlier session), then
+    /// known from `rendered`.
+    pub fn found(&mut self, media: &mut MediaOptions, output: &str) -> bool {
+        if media.rendered.contains(output) {
+            return true;
+        }
+        if !self.checked.insert(output.to_string()) {
+            return false;
+        }
+        let there = std::fs::metadata(output).is_ok_and(|meta| meta.len() > 0);
+        if there {
+            media.rendered.insert(output.to_string());
+        }
+        there
+    }
+
+    /// Asks the helper to render `input` into `output` once (not while one is on its way, nor
+    /// after one failed).
+    pub fn render(&mut self, cx: &mut Cx, input: &str, output: &str, size: u32) {
+        if self.failed.contains(output) || !self.pending.insert(output.to_string()) {
+            return;
+        }
+        if let Some(dir) = std::path::Path::new(output).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        cx.td.ask(
+            json!({"@type": "fluxgram.render", "input": input, "output": output, "size": size,
+                "fps": RENDER_FPS}),
+            Asked::Render(output.to_string()),
+        );
+    }
+
+    /// The helper's answer: rendered, or not (`ok` false — a broken file: the picture stays).
+    pub fn done(&mut self, media: &mut MediaOptions, output: &str, ok: bool) {
+        self.pending.remove(output);
+        if ok {
+            media.rendered.insert(output.to_string());
+        } else {
+            self.failed.insert(output.to_string());
+        }
+    }
+
+    /// The cache was cleared: every animation renders again when it is seen.
+    pub fn forget(&mut self, media: &mut MediaOptions) {
+        media.rendered.clear();
+        self.checked.clear();
+        self.failed.clear();
+    }
 }
 
 /// What the field's text is parsed for ([`Ask::Markdown`]).
@@ -210,6 +289,12 @@ struct Open {
     /// Pictures of messages on screen that came to be known only now (an author's photo): they
     /// are downloaded at the end of the batch — the file, its priority.
     wanted_files: Vec<(i64, i64)>,
+    /// The animations the converted messages lack (part 4): rendered once their files are there.
+    renders: Vec<convert::Render>,
+    /// When each message was last put while its file downloads, and the ones whose progress waits
+    /// for the next put ([`PROGRESS_EVERY`]).
+    put_at: HashMap<i64, Instant>,
+    later: BTreeSet<i64>,
     /// What the messages converted in this batch lack: users, chats, replied messages — asked
     /// for at its end.
     wanted_users: Vec<i64>,
@@ -257,6 +342,9 @@ impl Open {
             named: HashMap::new(),
             visible: None,
             wanted_files: Vec::new(),
+            renders: Vec::new(),
+            put_at: HashMap::new(),
+            later: BTreeSet::new(),
             wanted_users: Vec::new(),
             wanted_chats: Vec::new(),
             wanted_replies: Vec::new(),
@@ -291,6 +379,9 @@ impl Open {
         self.named.clear();
         self.queue.clear();
         self.dirty.clear();
+        self.renders.clear();
+        self.put_at.clear();
+        self.later.clear();
         self.paging_older = false;
         self.paging_newer = false;
     }
@@ -467,6 +558,13 @@ pub struct Feed {
     /// account and file: their chat. Those of messages that left the screen are cancelled; a
     /// click's aren't here.
     auto: HashMap<(String, i64), i64>,
+    /// Downloads the user cancelled with a click (part 4): they don't start again by themselves.
+    cancelled: HashSet<(String, i64)>,
+    /// How media plays and downloads (the plugin's settings), the animations rendered.
+    pub media: MediaOptions,
+    pub frames: Frames,
+    /// The progress's next put, while a message waits for it.
+    progress_timer: Option<u64>,
     /// The typing's expiry timer, while someone types.
     typing_timer: Option<u64>,
     /// The drafts' timers: their chat.
@@ -487,6 +585,10 @@ impl Feed {
             asked: HashSet::new(),
             downloading: HashSet::new(),
             auto: HashMap::new(),
+            cancelled: HashSet::new(),
+            media: MediaOptions::default(),
+            frames: Frames::default(),
+            progress_timer: None,
             typing_timer: None,
             draft_timers: HashMap::new(),
             quotes: HashMap::new(),
@@ -501,6 +603,55 @@ impl Feed {
             .filter(|key| key.account == account)
             .map(|key| key.chat)
             .collect()
+    }
+
+    /// The plugin's media settings (part 4), read at the start and when they change: the open
+    /// chats' messages are converted again (what plays by itself, what loops).
+    pub fn set_media(&mut self, mut media: MediaOptions) {
+        media.rendered = std::mem::take(&mut self.media.rendered);
+        if media == self.media {
+            return;
+        }
+        self.media = media;
+        for open in self.chats.values_mut() {
+            let ids: Vec<i64> = open.shown.keys().copied().collect();
+            open.dirty.extend(ids);
+        }
+    }
+
+    /// The helper rendered an animation (or couldn't): the messages showing its sticker are put
+    /// again.
+    pub fn rendered(&mut self, output: &str, ok: bool) {
+        self.frames.done(&mut self.media, output, ok);
+        if !ok {
+            return;
+        }
+        for open in self.chats.values_mut() {
+            let showing: Vec<i64> = open
+                .shown
+                .iter()
+                .filter(|(_, converted)| {
+                    converted
+                        .renders
+                        .iter()
+                        .any(|render| render.output == output)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            open.dirty.extend(showing);
+        }
+    }
+
+    /// The cache was cleared (Settings): the files and animations are gone — the open chats'
+    /// messages are put again (their pictures download once they are seen).
+    pub fn cache_cleared(&mut self) {
+        self.frames.forget(&mut self.media);
+        self.downloading.clear();
+        self.auto.clear();
+        for open in self.chats.values_mut() {
+            let ids: Vec<i64> = open.shown.keys().copied().collect();
+            open.dirty.extend(ids);
+        }
     }
 
     /// The account's client is ready (signed in now, or the helper started again): the chats
@@ -593,14 +744,38 @@ impl Feed {
                 }
             }
             Touched::File(file) => {
+                // A file on its way: its messages are put at most every `PROGRESS_EVERY`; done
+                // (or stopped) — at once.
+                let moving = cx
+                    .stores
+                    .get(account)
+                    .and_then(|store| store.files.get(&file))
+                    .is_some_and(|known| known.path.is_none() && known.progress().is_some());
+                let mut wait = false;
                 for (key, open) in self.chats.iter_mut() {
                     if key.account != account {
                         continue;
                     }
                     open.header_dirty = true;
-                    if let Some(messages) = open.files.get(&file) {
-                        open.dirty.extend(messages.iter().copied());
+                    let Some(messages) = open.files.get(&file) else {
+                        continue;
+                    };
+                    for message in messages {
+                        let recent = open
+                            .put_at
+                            .get(message)
+                            .is_some_and(|at| at.elapsed() < PROGRESS_EVERY);
+                        if moving && recent {
+                            open.later.insert(*message);
+                            wait = true;
+                        } else {
+                            open.later.remove(message);
+                            open.dirty.insert(*message);
+                        }
                     }
+                }
+                if wait && self.progress_timer.is_none() {
+                    self.progress_timer = Some(timers::after(PROGRESS_EVERY));
                 }
             }
             Touched::Scope => {
@@ -651,6 +826,18 @@ impl Feed {
             "updateMessageEdited" => {
                 if let Some(message) = open.raw.get_mut(&message_id) {
                     message["edit_date"] = update["edit_date"].clone();
+                    open.dirty.insert(message_id);
+                }
+            }
+            "updateMessageContentOpened" => {
+                // Listened to (watched): the unheard mark goes.
+                if let Some(message) = open.raw.get_mut(&message_id) {
+                    let content = &mut message["content"];
+                    match content["@type"].as_str().unwrap_or_default() {
+                        "messageVoiceNote" => content["is_listened"] = json!(true),
+                        "messageVideoNote" => content["is_viewed"] = json!(true),
+                        _ => {}
+                    }
                     open.dirty.insert(message_id);
                 }
             }
@@ -979,7 +1166,7 @@ impl Feed {
                 let windows: Vec<u64> = open.windows.iter().copied().collect();
                 let ids: Vec<i64> = open.raw.keys().copied().collect();
                 let store = cx.stores.get(&key.account);
-                let (_, converted) = convert_all(cx, key, open, &ids);
+                let (_, converted) = convert_all(cx, key, open, &ids, &self.media);
                 open.dirty.clear();
                 let mut changes = vec![conv::clear(), conv::put(converted)];
                 changes.extend(open.state(store, key.chat));
@@ -1009,7 +1196,7 @@ impl Feed {
                 if let Some(edge) = open.oldest() {
                     open.dirty.insert(edge);
                 }
-                page_in(cx, key, open, older);
+                page_in(cx, key, open, older, &self.media);
                 let older = open.older;
                 open.queue.push(conv::older(older));
             }
@@ -1033,7 +1220,7 @@ impl Feed {
                 if let Some(edge) = open.newest() {
                     open.dirty.insert(edge);
                 }
-                page_in(cx, key, open, newer);
+                page_in(cx, key, open, newer, &self.media);
                 let newer = open.newer;
                 open.queue.push(conv::newer(newer));
             }
@@ -1054,7 +1241,7 @@ impl Feed {
                     History::More
                 };
                 let ids: Vec<i64> = open.raw.keys().copied().collect();
-                let (_, converted) = convert_all(cx, key, open, &ids);
+                let (_, converted) = convert_all(cx, key, open, &ids, &self.media);
                 // The message itself, or the one before it (deleted); an album's item — the album.
                 let target = open
                     .raw
@@ -1145,11 +1332,27 @@ impl Feed {
                         .get(part as usize)
                         .copied()?
                 });
-                if let Some(file) = file {
-                    // A click's download goes on wherever the message goes.
-                    self.auto.remove(&(key.account.clone(), file));
-                    download(cx, &mut self.downloading, &key.account, file, CLICKED, true);
+                let Some(file) = file else {
+                    return;
+                };
+                let id = (key.account.clone(), file);
+                // A click's download goes on wherever the message goes.
+                self.auto.remove(&id);
+                let downloading = cx
+                    .stores
+                    .get(&key.account)
+                    .and_then(|store| store.files.get(&file))
+                    .is_some_and(|known| known.path.is_none() && known.downloading);
+                if downloading {
+                    // A click while it downloads (its progress on show): cancelled, and it
+                    // doesn't start again by itself.
+                    self.downloading.remove(&id);
+                    self.cancelled.insert(id);
+                    cancel_download(cx, &key.account, file);
+                    return;
                 }
+                self.cancelled.remove(&id);
+                download(cx, &mut self.downloading, &key.account, file, CLICKED, true);
             }
             Request::JumpTo { key, message } => {
                 let Some(open) = self.chats.get_mut(&key) else {
@@ -1179,6 +1382,21 @@ impl Feed {
                 );
             }
             Request::Draft { key, text } => self.draft(cx, &key, text),
+            // A voice or round message played for the first time: listened to in Telegram, which
+            // answers with `updateMessageContentOpened`.
+            Request::MediaPlayed { key, message, .. } => {
+                let Some(id) = message.parse::<i64>().ok() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "openMessageContent", "chat_id": key.chat, "message_id": id}),
+                    Asked::Feed(Ask::Done {
+                        what: "openMessageContent",
+                        told: None,
+                    }),
+                );
+            }
             Request::Quote {
                 key,
                 message,
@@ -1316,6 +1534,9 @@ impl Feed {
         let on_screen: HashSet<i64> = wanted.iter().map(|(file, _)| *file).collect();
         self.stop_downloads(cx, key, &on_screen);
         for (file, priority) in wanted {
+            if self.cancelled.contains(&(key.account.clone(), file)) {
+                continue;
+            }
             self.auto.insert((key.account.clone(), file), key.chat);
             download(
                 cx,
@@ -1345,14 +1566,7 @@ impl Feed {
         });
         for file in stopped {
             self.downloading.remove(&(key.account.clone(), file));
-            cx.td.send(
-                &key.account,
-                json!({"@type": "cancelDownloadFile", "file_id": file, "only_if_pending": false}),
-                Asked::Feed(Ask::Done {
-                    what: "cancelDownloadFile",
-                    told: None,
-                }),
-            );
+            cancel_download(cx, &key.account, file);
         }
     }
 
@@ -1407,13 +1621,11 @@ impl Feed {
         }
     }
 
-    /// The field's text parsed (`text`: TDLib's `formattedText`, empty when there is none) goes:
-    /// as a message, or as the caption of the first file.
-    fn send_formatted(&mut self, cx: &mut Cx, key: &ChatKey, composed: &Composed, text: Value) {
+    /// What a message sent now answers (`reply_to`: the message over the field), with the part it
+    /// quotes when the user selected one.
+    fn reply_of(&mut self, key: &ChatKey, reply_to: Option<&str>) -> Option<Value> {
         let quote = self.quotes.remove(key);
-        let reply_to = composed
-            .reply_to
-            .as_deref()
+        reply_to
             .and_then(|id| Some((id, id.parse::<i64>().ok()?)))
             .map(|(id, message)| {
                 // The part the reply quotes, when it quotes the message it answers.
@@ -1425,7 +1637,52 @@ impl Feed {
                     });
                 json!({"@type": "inputMessageReplyToMessage", "message_id": message,
                     "quote": quote})
-            });
+            })
+    }
+
+    /// A sticker or a GIF of the field's panel (part 4): sent as it is, answering the quote over
+    /// the field.
+    pub fn send_content(
+        &mut self,
+        cx: &mut Cx,
+        key: &ChatKey,
+        content: Value,
+        reply_to: Option<&str>,
+    ) {
+        let reply = self.reply_of(key, reply_to);
+        cx.td.send(
+            &key.account,
+            json!({"@type": "sendMessage", "chat_id": key.chat, "message_thread_id": 0,
+                "reply_to": reply, "options": null, "reply_markup": null,
+                "input_message_content": content}),
+            Asked::Feed(Ask::Sent { chat: key.chat }),
+        );
+    }
+
+    /// A GIF found through @gif (part 4): the bot's result, sent by Telegram (without "via
+    /// @gif").
+    pub fn send_inline_result(
+        &mut self,
+        cx: &mut Cx,
+        key: &ChatKey,
+        query: &str,
+        result: &str,
+        reply_to: Option<&str>,
+    ) {
+        let reply = self.reply_of(key, reply_to);
+        cx.td.send(
+            &key.account,
+            json!({"@type": "sendInlineQueryResultMessage", "chat_id": key.chat,
+                "message_thread_id": 0, "reply_to": reply, "options": null, "query_id": query,
+                "result_id": result, "hide_via_bot": true}),
+            Asked::Feed(Ask::Sent { chat: key.chat }),
+        );
+    }
+
+    /// The field's text parsed (`text`: TDLib's `formattedText`, empty when there is none) goes:
+    /// as a message, or as the caption of the first file.
+    fn send_formatted(&mut self, cx: &mut Cx, key: &ChatKey, composed: &Composed, text: Value) {
+        let reply_to = self.reply_of(key, composed.reply_to.as_deref());
         let mut contents: Vec<(bool, Value)> = Vec::new();
         let has_text = text["text"].as_str().is_some_and(|text| !text.is_empty());
         let mut caption = has_text.then_some(text);
@@ -1575,6 +1832,14 @@ impl Feed {
 
     /// A timer of the feed fired (one it started).
     pub fn timer(&mut self, cx: &mut Cx, timer: u64) {
+        if self.progress_timer == Some(timer) {
+            self.progress_timer = None;
+            for open in self.chats.values_mut() {
+                let later = std::mem::take(&mut open.later);
+                open.dirty.extend(later);
+            }
+            return;
+        }
         if self.typing_timer == Some(timer) {
             self.typing_timer = None;
             for open in self.chats.values_mut() {
@@ -1631,20 +1896,39 @@ impl Feed {
     pub fn flush(&mut self, cx: &mut Cx) {
         let now = unix_now() as i64;
         let offset = system::utc_offset(now);
-        for (key, open) in self.chats.iter_mut() {
+        let Feed {
+            chats,
+            media,
+            frames,
+            ..
+        } = self;
+        for (key, open) in chats.iter_mut() {
             if open.load != Load::Ready {
                 continue;
             }
             let mut changes = std::mem::take(&mut open.queue);
-            if !open.dirty.is_empty() || !open.dirty_albums.is_empty() {
+            // An animation rendered in an earlier session is found on disk: its message is
+            // converted again at once, with it.
+            for _ in 0..2 {
+                if open.dirty.is_empty() && open.dirty_albums.is_empty() {
+                    break;
+                }
                 let ids: Vec<i64> = std::mem::take(&mut open.dirty).into_iter().collect();
-                let (removed, changed) = convert_changed(cx, key, open, &ids);
+                let (removed, changed) = convert_changed(cx, key, open, &ids, media);
                 if !removed.is_empty() {
                     changes.push(conv::remove(removed));
                 }
                 if !changed.is_empty() {
                     changes.push(conv::put(changed));
                 }
+                let found: Vec<i64> = open
+                    .renders
+                    .iter()
+                    .filter(|render| frames.found(media, &render.output))
+                    .flat_map(|render| open.files.get(&render.file).into_iter().flatten())
+                    .copied()
+                    .collect();
+                open.dirty.extend(found);
             }
             if !changes.is_empty() {
                 for window in &open.windows {
@@ -1688,10 +1972,23 @@ impl Feed {
         self.ask_missing(cx);
     }
 
-    /// The users, chats and replied messages the converted messages lack.
+    /// The users, chats and replied messages the converted messages lack; the animations whose
+    /// stickers are downloaded.
     fn ask_missing(&mut self, cx: &mut Cx) {
+        for open in self.chats.values_mut() {
+            for render in std::mem::take(&mut open.renders) {
+                if let Some(input) = &render.input
+                    && !self.frames.found(&mut self.media, &render.output)
+                {
+                    self.frames.render(cx, input, &render.output, render.size);
+                }
+            }
+        }
         for (key, open) in self.chats.iter_mut() {
             for (file, priority) in std::mem::take(&mut open.wanted_files) {
+                if self.cancelled.contains(&(key.account.clone(), file)) {
+                    continue;
+                }
                 self.auto.insert((key.account.clone(), file), key.chat);
                 download(
                     cx,
@@ -1805,7 +2102,13 @@ fn history(cx: &mut Cx, key: &ChatKey, epoch: u64, page: Page, from: i64, offset
 }
 
 /// A page more: taken, converted and queued for the windows.
-fn page_in(cx: &mut Cx, key: &ChatKey, open: &mut Open, messages: Vec<Value>) {
+fn page_in(
+    cx: &mut Cx,
+    key: &ChatKey,
+    open: &mut Open,
+    messages: Vec<Value>,
+    media: &MediaOptions,
+) {
     let ids: Vec<i64> = messages.iter().filter_map(|m| m["id"].as_i64()).collect();
     for message in messages {
         open.take(message);
@@ -1813,7 +2116,7 @@ fn page_in(cx: &mut Cx, key: &ChatKey, open: &mut Open, messages: Vec<Value>) {
     for id in &ids {
         open.dirty.remove(id);
     }
-    let (removed, converted) = convert_all(cx, key, open, &ids);
+    let (removed, converted) = convert_all(cx, key, open, &ids, media);
     if !removed.is_empty() {
         open.queue.push(conv::remove(removed));
     }
@@ -1827,17 +2130,29 @@ fn page_in(cx: &mut Cx, key: &ChatKey, open: &mut Open, messages: Vec<Value>) {
 type Converts = (Vec<String>, Vec<flux_plugin_api::conversation::Message>);
 
 /// Converts the messages for the windows, and remembers what each shows.
-fn convert_all(cx: &Cx, key: &ChatKey, open: &mut Open, ids: &[i64]) -> Converts {
+fn convert_all(
+    cx: &Cx,
+    key: &ChatKey,
+    open: &mut Open,
+    ids: &[i64],
+    media: &MediaOptions,
+) -> Converts {
     match cx.stores.get(&key.account) {
-        Some(store) => open.convert(store, &HostWords, unix_now() as i64, ids, false),
+        Some(store) => open.convert(store, &HostWords, media, unix_now() as i64, ids, false),
         None => Converts::default(),
     }
 }
 
 /// Converts the messages again: only those that came out different are put.
-fn convert_changed(cx: &Cx, key: &ChatKey, open: &mut Open, ids: &[i64]) -> Converts {
+fn convert_changed(
+    cx: &Cx,
+    key: &ChatKey,
+    open: &mut Open,
+    ids: &[i64],
+    media: &MediaOptions,
+) -> Converts {
     match cx.stores.get(&key.account) {
-        Some(store) => open.convert(store, &HostWords, unix_now() as i64, ids, true),
+        Some(store) => open.convert(store, &HostWords, media, unix_now() as i64, ids, true),
         None => Converts::default(),
     }
 }
@@ -1850,6 +2165,7 @@ impl Open {
         &mut self,
         store: &Store,
         words: &dyn Words,
+        media: &MediaOptions,
         now: i64,
         ids: &[i64],
         only_changed: bool,
@@ -1875,6 +2191,7 @@ impl Open {
                 words,
                 now,
                 replied: self.replied_to(raw),
+                media,
             };
             if let Some(converted) = convert::convert(&context, raw) {
                 self.keep(store, id, converted, only_changed, &mut messages);
@@ -1904,6 +2221,7 @@ impl Open {
                 words,
                 now,
                 replied: raws.first().and_then(|first| self.replied_to(first)),
+                media,
             };
             if let Some(converted) = convert::album(&context, &raws) {
                 self.keep(store, id, converted, only_changed, &mut messages);
@@ -1944,6 +2262,7 @@ impl Open {
         if let Some(target) = converted.reply_to {
             self.wanted_replies.push(target);
         }
+        self.renders.extend(converted.renders.iter().cloned());
         if self
             .visible
             .is_some_and(|(first, last)| (first..=last).contains(&id))
@@ -1959,6 +2278,7 @@ impl Open {
             .is_some_and(|shown| shown.message == converted.message);
         if !(only_changed && same) {
             messages.push(converted.message.clone());
+            self.put_at.insert(id, Instant::now());
         }
         self.shown.insert(id, converted);
     }
@@ -1987,6 +2307,18 @@ fn download(
         Asked::Feed(Ask::Done {
             what: "downloadFile",
             told: clicked.then_some("Couldn't download the file"),
+        }),
+    );
+}
+
+/// Stops a file's download (the part downloaded so far stays for a next time).
+fn cancel_download(cx: &mut Cx, account: &str, file: i64) {
+    cx.td.send(
+        account,
+        json!({"@type": "cancelDownloadFile", "file_id": file, "only_if_pending": false}),
+        Asked::Feed(Ask::Done {
+            what: "cancelDownloadFile",
+            told: None,
         }),
     );
 }
@@ -2326,7 +2658,7 @@ mod tests {
             }
         }
         let ids: Vec<i64> = std::mem::take(&mut open.dirty).into_iter().collect();
-        let (gone, put) = open.convert(store, &English, NOW, &ids, true);
+        let (gone, put) = open.convert(store, &English, &MediaOptions::default(), NOW, &ids, true);
         removed.extend(gone);
         let put = put
             .into_iter()
@@ -2426,7 +2758,8 @@ mod tests {
             open.insert(message);
         }
         let ids: Vec<i64> = open.raw.keys().copied().collect();
-        let (removed, put) = open.convert(&store, &English, NOW, &ids, false);
+        let (removed, put) =
+            open.convert(&store, &English, &MediaOptions::default(), NOW, &ids, false);
         assert!(removed.is_empty());
         assert_eq!(put.len(), 1, "the half album waits: {put:?}");
         // The older page brings the rest: one message, under the first item.
@@ -2434,7 +2767,14 @@ mod tests {
             open.take(message);
         }
         open.dirty.clear();
-        let (removed, put) = open.convert(&store, &English, NOW, &[5, 10], false);
+        let (removed, put) = open.convert(
+            &store,
+            &English,
+            &MediaOptions::default(),
+            NOW,
+            &[5, 10],
+            false,
+        );
         assert!(removed.is_empty());
         let put: Vec<(&str, usize)> = put
             .iter()
@@ -2446,7 +2786,14 @@ mod tests {
         open.older = History::More;
         open.insert(item(11, "78", "", false));
         open.insert(line(20));
-        open.convert(&store, &English, NOW, &[11, 20], false);
+        open.convert(
+            &store,
+            &English,
+            &MediaOptions::default(),
+            NOW,
+            &[11, 20],
+            false,
+        );
         assert!(!open.shown.contains_key(&11));
         open.older = History::Complete;
         open.dirty.insert(11);

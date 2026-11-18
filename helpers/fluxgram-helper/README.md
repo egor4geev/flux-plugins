@@ -5,11 +5,12 @@ A WebAssembly plugin can't run TDLib (native C++ with its own threads and TCP), 
 this program through Flux (`process.helper("fluxgram-helper")` → `process.spawn`) and talks to it
 in JSON lines. The program is thin: TDLib's JSON interface (`td_json_client`) behind stdin and
 stdout, a TDLib client per account. Everything Telegram-specific — the sign-in, the chats, what to
-show — is the plugin's.
+show — is the plugin's. It also renders animated stickers (TGS and WEBM) into Flux's files of frames
+(`fluxgram.render`): native code the plugin can't run either.
 
 One file per platform, TDLib and OpenSSL linked in statically (TDLib 1.8.61, the static libraries of
-the `tdlib-rs` releases, pinned by SHA-256): `macos-aarch64`, `macos-x86_64`, `windows-x86_64`,
-`windows-aarch64`. CI (`.github/workflows/helpers.yml`) builds them; a new version of this crate is
+the `tdlib-rs` releases, pinned by SHA-256), and rlottie and libvpx's VP9 decoder built from their
+sources (`native/`): `macos-aarch64`, `macos-x86_64`, `windows-x86_64`, `windows-aarch64`. CI (`.github/workflows/helpers.yml`) builds them; a new version of this crate is
 released as `fluxgram-helper-v<version>` with the four files gzipped; the plugin's manifest names
 them with their SHA-256 (`[[helpers]]`).
 
@@ -25,8 +26,8 @@ fluxgram-helper [--log <file>] [--verbosity <0–5>] [--stats]
   for measuring the batches.
 
 The program ends when its input ends (Flux stopped the plugin, or quit) or on `fluxgram.quit`: it
-closes every client first (TDLib's `close`, up to 5 s for all of them), so the databases are left
-whole.
+closes every client first (TDLib's `close`) and finishes the renders asked for, up to 5 s for all of
+it, so the databases are left whole and no file of frames half-written.
 
 ## Protocol
 
@@ -86,12 +87,35 @@ the program's own messages (start, a failure) go to stderr.
   {"@type": "fluxgram.chats", "@client": "a1", "chats": [101, -1000000001001]}
   ```
 
+- **`fluxgram.render`** (part 4) — renders an animated sticker once into Flux's file of frames, FXA
+  (the layout: `flux-media`'s `fxa` module in the Flux tree — "FXA1", the size, the frames' count
+  and length, the offsets, then each frame's BGRA pixels with straight alpha as an LZ4 block): a
+  TGS (Lottie in gzip — rlottie) or a WEBM (VP9 with its alpha channel — libvpx), told apart by
+  their first bytes. The frames are `size` pixels on the longer side (1–2048; the sticker's
+  proportions kept), at most `fps` a second (1–60, 30 by default): the sticker's own frames, every
+  other one or fewer when its rate is higher (a TGS of 60 → 30), so they stay evenly paced; a
+  Lottie's frames end before its out point (`op`). Renders run on threads of their own, two at a
+  time and the rest in turn, never holding up TDLib's lines; one asked for again while it waits or
+  runs (the same `output`) is done once and answered for each request. The output's folder is made
+  if it's missing; the file is written to `<output>.tmp` and renamed, so it is whole once it is
+  there. A sticker of up to 3 s renders in well under a second (on an M-series Mac: a 3 s TGS at
+  320 px ~60 ms; a 3 s WEBM of 512 px to 320 ~230 ms).
+
+  ```json
+  {"@type": "fluxgram.render", "input": "/…/files/stickers/1.tgs", "output": "/…/cache/frames/AgAD-320.fxa", "size": 320, "fps": 30, "@extra": 9}
+  ```
+
+  → `{"@type": "fluxgram.rendered", "output": "/…/AgAD-320.fxa", "width": 320, "height": 320, "frames": 90, "@extra": 9}`,
+  or `fluxgram.error` with the reason and the `@extra`: `Not a TGS or WEBM sticker`, `Can't read
+  the sticker: …`, `A broken TGS: …`, `A broken WEBM: …` (a cut file, a codec other than VP9, more
+  than 8 bits a color), `Can't write the frames: …` (the output's folder, the disk).
+
 - **`fluxgram.quit`** — closes every client and exits with 0, as the end of input does.
 
 ### Program → plugin
 
 - **`fluxgram.ready`** — the first line, once TDLib is loaded:
-  `{"@type": "fluxgram.ready", "version": "0.1.0", "tdlib": "1.8.61"}`.
+  `{"@type": "fluxgram.ready", "version": "0.2.0", "tdlib": "1.8.61"}`.
 - **Every answer and update of TDLib**, as TDLib gives it, with `"@client": "<account>"` in place
   of TDLib's `@client_id`:
 
@@ -129,7 +153,7 @@ there — and the database's encryption key, which the plugin keeps in Flux's se
 ```
 cargo build --release                     # this Mac's platform
 cargo build --release --target x86_64-apple-darwin
-cargo test --release                      # the protocol's pure parts
+cargo test --release                      # the protocol's pure parts, the test stickers' renders
 python3 tests/live.py                     # on Telegram's test servers (see the file)
 ```
 
@@ -141,6 +165,32 @@ The static libraries of TDLib come from the pinned archive of the `tdlib-rs` rel
   (`.cargo/config.toml`). TDLib's prebuilt libraries are built for macOS 15, but of what they take
   from the system only libc++'s `__libcpp_verbose_abort` is newer than 12 (13.3), and the program
   defines it itself (`td.rs`) — checked by the program's imports, not yet on a macOS 12 machine.
+- **Renderers** (`native/`, compiled by `build.rs` with the `cc` crate and the target's own C and C++
+  compilers — no CMake, nothing from Homebrew): only the files that are compiled are there, with
+  their licenses. Kept in the tree, not downloaded: the build needs no network for them, libvpx's
+  configured headers belong with its sources, and what goes into the program is plain to see.
+  Portable code only — no assembly or SIMD of their own — so one list of files builds for macOS
+  (arm64, x86_64) and Windows (x64, ARM64, MSVC).
+  - `native/rlottie` — Samsung's rlottie at commit `ea06d2f` (2026-09-30), the renderer Telegram's
+    own apps use (in their fork): MIT (`COPYING` lists which part is under which file of
+    `licenses/`: FreeType's rasterizer, pixman, rapidjson, stb_image, Skia's; `zip/` is MIT and
+    public-domain miniz). Its `config.h` is the
+    program's own: no threads (a frame is drawn on the calling thread; rlottie isn't reentrant so,
+    and the program renders one Lottie at a time), no cache of parsed animations, no image plugin.
+    Its NEON drawing (32-bit ARM assembly) is off: `-U__ARM_NEON__`.
+  - `native/libvpx` — libvpx v1.17.0, the VP9 decoder only: BSD (`LICENSE`, `PATENTS`). Its
+    `vpx_config.h`, `vp9_rtcd.h`, `vpx_dsp_rtcd.h`, `vpx_scale_rtcd.h`, `vpx_version.h` and
+    `vpx_config.c` come from `configure --target=generic-gnu --disable-vp8 --disable-vp9-encoder
+    --disable-examples --disable-tools --disable-docs --disable-unit-tests --disable-multithread`
+    (`make` of the headers in a scratch folder), made the same for every compiler (`INLINE`, no
+    `pthread.h`); the sources are `make libvpx_srcs.txt`'s C files and the headers they include.
+    Without its threads, libvpx sets up its tables unguarded in a decoder's first decode: the
+    program's first decodes take turns.
+  - `native/vp9.c` — the program's door to the decoder (plain functions: Rust declares none of
+    libvpx's structures).
+
+  A new version: the same folders from the new sources (only what's compiled, by the compilers'
+  dependency lists), the configure step again for libvpx, then the tests and the smoke test.
 - **Windows**: TDLib's prebuilt libraries are built for the C runtime in DLLs (`/MD`), so the program
   needs the Visual C++ runtime (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`) — unlike
   Flux.exe (`+crt-static`). CI lists the DLLs and warns. A program without it needs TDLib built

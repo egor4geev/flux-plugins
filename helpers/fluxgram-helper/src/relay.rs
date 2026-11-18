@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
+use crate::render::{self, Render};
+
 /// A batch is written once it reaches this size; a single bigger message goes on its own.
 pub const BATCH_LIMIT: usize = 1 << 20;
 
@@ -23,6 +25,11 @@ pub enum Input {
         key: String,
         chats: Option<HashSet<i64>>,
     },
+    /// `fluxgram.render`: an animated sticker into Flux's file of frames, and the line's `@extra`.
+    Render {
+        render: Render,
+        extra: Option<Value>,
+    },
     /// `fluxgram.quit`.
     Quit,
     /// An empty line: nothing to do.
@@ -37,7 +44,7 @@ pub struct InputError {
 }
 
 impl InputError {
-    fn new(message: impl Into<String>, extra: Option<&Value>) -> Self {
+    pub fn new(message: impl Into<String>, extra: Option<&Value>) -> Self {
         Self {
             message: message.into(),
             extra: extra.cloned(),
@@ -133,6 +140,38 @@ pub fn parse_input(line: &[u8]) -> Result<Input, InputError> {
                             extra.as_ref(),
                         )
                     })
+            }
+            "render" => {
+                let path = |name: &str| match object.get(name) {
+                    Some(Value::String(path)) if !path.is_empty() => Some(path.clone()),
+                    _ => None,
+                };
+                let size = object
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .filter(|size| (1..=u64::from(render::MAX_SIZE)).contains(size));
+                let fps = match object.get("fps") {
+                    None | Some(Value::Null) => Some(u64::from(render::DEFAULT_FPS)),
+                    Some(fps) => fps.as_u64().filter(|fps| (1..=60).contains(fps)),
+                };
+                match (path("input"), path("output"), size, fps) {
+                    (Some(input), Some(output), Some(size), Some(fps)) => Ok(Input::Render {
+                        render: Render {
+                            input,
+                            output,
+                            size: size as u32,
+                            fps: fps as u32,
+                        },
+                        extra,
+                    }),
+                    _ => Err(InputError::new(
+                        format!(
+                            "fluxgram.render needs \"input\" and \"output\" (files), \"size\" (1 to {} pixels) and maybe \"fps\" (1 to 60)",
+                            render::MAX_SIZE
+                        ),
+                        extra.as_ref(),
+                    )),
+                }
             }
             "quit" => Ok(Input::Quit),
             _ => Err(InputError::new(
@@ -472,6 +511,42 @@ mod tests {
         let keep = error(r#"{"@type":"fluxgram.keep","types":"updateUser","@extra":4}"#);
         assert!(keep.message.starts_with("fluxgram.keep needs \"types\""));
         assert_eq!(keep.extra, Some(Value::from(4)));
+    }
+
+    #[test]
+    fn render_requests() {
+        let line = r#"{"@type":"fluxgram.render","input":"/s/1.tgs","output":"/c/1-320.fxa","size":320,"fps":30,"@extra":9}"#;
+        assert_eq!(
+            parse_input(line.as_bytes()),
+            Ok(Input::Render {
+                render: Render {
+                    input: "/s/1.tgs".into(),
+                    output: "/c/1-320.fxa".into(),
+                    size: 320,
+                    fps: 30,
+                },
+                extra: Some(Value::from(9)),
+            })
+        );
+        let default_fps = r#"{"@type":"fluxgram.render","input":"a","output":"b","size":144}"#;
+        assert!(matches!(
+            parse_input(default_fps.as_bytes()),
+            Ok(Input::Render {
+                render: Render { fps: 30, .. },
+                extra: None
+            })
+        ));
+        for line in [
+            r#"{"@type":"fluxgram.render","output":"b","size":144,"@extra":2}"#,
+            r#"{"@type":"fluxgram.render","input":"a","output":"","size":144,"@extra":2}"#,
+            r#"{"@type":"fluxgram.render","input":"a","output":"b","size":0,"@extra":2}"#,
+            r#"{"@type":"fluxgram.render","input":"a","output":"b","size":5000,"@extra":2}"#,
+            r#"{"@type":"fluxgram.render","input":"a","output":"b","size":144,"fps":0,"@extra":2}"#,
+        ] {
+            let error = error(line);
+            assert!(error.message.starts_with("fluxgram.render needs"), "{line}");
+            assert_eq!(error.extra, Some(Value::from(2)));
+        }
     }
 
     #[test]

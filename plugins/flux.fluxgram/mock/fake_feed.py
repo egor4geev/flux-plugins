@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import base64
 import bisect
+import math
 import os
 import random
 import re
+import shutil
 import struct
 import threading
 import time
@@ -51,6 +53,39 @@ MINI = {
 # Every media file the histories have: file id → what it is (written when downloaded).
 FILES: dict[int, dict] = {}
 _next_file = [10_000]
+# The real media (part 4): small samples next to this file, copied when "downloaded".
+MEDIA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
+
+
+def media_file(name: str) -> dict:
+    """A file of mock/media: TDLib's `file`, downloaded as a copy of it."""
+    source = os.path.join(MEDIA, name)
+    size = os.path.getsize(source) if os.path.exists(source) else 10_000
+    return new_file("copy", name, size, source=source)
+
+
+def poster(name: str, width: int, height: int) -> dict:
+    """A video's still thumbnail: a JPEG of mock/media."""
+    return {"@type": "thumbnail", "format": {"@type": "thumbnailFormatJpeg"}, "width": width, "height": height,
+            "file": media_file(name)}
+
+
+def waveform(seconds: int) -> str:
+    """Telegram's waveform: 5-bit samples (0–31) packed LSB-first, base64 — a voice's rise and fall."""
+    samples = [max(0, min(31, int(16 + 13 * math.sin(i / 2.3) * math.sin(i / 11.0)))) for i in range(max(10, seconds * 10))]
+    bits = 0
+    count = 0
+    packed = bytearray()
+    for sample in samples:
+        bits |= sample << count
+        count += 5
+        while count >= 8:
+            packed.append(bits & 0xFF)
+            bits >>= 8
+            count -= 8
+    if count:
+        packed.append(bits & 0xFF)
+    return base64.b64encode(bytes(packed)).decode()
 
 
 def new_file(kind: str, name: str, size: int, **spec) -> dict:
@@ -192,16 +227,26 @@ def thumbnail(color: tuple, width: int, height: int) -> dict:
             "file": new_file("picture", "thumb.png", width * height // 8, color=color, w=width, h=height)}
 
 
-def sticker(emoji: str, color: tuple, animated: bool = False) -> dict:
-    file = new_file("sticker", "sticker.webp", 18_000, color=color)
-    sticker_obj = {"@type": "sticker", "id": str(file["id"]), "set_id": "1", "width": 512, "height": 512,
-                   "emoji": emoji, "format": {"@type": "stickerFormatTgs" if animated else "stickerFormatWebp"},
-                   "full_type": {"@type": "stickerFullTypeRegular"}, "thumbnail": None, "sticker": file}
-    if animated:
-        sticker_obj["sticker"] = new_file("bytes", "sticker.tgs", 30_000)
-        sticker_obj["thumbnail"] = {"@type": "thumbnail", "format": {"@type": "thumbnailFormatWebp"},
-                                    "width": 128, "height": 128, "file": file}
-    return {"@type": "messageSticker", "sticker": sticker_obj, "is_premium": False}
+def sticker_object(emoji: str, color: tuple, animated: bool | str = False, set_id: str = "1") -> dict:
+    """TDLib's `sticker`: a static WebP (a disc), or an animated one — TGS (`True` or "tgs") or WEBM
+    ("webm") from mock/media — with a still WebP thumbnail."""
+    thumb = new_file("sticker", "thumb.webp", 6_000, color=color)
+    kind = "tgs" if animated is True else animated
+    sticker_obj = {"@type": "sticker", "id": str(thumb["id"]), "set_id": set_id, "width": 512, "height": 512,
+                   "emoji": emoji, "format": {"@type": "stickerFormatWebp"},
+                   "full_type": {"@type": "stickerFullTypeRegular"},
+                   "thumbnail": {"@type": "thumbnail", "format": {"@type": "thumbnailFormatWebp"},
+                                 "width": 128, "height": 128, "file": thumb}}
+    if kind:
+        sticker_obj["format"] = {"@type": "stickerFormatTgs" if kind == "tgs" else "stickerFormatWebm"}
+        sticker_obj["sticker"] = media_file(f"sticker.{kind}")
+    else:
+        sticker_obj["sticker"] = new_file("sticker", "sticker.webp", 18_000, color=color)
+    return sticker_obj
+
+
+def sticker(emoji: str, color: tuple, animated: bool | str = False) -> dict:
+    return {"@type": "messageSticker", "sticker": sticker_object(emoji, color, animated), "is_premium": False}
 
 
 def document(name: str, content: bytes, caption: str = "") -> dict:
@@ -212,36 +257,42 @@ def document(name: str, content: bytes, caption: str = "") -> dict:
 
 
 def video(seconds: int, color: tuple, mini_name: str, caption: str = "") -> dict:
+    """A video (mock/media/video.mp4, 640×360, with its poster)."""
     return {"@type": "messageVideo", "caption": styled(caption), "show_caption_above_media": False,
             "has_spoiler": False, "is_secret": False,
-            "video": {"@type": "video", "duration": seconds, "width": 1280, "height": 720,
+            "video": {"@type": "video", "duration": seconds, "width": 640, "height": 360,
                       "file_name": "clip.mp4", "mime_type": "video/mp4", "has_stickers": False,
                       "supports_streaming": True, "minithumbnail": mini(mini_name, 40, 22),
-                      "thumbnail": thumbnail(color, 320, 180),
-                      "video": new_file("bytes", "clip.mp4", 3_400_000)}}
+                      "thumbnail": poster("video.jpg", 640, 360), "video": media_file("video.mp4")}}
+
+
+def animation_object(mini_name: str = "violet") -> dict:
+    """TDLib's `animation`: mock/media/gif.mp4 (320×240, no sound) with its poster."""
+    return {"@type": "animation", "duration": 3, "width": 320, "height": 240,
+            "file_name": "funny.mp4", "mime_type": "video/mp4", "has_stickers": False,
+            "minithumbnail": mini(mini_name, 40, 30), "thumbnail": poster("gif.jpg", 320, 240),
+            "animation": media_file("gif.mp4")}
 
 
 def animation(color: tuple, mini_name: str) -> dict:
     return {"@type": "messageAnimation", "caption": styled(""), "show_caption_above_media": False,
-            "has_spoiler": False, "is_secret": False,
-            "animation": {"@type": "animation", "duration": 3, "width": 480, "height": 270,
-                          "file_name": "funny.mp4", "mime_type": "video/mp4", "has_stickers": False,
-                          "minithumbnail": mini(mini_name, 40, 22), "thumbnail": thumbnail(color, 320, 180),
-                          "animation": new_file("bytes", "funny.mp4", 400_000)}}
+            "has_spoiler": False, "is_secret": False, "animation": animation_object(mini_name)}
 
 
 def video_note(seconds: int, color: tuple, mini_name: str) -> dict:
+    """A round message (mock/media/round.mp4, 384×384, with sound)."""
     return {"@type": "messageVideoNote", "is_viewed": False, "is_secret": False,
             "video_note": {"@type": "videoNote", "duration": seconds, "length": 384, "waveform": "",
-                           "minithumbnail": mini(mini_name, 40, 40), "thumbnail": thumbnail(color, 240, 240),
-                           "speech_recognition_result": None,
-                           "video": new_file("bytes", "round.mp4", 900_000)}}
+                           "minithumbnail": mini(mini_name, 40, 40), "thumbnail": poster("round.jpg", 384, 384),
+                           "speech_recognition_result": None, "video": media_file("round.mp4")}}
 
 
 def voice(seconds: int, caption: str = "") -> dict:
+    """A voice message (mock/media/voice.ogg) with its waveform."""
     return {"@type": "messageVoiceNote", "caption": styled(caption), "is_listened": False,
-            "voice_note": {"@type": "voiceNote", "duration": seconds, "waveform": "", "mime_type": "audio/ogg",
-                           "speech_recognition_result": None, "voice": new_file("bytes", "voice.ogg", 70_000)}}
+            "voice_note": {"@type": "voiceNote", "duration": seconds, "waveform": waveform(seconds),
+                           "mime_type": "audio/ogg", "speech_recognition_result": None,
+                           "voice": media_file("voice.ogg")}}
 
 
 def audio(performer: str, title: str) -> dict:
@@ -429,6 +480,20 @@ def fill_people() -> None:
     say(106, 106, text("…"), NOW - 86_400 * 40)
     say(107, 107, voice(17), NOW - 20_000)
     say(107, 107, text("Thanks!"), NOW - 19_000)
+    # Every kind of media to play (part 4), at the end of the chat: a voice, a round, a GIF, a
+    # video, a static sticker, an animated TGS and WEBM one, an animated emoji.
+    say(107, 107, text("Recorded the demo for you"), NOW - 3000)
+    say(107, 107, voice(5), NOW - 2900)
+    say(107, 107, video_note(6, GREEN, "green"), NOW - 2800)
+    say(107, 0, animation(VIOLET, "violet"), NOW - 2700)
+    say(107, 107, video(10, TEAL, "teal", caption="The walkthrough"), NOW - 2600)
+    say(107, 107, sticker("👍", BLUE), NOW - 2500)
+    say(107, 107, sticker("🎉", WARM, animated="tgs"), NOW - 2400)
+    say(107, 0, sticker("🐱", VIOLET, animated="webm"), NOW - 2300)
+    say(107, 107, {"@type": "messageAnimatedEmoji", "emoji": "❤",
+                   "animated_emoji": {"@type": "animatedEmoji", "sticker": sticker_object("❤", WARM, "tgs"),
+                                      "sticker_width": 512, "sticker_height": 512, "fitzpatrick_type": 0,
+                                      "sound": None}}, NOW - 2200)
     say(OLD, 104, text("We're moving to the new repository."), NOW - 86_400 * 90)
     say(OLD, 104, text("Archived"), NOW - 86_400 * 89)
 
@@ -599,6 +664,10 @@ def content_of(client, chat_id: int, content: dict, temporary: int) -> dict:
     """A message's content from an `inputMessage…`: a sent photo or file is the local file."""
     kind = content.get("@type")
     caption = content.get("caption") or styled("")
+    import fake_media  # the panel's stickers and GIFs (part 4)
+    media = fake_media.content_of(content)
+    if media is not None:
+        return media
     if kind == "inputMessageText":
         formatted = content.get("text") or {}
         value = formatted.get("text", "")
@@ -836,6 +905,15 @@ def write_file(path: str, file_id: int, spec: dict | None) -> int:
         picture_png(path, spec["color"], spec["w"], spec["h"])
     elif spec["kind"] == "sticker":
         sticker_png(path, spec["color"])
+    elif spec["kind"] == "copy":
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(spec["source"]):
+            shutil.copyfile(spec["source"], path)
+        else:
+            # A sample not made yet (the WEBM sticker until the helper's agent adds one): a few
+            # bytes that no renderer takes, so the still picture stays.
+            with open(path, "wb") as out:
+                out.write(b"not yet a sample: " + spec["name"].encode())
     else:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as out:

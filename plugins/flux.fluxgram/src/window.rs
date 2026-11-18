@@ -53,6 +53,8 @@ pub struct Window {
     tick: Option<u64>,
     /// The Sign Out question, by its id: the account's key.
     asked: Option<(u64, String)>,
+    /// The Clear Cache question (Settings → FluxGram → Cache), by its id.
+    cache_asked: Option<u64>,
     /// The views set, by window: an unchanged one isn't set again.
     views: HashMap<&'static str, View>,
 }
@@ -70,6 +72,7 @@ impl Window {
             counting: false,
             tick: None,
             asked: None,
+            cache_asked: None,
             views: HashMap::new(),
         }
     }
@@ -80,12 +83,20 @@ impl Window {
         let _ = service::send_json(&Request::Hello);
     }
 
-    /// A command: Add Telegram Account…, Add Chat…, and `open-chat` (a notification's Open: the
-    /// argument is the chat's tab key).
+    /// A command: Add Telegram Account…, Add Chat…, `open-chat` (a notification's Open: the
+    /// argument is the chat's tab key), and `clear-cache` (Settings' button, asked first).
     pub fn run_command(&mut self, command: &str, argument: Option<&str>) {
         match command {
             "add-account" => self.add_account(),
             "add-chat" => self.list.add_chat(),
+            "clear-cache" => {
+                let id = Ask::warning(&tr("Clear the cache?"))
+                    .message(&tr("Media you've seen downloads again when you open it."))
+                    .danger(&tr("Clear"))
+                    .cancel(&tr("Cancel"))
+                    .send();
+                self.cache_asked = Some(id);
+            }
             "open-chat" => {
                 if let Some(key) = argument.and_then(ChatKey::parse) {
                     let title = self.list.title(&key);
@@ -154,6 +165,12 @@ impl Window {
                     self.tabs.timer(id);
                 }
                 self.tabs_go();
+            }
+            Event::DialogAnswered((id, answer)) if self.cache_asked == Some(id) => {
+                self.cache_asked = None;
+                if answer == Some(0) {
+                    self.ask(Request::ClearCache);
+                }
             }
             Event::DialogAnswered((id, answer))
                 if self.asked.as_ref().is_some_and(|a| a.0 == id) =>

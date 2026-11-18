@@ -1,7 +1,8 @@
 # The plugins' own programs (helpers/): fluxgram-helper, FluxGram's TDLib behind JSON lines. Every
 # change is built for the four platforms Flux runs on, run where the runner can run it (a smoke
-# test without the network: `fluxgram.ready`, then `getOption version` answered, then a clean
-# end), and gzipped — the files the plugin's manifest names ([[helpers]]).
+# test without the network: `fluxgram.ready`, then `getOption version` answered, the two test
+# stickers rendered, then a clean end), and gzipped — the files the plugin's manifest names
+# ([[helpers]]).
 #
 # A push to main releases a new version of the crate once: `fluxgram-helper-v<version>` with the
 # four `fluxgram-helper-<platform>.gz` and SHA256SUMS (the checksums of the .gz files: Flux checks
@@ -84,7 +85,8 @@ jobs:
           cargo clippy --release --all-targets -- -D warnings
           cargo test --release
 
-      # build.rs downloads TDLib's static libraries for the target and checks their SHA-256.
+      # build.rs downloads TDLib's static libraries for the target and checks their SHA-256, and
+      # compiles rlottie and libvpx's VP9 decoder from native/ with the target's compiler.
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -115,7 +117,9 @@ jobs:
           fi
 
       # Without the network: TDLib starts, a client answers `getOption version` before
-      # setTdlibParameters, and the end of input closes it (fluxgram.closed, exit 0).
+      # setTdlibParameters, the test stickers (a TGS: 120 frames at 60 a second; a WEBM: 30 at
+      # 30) are rendered — the end of input waits for them — and the client is closed
+      # (fluxgram.closed, exit 0).
       - name: Smoke test
         run: |
           run=""
@@ -127,10 +131,15 @@ jobs:
             run="arch -x86_64"
           fi
           printf '%s\n' '{"@client":"smoke","@type":"getOption","name":"version","@extra":1}' \
+            '{"@type":"fluxgram.render","input":"tests/stickers/sticker.tgs","output":"smoke/tgs.fxa","size":64,"@extra":2}' \
+            '{"@type":"fluxgram.render","input":"tests/stickers/sticker.webm","output":"smoke/webm.fxa","size":64,"@extra":3}' \
             | $run "$EXE" > smoke.out
           cat smoke.out
           head -n 1 smoke.out | grep -q '"@type":"fluxgram.ready"'
           grep -q '"@client":"smoke","@type":"optionValueString","value":"1.8.61","@extra":1' smoke.out
+          grep -q '"@type":"fluxgram.rendered","output":"smoke/tgs.fxa","width":64,"height":64,"frames":60,"@extra":2' smoke.out
+          grep -q '"@type":"fluxgram.rendered","output":"smoke/webm.fxa","width":64,"height":64,"frames":30,"@extra":3' smoke.out
+          ls -l smoke
           grep -q '"@type":"fluxgram.closed","@client":"smoke"' smoke.out
 
       - name: Gzip
@@ -180,4 +189,4 @@ jobs:
           gh release create "$tag" fluxgram-helper-*.gz SHA256SUMS \
             --target "$GITHUB_SHA" \
             --title "fluxgram-helper $version" \
-            --notes "FluxGram's program: TDLib 1.8.61 behind JSON lines (helpers/fluxgram-helper). The plugin's manifest names these files with their SHA-256 (SHA256SUMS)."
+            --notes "FluxGram's program: TDLib 1.8.61 behind JSON lines, animated stickers rendered with rlottie and libvpx (helpers/fluxgram-helper). The plugin's manifest names these files with their SHA-256 (SHA256SUMS)."

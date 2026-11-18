@@ -1,11 +1,15 @@
 //! TDLib's messages as Flux shows them (part 3): a `message` → the conversation's
 //! [`Message`] — the author (in groups), the text with its entities (bold, links, code blocks,
 //! quotes, spoilers; TDLib's offsets are UTF-16), the reply's quote, "Forwarded from", the photo
-//! (its `minithumbnail` blurred until the file is there), the sticker (WebP; animated ones as
-//! their thumbnail until part 4), the file, the link preview, what Flux can't play yet (voice,
-//! round and other videos, GIFs — a preview with the length), the chat's own lines ("Anna joined
-//! the group"), reactions, the delivery mark, and the actions the message offers (Edit and
-//! Delete only where Telegram allows them).
+//! (its `minithumbnail` blurred until the file is there), the sticker, the file, the link preview,
+//! the chat's own lines ("Anna joined the group"), reactions, the delivery mark, and the actions
+//! the message offers (Edit and Delete only where Telegram allows them).
+//!
+//! Media (part 4), played by Flux: a voice message (its waveform unpacked from Telegram's 5-bit
+//! samples), a round video message, a GIF, a video — each with its poster and its file once
+//! downloaded; an animated sticker (TGS, WEBM) and an animated emoji as the still thumbnail,
+//! with the animation once the helper rendered it into Flux's file of frames (FXA). What plays by
+//! itself and what downloads by itself are the plugin's settings ([`MediaOptions`]).
 //!
 //! Needs no host — the words come through [`Words`], the names and files from the [`Store`] — so
 //! it is tested natively on TDLib's JSON. A message in one line (a quote's text) is
@@ -14,7 +18,8 @@
 
 use base64::Engine;
 use flux_plugin_api::conversation::{
-    self as conv, Delivery, ImageShape, ImageSpec, Message, MessageQuote, Part, RichSpan, rich,
+    self as conv, Delivery, ImageShape, ImageSpec, Message, MessageQuote, Part, RichSpan,
+    VideoKind, rich,
 };
 use serde_json::Value;
 
@@ -28,6 +33,11 @@ const FEED_SIDE: i64 = 1280;
 const PREVIEW_SIDE: i64 = 640;
 /// A round video message's side in the feed.
 const ROUND_SIDE: u32 = 240;
+/// A sticker's side in the feed, in pixels: twice its 160 points — the size its animation is
+/// rendered at.
+pub const STICKER_SIDE: u32 = 320;
+/// GIFs and stickers download by themselves up to this size (larger ones wait for a click).
+pub const AUTO_SIZE: u64 = 4 << 20;
 /// The user's own text can be edited this long (Telegram's limit), when TDLib doesn't say.
 const EDIT_WINDOW: i64 = 48 * 3600;
 
@@ -47,6 +57,63 @@ pub struct Context<'a> {
     pub now: i64,
     /// The message this one answers, when the feed has it (loaded, or fetched for the quote).
     pub replied: Option<&'a Value>,
+    /// How media plays and downloads, and the animations rendered so far.
+    pub media: &'a MediaOptions,
+}
+
+/// How the feed shows media (part 4): the plugin's settings, and where the stickers' animations
+/// are.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaOptions {
+    /// GIFs and round messages play by themselves (without sound) while on screen.
+    pub autoplay: bool,
+    /// Animated stickers play again and again; else once each time they come into sight.
+    pub loop_stickers: bool,
+    /// What downloads by itself once it is on screen: photos; voice and round messages; GIFs and
+    /// stickers (up to [`AUTO_SIZE`]).
+    pub photos: bool,
+    pub voice: bool,
+    pub gifs: bool,
+    /// The folder of the rendered animations: `<cache>/frames`.
+    pub frames: String,
+    /// The animations there (their paths): the feed checks the folder, the helper renders more.
+    pub rendered: std::collections::HashSet<String>,
+}
+
+impl Default for MediaOptions {
+    fn default() -> Self {
+        MediaOptions {
+            autoplay: true,
+            loop_stickers: true,
+            photos: true,
+            voice: true,
+            gifs: true,
+            frames: String::new(),
+            rendered: std::collections::HashSet::new(),
+        }
+    }
+}
+
+impl MediaOptions {
+    /// The animation file of a sticker's file (by its `remote.unique_id`, the same for every
+    /// account) at `size` pixels.
+    pub fn frames_of(&self, file: &Value, size: u32) -> Option<String> {
+        let unique = file["remote"]["unique_id"]
+            .as_str()
+            .filter(|unique| !unique.is_empty())?;
+        // Telegram's ids are base64url: safe in a file name.
+        Some(format!("{}/{unique}-{size}.fxa", self.frames))
+    }
+}
+
+/// An animated sticker's animation to render (part 4): its file, the file's path once
+/// downloaded (the helper's input), the FXA it renders into.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Render {
+    pub file: i64,
+    pub input: Option<String>,
+    pub output: String,
+    pub size: u32,
 }
 
 /// A message as Flux shows it, and what the feed follows of it.
@@ -69,6 +136,9 @@ pub struct Converted {
     /// Users and chats the message names that the store doesn't know yet.
     pub missing_users: Vec<i64>,
     pub missing_chats: Vec<i64>,
+    /// The animated stickers' animations not rendered yet (part 4): the feed asks the helper
+    /// once their files are downloaded.
+    pub renders: Vec<Render>,
 }
 
 impl Converted {
@@ -83,6 +153,7 @@ impl Converted {
             reply_to: None,
             missing_users: Vec::new(),
             missing_chats: Vec::new(),
+            renders: Vec::new(),
         }
     }
 }
@@ -510,14 +581,19 @@ fn parts(cx: &Context, content: &Value, out: &mut Converted) {
         }
         "messageAnimatedEmoji" => {
             let emoji = content["emoji"].as_str().unwrap_or_default();
-            push(out, conv::text(vec![rich(emoji)]), None);
+            // Its sticker (TGS) plays as a sticker does; without one — the emoji as text.
+            let animated = &content["animated_emoji"]["sticker"];
+            if !animated.is_object() || !sticker(cx, animated, out) {
+                push(out, conv::text(vec![rich(emoji)]), None);
+            }
         }
         "messagePhoto" => with_caption(out, content, |out| {
             let photo = &content["photo"];
-            match photo_spec(store, photo, FEED_SIDE, out) {
+            match photo_spec(store, photo, FEED_SIDE, cx.media.photos, out) {
                 Some((spec, file)) => {
                     if let Some(full) = spec.full.is_none().then(|| full_size(photo)).flatten()
                         && full != file
+                        && cx.media.photos
                     {
                         out.full.push(full);
                     }
@@ -528,40 +604,52 @@ fn parts(cx: &Context, content: &Value, out: &mut Converted) {
         }),
         "messageVideo" => with_caption(out, content, |out| {
             let video = &content["video"];
-            let label = duration(video["duration"].as_i64().unwrap_or_default());
-            let file = video["video"]["id"].as_i64();
-            let spec = media_preview(store, video, size_of(video), file, out)
-                .label(&label)
-                .play();
-            push(out, conv::image(spec), file);
+            let part = video_part(cx, video, &video["video"], VideoKind::Video, false, out);
+            push(out, part, video["video"]["id"].as_i64());
         }),
         "messageAnimation" => with_caption(out, content, |out| {
             let animation = &content["animation"];
-            let file = animation["animation"]["id"].as_i64();
-            let spec = media_preview(store, animation, size_of(animation), file, out)
-                .label(&cx.words.tr("GIF"))
-                .play();
-            push(out, conv::image(spec), file);
+            let file = &animation["animation"];
+            let auto = cx.media.gifs && small(cx.store, file);
+            let part = video_part(cx, animation, file, VideoKind::Gif, auto, out);
+            push(out, part, file["id"].as_i64());
         }),
         "messageVideoNote" => {
             let note = &content["video_note"];
-            let label = duration(note["duration"].as_i64().unwrap_or_default());
-            let file = note["video"]["id"].as_i64();
-            let spec = media_preview(store, note, (ROUND_SIDE, ROUND_SIDE), file, out)
-                .shape(ImageShape::Circle)
-                .label(&label)
-                .play();
-            push(out, conv::image(spec), file);
+            let file = &note["video"];
+            let mut part = video_part(cx, note, file, VideoKind::Round, cx.media.voice, out);
+            if let Part::Video(spec) = &mut part {
+                spec.unheard = unheard(content, "is_viewed", out);
+            }
+            push(out, part, file["id"].as_i64());
         }
         "messageVoiceNote" => with_caption(out, content, |out| {
             let voice = &content["voice_note"];
-            let text = format!(
-                "{} · {}",
-                cx.words.tr("Voice message"),
-                duration(voice["duration"].as_i64().unwrap_or_default())
-            );
-            let file = voice["voice"]["id"].as_i64();
-            push(out, conv::placeholder(Some("icons/mic.svg"), &text), file);
+            let file = &voice["voice"];
+            let id = file["id"].as_i64();
+            if let Some(id) = id {
+                out.files.push(id);
+                if cx.media.voice {
+                    out.auto.push(id);
+                }
+            }
+            let seconds = voice["duration"].as_u64().unwrap_or_default() as u32;
+            let samples = voice["waveform"]
+                .as_str()
+                .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+                .map(|bytes| waveform(&bytes))
+                .unwrap_or_default();
+            let path = file_path(store, file);
+            let mut spec = conv::voice_spec(path.as_deref(), seconds, samples);
+            if path.is_none()
+                && let Some(progress) = file_progress(store, file)
+            {
+                spec = spec.progress(progress);
+            }
+            if unheard(content, "is_listened", out) {
+                spec = spec.unheard();
+            }
+            push(out, conv::voice(spec), id);
         }),
         "messageAudio" => with_caption(out, content, |out| {
             let audio = &content["audio"];
@@ -580,7 +668,13 @@ fn parts(cx: &Context, content: &Value, out: &mut Converted) {
                 .map_or_else(|| cx.words.tr("File"), str::to_string);
             file_part(store, &document["document"], &name, out);
         }),
-        "messageSticker" => sticker(cx, &content["sticker"], out),
+        "messageSticker" => {
+            if !sticker(cx, &content["sticker"], out) {
+                let emoji = content["sticker"]["emoji"].as_str().unwrap_or_default();
+                let text = format!("{emoji} {}", cx.words.tr("Sticker"));
+                push(out, conv::placeholder(None, text.trim()), None);
+            }
+        }
         _ => {
             // A poll, a location, a contact, a game, a story…: a line of what it is.
             let line = content_line(cx, content);
@@ -600,31 +694,121 @@ fn parts(cx: &Context, content: &Value, out: &mut Converted) {
     }
 }
 
-/// A sticker: a static WebP as it is; an animated one (TGS, WEBM) as its still thumbnail until
-/// part 4 plays them; without one — its emoji and the word.
-fn sticker(cx: &Context, sticker: &Value, out: &mut Converted) {
+/// A sticker: a static WebP as it is; an animated one (TGS, WEBM) as its still thumbnail, with
+/// its animation once the helper rendered it (part 4) — the sticker's file downloads by itself
+/// with the GIFs' setting, then the feed asks for the render. False — no picture to show (the
+/// caller shows its emoji).
+fn sticker(cx: &Context, sticker: &Value, out: &mut Converted) -> bool {
     let width = sticker["width"].as_u64().unwrap_or(512) as u32;
     let height = sticker["height"].as_u64().unwrap_or(512) as u32;
-    let file = if sticker["format"]["@type"] == "stickerFormatWebp" {
+    let format = sticker["format"]["@type"].as_str().unwrap_or_default();
+    let animated = matches!(format, "stickerFormatTgs" | "stickerFormatWebm");
+    let file = if format == "stickerFormatWebp" {
         Some(&sticker["sticker"])
     } else {
         let thumbnail = &sticker["thumbnail"];
         still(&thumbnail["format"]).then_some(&thumbnail["file"])
     };
     let Some(file) = file.filter(|file| file["id"].is_i64()) else {
-        let emoji = sticker["emoji"].as_str().unwrap_or_default();
-        let text = format!("{emoji} {}", cx.words.tr("Sticker"));
-        push(out, conv::placeholder(None, text.trim()), None);
-        return;
+        return false;
     };
     let id = file["id"].as_i64().unwrap_or_default();
     out.files.push(id);
     out.auto.push(id);
-    let spec = match file_path(cx.store, file) {
+    let mut spec = match file_path(cx.store, file) {
         Some(path) => conv::picture(&path, width, height),
         None => conv::pending_picture(width, height),
     };
+    if animated && let Some(path) = animation(cx, &sticker["sticker"], STICKER_SIDE, out) {
+        spec = spec.animation(&path, cx.media.loop_stickers);
+    }
     push(out, conv::sticker(spec.shape(ImageShape::Square)), Some(id));
+    true
+}
+
+/// An animated sticker's FXA at `size` pixels, when it is rendered; else what the feed renders
+/// once the file is there (the file downloads by itself with the GIFs' setting).
+pub fn animation(cx: &Context, file: &Value, size: u32, out: &mut Converted) -> Option<String> {
+    let id = file["id"].as_i64()?;
+    let output = cx.media.frames_of(file, size)?;
+    if cx.media.rendered.contains(&output) {
+        return Some(output);
+    }
+    out.files.push(id);
+    if cx.media.gifs && small(cx.store, file) {
+        out.auto.push(id);
+    }
+    out.renders.push(Render {
+        file: id,
+        input: file_path(cx.store, file),
+        output,
+        size,
+    });
+    None
+}
+
+/// A video, a GIF or a round message (part 4): its poster (the thumbnail once downloaded, else
+/// the blurred minithumbnail; the video file's progress), its file once downloaded, its length.
+/// `auto` — its file downloads by itself once on screen; GIFs and rounds play by themselves with
+/// the autoplay setting.
+fn video_part(
+    cx: &Context,
+    media: &Value,
+    file: &Value,
+    kind: VideoKind,
+    auto: bool,
+    out: &mut Converted,
+) -> Part {
+    let size = match kind {
+        VideoKind::Round => (ROUND_SIDE, ROUND_SIDE),
+        _ => size_of(media),
+    };
+    let id = file["id"].as_i64();
+    let poster = media_preview(cx.store, media, size, id, out);
+    if let Some(id) = id.filter(|_| auto) {
+        out.auto.push(id);
+    }
+    let seconds = media["duration"].as_u64().unwrap_or_default() as u32;
+    let path = file_path(cx.store, file);
+    let mut spec = conv::video_spec(kind, poster, path.as_deref(), seconds);
+    if cx.media.autoplay && matches!(kind, VideoKind::Gif | VideoKind::Round) {
+        spec = spec.autoplay();
+    }
+    conv::video(spec)
+}
+
+/// A file small enough to download by itself ([`AUTO_SIZE`]); an unknown size counts as small.
+fn small(store: &Store, file: &Value) -> bool {
+    let size = file["id"]
+        .as_i64()
+        .and_then(|id| store.files.get(&id))
+        .map(|known| known.size)
+        .filter(|size| *size > 0)
+        .or_else(|| file["size"].as_u64().filter(|size| *size > 0))
+        .or_else(|| file["expected_size"].as_u64())
+        .unwrap_or_default();
+    size <= AUTO_SIZE
+}
+
+/// Someone else's voice or round message not listened to (watched) yet: TDLib's `is_listened`
+/// (`is_viewed`) is false.
+fn unheard(content: &Value, key: &str, out: &Converted) -> bool {
+    content[key] == false && !out.message.outgoing
+}
+
+/// Telegram's waveform of a voice message: 5-bit samples packed LSB-first (as `voiceNote.waveform`
+/// carries them, base64 in TDLib's JSON) → values 0–31; as many as whole 5 bits fit.
+pub fn waveform(packed: &[u8]) -> Vec<u8> {
+    let count = packed.len() * 8 / 5;
+    (0..count)
+        .map(|index| {
+            let bit = index * 5;
+            let byte = bit / 8;
+            let pair = u16::from(packed[byte])
+                | packed.get(byte + 1).map_or(0, |next| u16::from(*next) << 8);
+            ((pair >> (bit % 8)) & 0x1f) as u8
+        })
+        .collect()
 }
 
 /// A thumbnail format Flux decodes as a still picture.
@@ -663,6 +847,7 @@ fn photo_spec(
     store: &Store,
     photo: &Value,
     side: i64,
+    auto: bool,
     out: &mut Converted,
 ) -> Option<(ImageSpec, i64)> {
     let sizes: Vec<&Value> = photo["sizes"]
@@ -691,7 +876,9 @@ fn photo_spec(
         shown["height"].as_u64().unwrap_or_default() as u32,
     );
     out.files.push(id);
-    out.auto.push(id);
+    if auto {
+        out.auto.push(id);
+    }
     let mut spec = match file_path(store, file) {
         Some(path) => conv::picture(&path, width, height),
         None => pending(store, file, &photo["minithumbnail"], width, height),
@@ -731,8 +918,9 @@ fn pending(store: &Store, file: &Value, mini: &Value, width: u32, height: u32) -
     spec
 }
 
-/// A video's, a GIF's or a round message's picture: its still thumbnail once downloaded, else
-/// the minithumbnail; the progress is the video file's when it downloads.
+/// A video's, a GIF's or a round message's poster: its still thumbnail once downloaded, else
+/// the minithumbnail; the progress is the video file's when it downloads (the pill and ▶ are
+/// Flux's).
 fn media_preview(
     store: &Store,
     media: &Value,
@@ -790,7 +978,7 @@ fn link_preview(store: &Store, preview: &Value, out: &mut Converted) {
     let photo = [&preview["type"]["photo"], &preview["photo"]]
         .into_iter()
         .find(|photo| photo.is_object());
-    let image = photo.and_then(|photo| photo_spec(store, photo, PREVIEW_SIDE, out));
+    let image = photo.and_then(|photo| photo_spec(store, photo, PREVIEW_SIDE, true, out));
     let file = image.as_ref().map(|(_, file)| *file);
     let part = conv::link_preview(
         url,
@@ -1389,7 +1577,8 @@ mod tests {
         json!({"@type": "file", "id": id, "size": 1229, "expected_size": 1229,
             "local": {"path": path, "is_downloading_active": false,
                 "is_downloading_completed": !path.is_empty(), "downloaded_size": 0},
-            "remote": {"is_uploading_active": false, "uploaded_size": 0}})
+            "remote": {"is_uploading_active": false, "uploaded_size": 0,
+                "unique_id": format!("u{id}")}})
     }
 
     fn store() -> Store {
@@ -1439,11 +1628,21 @@ mod tests {
     }
 
     fn convert_with(store: &Store, value: &Value, replied: Option<&Value>) -> Converted {
+        convert_media(store, value, replied, &MediaOptions::default())
+    }
+
+    fn convert_media(
+        store: &Store,
+        value: &Value,
+        replied: Option<&Value>,
+        media: &MediaOptions,
+    ) -> Converted {
         let cx = Context {
             store,
             words: &English,
             now: 1_763_380_100,
             replied,
+            media,
         };
         convert(&cx, value).unwrap()
     }
@@ -1717,36 +1916,219 @@ mod tests {
     }
 
     #[test]
-    fn shows_media_as_previews_files_and_placeholders() {
-        let store = store();
+    fn unpacks_waveforms() {
+        // 31 in bits 0–4, 1 in bits 5–9: 63 and 0; the third sample is what is left (0).
+        assert_eq!(waveform(&[63, 0]), [31, 1, 0]);
+        assert_eq!(waveform(&[0xff, 0xff]), [31, 31, 31]);
+        assert!(waveform(&[]).is_empty());
+        // Packed LSB-first, as Telegram does: any samples come back as they were.
+        let samples: Vec<u8> = (0..100).map(|i| (i * 7 % 32) as u8).collect();
+        let mut packed = vec![0u8; samples.len() * 5 / 8 + 1];
+        for (index, sample) in samples.iter().enumerate() {
+            let bit = index * 5;
+            let pair = u16::from(*sample) << (bit % 8);
+            packed[bit / 8] |= pair as u8;
+            if bit / 8 + 1 < packed.len() {
+                packed[bit / 8 + 1] |= (pair >> 8) as u8;
+            }
+        }
+        assert_eq!(waveform(&packed)[..samples.len()], samples[..]);
+    }
+
+    #[test]
+    fn shows_media_to_play() {
+        let mut store = store();
+        let media = MediaOptions {
+            frames: "/cache/frames".into(),
+            ..MediaOptions::default()
+        };
         let video = json!({"@type": "messageVideo", "caption": {"text": ""},
             "video": {"duration": 65, "width": 1280, "height": 720,
             "thumbnail": {"format": {"@type": "thumbnailFormatJpeg"}, "width": 320, "height": 180,
                 "file": file(41, "")}, "video": file(42, "")}});
-        let converted = convert_with(&store, &message(1, GROUP, 103, video), None);
-        let Part::Image(spec) = &converted.message.parts[0] else {
-            panic!()
+        let converted = convert_media(&store, &message(1, GROUP, 103, video), None, &media);
+        let Part::Video(spec) = &converted.message.parts[0] else {
+            panic!("{:?}", converted.message.parts)
         };
-        assert_eq!((spec.label.as_deref(), spec.play), (Some("1:05"), true));
+        assert_eq!(
+            (spec.kind, spec.duration, spec.path.clone(), spec.autoplay),
+            (VideoKind::Video, 65, None, false)
+        );
+        // The pill and ▶ are Flux's: the poster has neither.
+        assert_eq!((spec.poster.label.clone(), spec.poster.play), (None, false));
+        assert_eq!((spec.poster.width, spec.poster.height), (1280, 720));
         assert_eq!(converted.part_files, [Some(42)]);
         assert_eq!(converted.auto, [41], "the video waits for a click");
-        let round = json!({"@type": "messageVideoNote", "video_note": {"duration": 12,
-            "length": 384, "thumbnail": null, "video": file(43, "")}});
-        let converted = convert_with(&store, &message(2, GROUP, 103, round), None);
-        let Part::Image(spec) = &converted.message.parts[0] else {
+
+        // A round message: square, plays by itself, unheard until watched; its file downloads
+        // by itself (with voice messages).
+        let round = json!({"@type": "messageVideoNote", "is_viewed": false, "video_note": {
+            "duration": 12, "length": 384, "thumbnail": null,
+            "minithumbnail": {"data": "AAAA"}, "video": file(43, "")}});
+        let converted = convert_media(&store, &message(2, GROUP, 103, round.clone()), None, &media);
+        let Part::Video(spec) = &converted.message.parts[0] else {
             panic!()
         };
         assert_eq!(
-            (spec.shape, spec.label.as_deref()),
-            (ImageShape::Circle, Some("0:12"))
+            (spec.kind, spec.autoplay, spec.unheard),
+            (VideoKind::Round, true, true)
         );
-        let voice = json!({"@type": "messageVoiceNote", "caption": {"text": ""},
-            "voice_note": {"duration": 42, "voice": file(44, "")}});
-        let converted = convert_with(&store, &message(3, GROUP, 103, voice), None);
-        let Part::Placeholder(placeholder) = &converted.message.parts[0] else {
+        assert_eq!((spec.poster.width, spec.poster.height), (240, 240));
+        assert!(spec.poster.preview.is_some());
+        assert_eq!(converted.auto, [43]);
+        // Autoplay off, voice downloads off: ▶ on the poster, a click downloads it.
+        let quiet = MediaOptions {
+            autoplay: false,
+            voice: false,
+            ..media.clone()
+        };
+        let converted = convert_media(&store, &message(2, GROUP, 103, round), None, &quiet);
+        let Part::Video(spec) = &converted.message.parts[0] else {
             panic!()
         };
-        assert_eq!(placeholder.text, "Voice message · 0:42");
+        assert!(!spec.autoplay);
+        assert!(converted.auto.is_empty());
+
+        // A GIF: plays by itself; the user's own round isn't "unheard".
+        let gif = json!({"@type": "messageAnimation", "caption": {"text": "lol"},
+            "animation": {"duration": 3, "width": 480, "height": 270, "thumbnail": null,
+            "animation": file(44, "/f/44.mp4")}});
+        let converted = convert_media(&store, &message(3, GROUP, ME, gif), None, &media);
+        let Part::Video(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert_eq!(
+            (spec.kind, spec.autoplay, spec.path.as_deref()),
+            (VideoKind::Gif, true, Some("/f/44.mp4"))
+        );
+        assert_eq!(spans_of(&converted.message.parts[1])[0].text, "lol");
+
+        // A voice message: its waveform, unheard; downloading — its progress, then the path.
+        let wave = base64::engine::general_purpose::STANDARD.encode([63, 0]);
+        let voice = json!({"@type": "messageVoiceNote", "caption": {"text": ""},
+            "is_listened": false, "voice_note": {"duration": 42, "waveform": wave,
+            "voice": file(45, "")}});
+        let value = message(4, GROUP, 103, voice);
+        let converted = convert_media(&store, &value, None, &media);
+        let Part::Voice(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert_eq!(
+            (
+                spec.duration,
+                spec.waveform.clone(),
+                spec.unheard,
+                spec.path.clone()
+            ),
+            (42, vec![31, 1, 0], true, None)
+        );
+        assert_eq!(converted.auto, [45]);
+        assert_eq!(converted.part_files, [Some(45)]);
+        let mut downloading = file(45, "");
+        downloading["local"]["is_downloading_active"] = json!(true);
+        downloading["local"]["downloaded_size"] = json!(300);
+        downloading["size"] = json!(1200);
+        store.apply(&json!({"@type": "updateFile", "file": downloading}));
+        let converted = convert_media(&store, &value, None, &media);
+        let Part::Voice(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert_eq!(spec.progress, Some(0.25));
+        store.apply(&json!({"@type": "updateFile", "file": file(45, "/f/45.ogg")}));
+        let converted = convert_media(&store, &value, None, &media);
+        let Part::Voice(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert_eq!(
+            (spec.path.as_deref(), spec.progress),
+            (Some("/f/45.ogg"), None)
+        );
+    }
+
+    #[test]
+    fn animates_stickers_once_rendered() {
+        let mut store = store();
+        let mut media = MediaOptions {
+            frames: "/cache/frames".into(),
+            ..MediaOptions::default()
+        };
+        let sticker = json!({"@type": "messageSticker", "sticker": {"width": 512, "height": 512,
+            "emoji": "🚀", "format": {"@type": "stickerFormatTgs"},
+            "thumbnail": {"format": {"@type": "thumbnailFormatWebp"}, "file": file(46, "")},
+            "sticker": file(47, "")}});
+        let value = message(5, GROUP, 103, sticker);
+        let converted = convert_media(&store, &value, None, &media);
+        let Part::Sticker(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert_eq!(spec.animation, None);
+        assert_eq!(converted.part_files, [Some(46)]);
+        // The thumbnail and the sticker's file download by themselves; the render waits for
+        // the file.
+        assert_eq!(converted.auto, [46, 47]);
+        let render = &converted.renders[0];
+        assert_eq!(
+            (
+                render.file,
+                render.input.clone(),
+                render.output.as_str(),
+                render.size
+            ),
+            (47, None, "/cache/frames/u47-320.fxa", 320)
+        );
+        store.apply(&json!({"@type": "updateFile", "file": file(47, "/f/47.tgs")}));
+        let converted = convert_media(&store, &value, None, &media);
+        assert_eq!(converted.renders[0].input.as_deref(), Some("/f/47.tgs"));
+        // Rendered: the animation over the picture, looped as the setting says.
+        media.rendered.insert("/cache/frames/u47-320.fxa".into());
+        media.loop_stickers = false;
+        let converted = convert_media(&store, &value, None, &media);
+        let Part::Sticker(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        let animation = spec.animation.clone().unwrap();
+        assert_eq!(
+            (animation.path.as_str(), animation.looped),
+            ("/cache/frames/u47-320.fxa", false)
+        );
+        assert!(converted.renders.is_empty());
+        // An animated emoji: its sticker the same way; without one — the emoji as text.
+        let emoji = json!({"@type": "messageAnimatedEmoji", "emoji": "❤",
+            "animated_emoji": {"sticker": {"width": 512, "height": 512, "emoji": "❤",
+                "format": {"@type": "stickerFormatTgs"},
+                "thumbnail": {"format": {"@type": "thumbnailFormatWebp"}, "file": file(48, "")},
+                "sticker": file(49, "")}}});
+        let converted = convert_media(&store, &message(6, GROUP, 103, emoji), None, &media);
+        assert!(matches!(converted.message.parts[0], Part::Sticker(_)));
+        assert_eq!(converted.renders[0].output, "/cache/frames/u49-320.fxa");
+        let plain = json!({"@type": "messageAnimatedEmoji", "emoji": "❤",
+            "animated_emoji": {"sticker": null}});
+        let converted = convert_media(&store, &message(7, GROUP, 103, plain), None, &media);
+        assert_eq!(spans_of(&converted.message.parts[0])[0].text, "❤");
+        // A static sticker as it is; a large GIF waits for a click.
+        let webp = json!({"@type": "messageSticker", "sticker": {"width": 512, "height": 512,
+            "emoji": "👍", "format": {"@type": "stickerFormatWebp"}, "thumbnail": null,
+            "sticker": file(50, "/f/50.webp")}});
+        let converted = convert_media(&store, &message(8, GROUP, 103, webp), None, &media);
+        let Part::Sticker(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert_eq!(
+            (spec.path.as_deref(), spec.animation.clone()),
+            (Some("/f/50.webp"), None)
+        );
+        let mut large = file(51, "");
+        large["size"] = json!(40 << 20);
+        let gif = json!({"@type": "messageAnimation", "caption": {"text": ""},
+            "animation": {"duration": 3, "width": 480, "height": 270, "thumbnail": null,
+            "animation": large}});
+        let converted = convert_media(&store, &message(9, GROUP, 103, gif), None, &media);
+        assert!(converted.auto.is_empty());
+    }
+
+    #[test]
+    fn shows_files_and_placeholders() {
+        let store = store();
         let document = json!({"@type": "messageDocument", "caption": {"text": ""},
             "document": {"file_name": "staging.env.example", "document": file(45, "/f/s.env")}});
         let converted = convert_with(&store, &message(4, GROUP, 103, document), None);
@@ -1757,13 +2139,6 @@ mod tests {
             (spec.name.as_str(), spec.size, spec.path.as_deref()),
             ("staging.env.example", 1229, Some("/f/s.env"))
         );
-        let sticker = json!({"@type": "messageSticker", "sticker": {"width": 512, "height": 512,
-            "emoji": "🚀", "format": {"@type": "stickerFormatTgs"},
-            "thumbnail": {"format": {"@type": "thumbnailFormatWebp"}, "file": file(46, "")},
-            "sticker": file(47, "")}});
-        let converted = convert_with(&store, &message(5, GROUP, 103, sticker), None);
-        assert!(matches!(converted.message.parts[0], Part::Sticker(_)));
-        assert_eq!(converted.part_files, [Some(46)]);
         let poll = json!({"@type": "messagePoll", "poll": {"question": {"text": "Lunch?"}}});
         let converted = convert_with(&store, &message(6, GROUP, 103, poll), None);
         let Part::Placeholder(placeholder) = &converted.message.parts[0] else {
@@ -1832,11 +2207,13 @@ mod tests {
         assert_eq!(album_id(&items[0]), 13_800_000_000_000_077);
         assert_eq!(album_id(&json!({"media_album_id": "0"})), 0);
         assert_eq!(album_id(&json!({"media_album_id": -5})), -5);
+        let media = MediaOptions::default();
         let cx = Context {
             store: &store,
             words: &English,
             now: 1_763_380_100,
             replied: None,
+            media: &media,
         };
         let refs: Vec<&Value> = items.iter().collect();
         let shown = album(&cx, &refs).unwrap();
@@ -1847,7 +2224,7 @@ mod tests {
                 shown.message.parts[..],
                 [
                     Part::Image(_),
-                    Part::Image(_),
+                    Part::Video(_),
                     Part::Image(_),
                     Part::Text(_)
                 ]
@@ -1855,10 +2232,10 @@ mod tests {
             "{:?}",
             shown.message.parts
         );
-        let Part::Image(clip) = &shown.message.parts[1] else {
+        let Part::Video(clip) = &shown.message.parts[1] else {
             panic!()
         };
-        assert_eq!((clip.label.as_deref(), clip.play), (Some("1:05"), true));
+        assert_eq!((clip.kind, clip.duration), (VideoKind::Video, 65));
         assert_eq!(shown.part_files, [Some(31), Some(42), Some(33), None]);
         assert_eq!(
             spans_of(&shown.message.parts[3])[0].text,

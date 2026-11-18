@@ -824,7 +824,8 @@ fn member_row(member: &Member) -> RowSpec {
 }
 
 /// A gallery's square: the small picture (or the blurred minithumbnail), the full size for the
-/// viewer, a video's length and ▶, a download's progress.
+/// viewer, a download's progress; a video (or a GIF) Flux plays in its viewer, its length in the
+/// corner (part 4).
 fn square(item: &Item) -> flux_plugin_api::host::ui::GalleryItem {
     let media = &item.item;
     let mut spec = match &media.picture {
@@ -842,13 +843,16 @@ fn square(item: &Item) -> flux_plugin_api::host::ui::GalleryItem {
     if let Some(progress) = media.progress {
         spec = spec.progress(progress);
     }
-    if let Some(label) = &media.label {
-        spec = spec.label(label);
-    }
+    let key = media.message.to_string();
     if media.play {
-        spec = spec.play();
+        let kind = match media.gif {
+            true => conv::VideoKind::Gif,
+            false => conv::VideoKind::Video,
+        };
+        let video = conv::video_spec(kind, spec, media.path.as_deref(), media.duration);
+        return gallery_video(&key, video, media.group.as_deref());
     }
-    gallery_item(&media.message.to_string(), spec, media.group.as_deref())
+    gallery_item(&key, spec, media.group.as_deref())
 }
 
 /// A row of files, links or voice messages: what it is, its date, its size or length (or the

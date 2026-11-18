@@ -316,6 +316,17 @@ pub enum Request {
         message: String,
         quote: Option<(String, u32)>,
     },
+    /// A voice or round message (the message's `part`) played for the first time (part 4): it is
+    /// listened to in Telegram.
+    MediaPlayed {
+        key: ChatKey,
+        message: String,
+        part: u32,
+    },
+    /// The field's panel of stickers and GIFs (part 4, `panel.rs`).
+    Panel(crate::panel::PanelAsk),
+    /// Clear Cache in Settings, confirmed: the media files and the rendered animations go.
+    ClearCache,
 
     // --- Profiles and media (part 3+, `profile.rs`) ---
     /// What the profile dialog asks: a person's or a group's profile, the members, the media.

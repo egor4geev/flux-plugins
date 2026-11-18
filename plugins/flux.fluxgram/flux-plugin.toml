@@ -85,3 +85,77 @@ location = "dialog"
 id = "sign-in"
 title = "Add Account"
 location = "dialog"
+
+# Settings → FluxGram → Media (part 4): what plays by itself, what downloads by itself, the cache.
+[[commands]]
+id = "clear-cache"
+title = "Clear Cache"
+category = "FluxGram"
+palette = false
+
+[[settings]]
+key = "media"
+type = "section"
+title = "Media"
+
+[[settings]]
+key = "autoplay"
+type = "bool"
+title = "Autoplay GIFs and video messages"
+description = "Without sound, while they are on screen."
+default = true
+
+[[settings]]
+key = "loop-stickers"
+type = "bool"
+title = "Loop animated stickers"
+default = true
+
+[[settings]]
+key = "auto-download"
+type = "section"
+title = "Auto-download"
+description = "What downloads by itself once it is on screen. Videos and files download on a click."
+
+[[settings]]
+key = "download-photos"
+type = "bool"
+title = "Photos"
+default = true
+
+[[settings]]
+key = "download-voice"
+type = "bool"
+title = "Voice and video messages"
+default = true
+
+[[settings]]
+key = "download-gifs"
+type = "bool"
+title = "GIFs and stickers"
+default = true
+
+[[settings]]
+key = "cache"
+type = "section"
+title = "Cache"
+description = "Downloaded media is kept on this computer. Past the limit, what you've seen longest ago goes."
+
+[[settings]]
+key = "cache-limit"
+type = "choice"
+title = "Size limit"
+default = "2"
+options = [
+    { value = "1", title = "1 GB" },
+    { value = "2", title = "2 GB" },
+    { value = "5", title = "5 GB" },
+    { value = "10", title = "10 GB" },
+    { value = "0", title = "No limit" },
+]
+
+[[settings]]
+key = "clear-cache-button"
+type = "button"
+title = "Clear Cache"
+command = "clear-cache"
