@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tdlib-${{ github.ref }}
+  group: tdlib-build-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -213,8 +213,12 @@ jobs:
             tdsqlite tde2e tdactor tdutils; do
             cp "tdlib/lib/$name.lib" pack/tdlib/lib/
           done
-          cp "$INSTALLED/lib/libssl.lib" "$INSTALLED/lib/libcrypto.lib" "$INSTALLED/lib/zlib.lib" \
-            pack/tdlib/lib/
+          cp "$INSTALLED/lib/libssl.lib" "$INSTALLED/lib/libcrypto.lib" pack/tdlib/lib/
+          # zlib's static library is `zs.lib` since 1.3.2's CMake (`zlib.lib` before): build.rs
+          # links `zlib.lib`.
+          zlib="$INSTALLED/lib/zs.lib"
+          if [ ! -f "$zlib" ]; then zlib="$INSTALLED/lib/zlib.lib"; fi
+          cp "$zlib" pack/tdlib/lib/zlib.lib
 
       # What the helper's checks rely on, in the log: macOS — every object for macOS 12 (`minos`),
       # and whether libc++'s `__libcpp_verbose_abort` (macOS 13.3+) is called; Windows — the C
