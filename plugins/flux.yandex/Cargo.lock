@@ -72,8 +72,8 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "flux-plugin-api"
-version = "0.1.0"
-source = "git+https://github.com/egor4geev/flux?rev=14bba127222980a9d57f3b5d6ec8b4a67eb967fc#14bba127222980a9d57f3b5d6ec8b4a67eb967fc"
+version = "0.6.0"
+source = "git+https://github.com/egor4geev/flux?rev=5da5bdba4b396cd0a8a9c26e269758eba860e110#5da5bdba4b396cd0a8a9c26e269758eba860e110"
 dependencies = [
  "serde",
  "serde_json",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "flux-yandex"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "flux-plugin-api",

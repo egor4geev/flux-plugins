@@ -311,7 +311,7 @@ impl Auth {
 
     /// The ID and the type by hand; `error` — what was wrong with the last answer.
     fn ask_organization_id(&mut self, typed: Option<(&str, &str)>, error: Option<&str>) {
-        let (id, kind) = typed.unwrap_or_else(|| match &self.organization {
+        let (id, kind) = typed.unwrap_or(match &self.organization {
             Some(current) => (
                 current.id.as_str(),
                 match current.kind {

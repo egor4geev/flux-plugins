@@ -1,0 +1,82 @@
+# Flux Remote: Flux's Claude sessions from the phone, through the user's own Telegram bot. The
+# service polls the bot (`getUpdates`: outgoing HTTPS to Telegram only — no server, no ports) and
+# keeps a topic of the bot's private chat per Claude session: the user's messages go to the session,
+# Claude's answer comes as it is written, the permissions, questions and the plan as buttons.
+# «Общее» (General) is the console: one message with every session's state; while the Mac is
+# locked, every session's questions come there too.
+id = "flux.remote"
+name = "Flux Remote"
+version = "0.1.0"
+api = "0.6"
+authors = ["Egor Ageev"]
+description = "Claude from your phone: your own Telegram bot runs Flux's Claude sessions — a topic per session, answers as they are written, permissions and questions by buttons."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/remote.svg"
+wasm = "target/wasm32-wasip2/release/flux_remote.wasm"
+# One instance for the whole app polls the bot and watches every session.
+service = true
+
+[permissions]
+claude-remote = true
+# «From a task» in a new chat: the tracker's tasks and its Claude actions.
+tasks = true
+network = ["api.telegram.org"]
+
+# At a session in the Claude console: the bot opens a topic for it with its last answer.
+[[claude-actions]]
+id = "continue"
+title = "Continue in Telegram"
+
+# Settings → Flux Remote: the bot's token and its state, the binding to the owner (the link with a
+# one-time code and its QR code), the messages that came while Flux was closed, the computer's
+# sleep. The bot's `/settings` shows and changes the same values.
+[[settings]]
+key = "bot"
+type = "section"
+title = "Bot"
+
+[[settings]]
+key = "token"
+type = "secret"
+title = "Bot Token"
+description = "Make a bot with @BotFather in Telegram, turn on its topics there and paste its token here."
+
+[[settings]]
+key = "connection"
+type = "status"
+title = "Connection"
+
+[[tool-windows]]
+id = "binding"
+title = "Binding"
+location = "settings"
+
+# The user's words that came while Flux was closed or the computer slept.
+[[settings]]
+key = "messages"
+type = "section"
+title = "Messages"
+
+[[settings]]
+key = "late-messages"
+type = "choice"
+default = "ask"
+title = "Messages that came while Flux was closed"
+description = "Those that came while Flux was closed or the computer slept."
+options = [
+    { value = "ask", title = "Ask" },
+    { value = "always", title = "Run always" },
+    { value = "never", title = "Don't run" },
+]
+
+[[settings]]
+key = "computer"
+type = "section"
+title = "Computer"
+
+[[settings]]
+key = "awake-on-power"
+type = "bool"
+default = false
+title = "Don't sleep on the power adapter while the bot is on"
+description = "While remote sessions work, the computer stays awake anyway. A closed lid still puts a laptop to sleep."

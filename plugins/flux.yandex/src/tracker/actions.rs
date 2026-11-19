@@ -1,9 +1,15 @@
 //! The Claude actions of the settings (`actions`, records): a name, a prompt with the task's data
 //! in `{…}`, Claude's mode, whether the task is taken to work first, whether the board shows it.
-//! The board's button is the favorite one — the first marked, else the first.
+//! The board's button is the favorite one — the first marked, else the first. Another plugin (the
+//! task source, [`super::source`]) gets them as a task's actions, each named by its name.
 
+use flux_plugin_api::tasks::{self, TaskAction};
+#[cfg(not(test))]
+use flux_plugin_api::tr;
 use serde::Deserialize;
 
+#[cfg(test)]
+use super::facts::tr;
 use super::model::{Comment, Issue, IssueLink, value_text};
 use crate::client;
 use crate::settings;
@@ -40,7 +46,21 @@ impl Action {
     /// The name as the user reads it: the manifest's defaults (Take to Work, Plan) in the user's
     /// language, one's own as written.
     pub fn title(&self) -> String {
-        flux_plugin_api::tr(&self.name)
+        tr(&self.name)
+    }
+
+    /// The action as a task's, for another plugin: its id is its name — the user may reorder the
+    /// actions, the name stays — its title as the card's button reads, plan mode, whether the task
+    /// is taken to work first.
+    pub fn task_action(&self) -> TaskAction {
+        let name = self.name.trim();
+        let action = tasks::action(name, &tr(name));
+        let action = if self.mode == Mode::Plan {
+            action.plan()
+        } else {
+            action
+        };
+        if self.start { action.start() } else { action }
     }
 }
 
@@ -51,6 +71,14 @@ pub fn actions() -> Vec<Action> {
         .into_iter()
         .filter(|action| !action.name.trim().is_empty())
         .collect()
+}
+
+/// The action another plugin's run names by its id ([`Action::task_action`]): the first of that
+/// name.
+pub fn by_id<'a>(actions: &'a [Action], id: &str) -> Option<&'a Action> {
+    actions
+        .iter()
+        .find(|action| action.name.trim() == id.trim())
 }
 
 /// The board's action: the first marked, else the first.
@@ -317,6 +345,35 @@ mod tests {
         assert!(actions[0].start);
         assert_eq!(actions[1].mode, Mode::Plan);
         assert!(!actions[1].favorite);
+    }
+
+    #[test]
+    fn other_plugins_get_the_actions_by_their_names() {
+        let actions: Vec<Action> = serde_json::from_str(
+            r#"[{"name": "Take to Work", "prompt": "Do {key}", "mode": "default", "start": true, "favorite": true},
+                {"name": " ДПТ ", "prompt": "Plan {key}", "mode": "plan"}]"#,
+        )
+        .unwrap();
+        let given: Vec<(String, String, bool, bool)> = actions
+            .iter()
+            .map(Action::task_action)
+            .map(|action| (action.id, action.title, action.plan, action.start))
+            .collect();
+        assert_eq!(
+            given,
+            [
+                ("Take to Work".into(), "Take to Work".into(), false, true),
+                ("ДПТ".into(), "ДПТ".into(), true, false),
+            ]
+        );
+        // Reordered in the settings, they are found by the same ids.
+        let reordered = [actions[1].clone(), actions[0].clone()];
+        assert_eq!(
+            by_id(&reordered, "Take to Work").unwrap().prompt,
+            "Do {key}"
+        );
+        assert_eq!(by_id(&reordered, "ДПТ").unwrap().mode, Mode::Plan);
+        assert!(by_id(&reordered, "Plan").is_none());
     }
 
     #[test]

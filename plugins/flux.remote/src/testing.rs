@@ -1,0 +1,726 @@
+//! A fake Flux for the native tests: [`FakeHost`] records what the bot asks for — Telegram's calls
+//! (their method and JSON), Claude's calls as readable lines, timers, the storage — and answers
+//! from what the test put in. [`reply`] finishes a Telegram call as Telegram would; [`settle`]
+//! answers every call in flight.
+
+use std::collections::BTreeMap;
+
+use flux_plugin_api::remote::{
+    Awake, Mode, Project, RegionState, Response, RollbackCheck, Session, SessionState, SystemState,
+    TranscriptItem, UsageLimits,
+};
+use flux_plugin_api::settings::Tone;
+use flux_plugin_api::tasks::{Task, TaskRun, TaskStarted};
+use serde_json::{Value, json};
+
+use crate::bot::Bot;
+use crate::host::{Host, NewSession};
+use crate::model::ToWindow;
+
+pub struct FakeHost {
+    next: u64,
+    /// Started requests: (id, URL, body).
+    pub http: Vec<(u64, String, Vec<u8>)>,
+    /// Of them, the GETs (the files' downloads).
+    pub gets: std::collections::BTreeSet<u64>,
+    /// The plugin's data folder: a new one in the system's temporary folder.
+    pub data: String,
+    pub cancelled: Vec<u64>,
+    /// Started timers: (id, ms).
+    pub timers: Vec<(u64, u32)>,
+    pub now: u64,
+    pub storage: BTreeMap<String, Value>,
+    pub secrets: BTreeMap<String, String>,
+    pub settings: BTreeMap<String, Value>,
+    pub statuses: BTreeMap<String, String>,
+    pub logs: Vec<String>,
+    /// Flux's notifications: their titles.
+    pub notices: Vec<String>,
+    pub windows: Vec<ToWindow>,
+    /// What `sessions()` returns.
+    pub sessions: Vec<Session>,
+    pub projects: Vec<Project>,
+    pub transcript: Vec<TranscriptItem>,
+    pub system: SystemState,
+    /// Claude's calls, as lines: "send <session> <text>", "answer <session> <request> <response>",
+    /// "interrupt <session>", "mode <session> <mode>", "new <project> <prompt>", "awake <mode>",
+    /// "diff|check|rollback <session> <turn>"; and the tasks' ("tasks mine", "tasks search
+    /// <words>", "task <key>", "run <key> <action> <project>" — [`FakeHost::fail`] isn't theirs).
+    pub claude: Vec<String>,
+    /// The next new session's id.
+    pub new_session_id: String,
+    /// The new sessions asked for, whole.
+    pub started: Vec<NewSession>,
+    /// The next Claude call fails with this.
+    pub fail: Option<String>,
+    /// What `limits()` returns (none — it fails).
+    pub limits: Option<UsageLimits>,
+    /// What `region()` returns.
+    pub region: RegionState,
+    /// What `turn_diff()` returns.
+    pub diff: String,
+    /// What `check_rollback()` returns.
+    pub rollback: RollbackCheck,
+    /// The user's tasks (`my_tasks`, `search_tasks` by a word of the key or the title, `task` by
+    /// its key); none — no source (the calls fail).
+    pub tasks: Option<Vec<Task>>,
+    /// The tracker's own failure for `my_tasks` (signed out…), over `tasks`.
+    pub tasks_error: Option<String>,
+    /// What `run_task()` returns; none — a session with [`FakeHost::new_session_id`].
+    pub run: Option<Result<TaskStarted, String>>,
+}
+
+/// Each fake's own data folder.
+static DATA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Default for FakeHost {
+    fn default() -> Self {
+        let data = std::env::temp_dir().join(format!(
+            "flux-remote-test-{}-{}",
+            std::process::id(),
+            DATA.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        FakeHost {
+            next: 0,
+            http: Vec::new(),
+            gets: Default::default(),
+            data: data.to_string_lossy().into_owned(),
+            cancelled: Vec::new(),
+            timers: Vec::new(),
+            now: 1_795_000_000_000,
+            storage: BTreeMap::new(),
+            secrets: BTreeMap::new(),
+            settings: BTreeMap::new(),
+            statuses: BTreeMap::new(),
+            logs: Vec::new(),
+            notices: Vec::new(),
+            windows: Vec::new(),
+            sessions: Vec::new(),
+            projects: Vec::new(),
+            transcript: Vec::new(),
+            system: SystemState {
+                screen_locked: false,
+                on_power: true,
+            },
+            claude: Vec::new(),
+            new_session_id: "11111111-2222-3333-4444-555555555555".into(),
+            started: Vec::new(),
+            fail: None,
+            limits: None,
+            region: RegionState::Allowed,
+            diff: String::new(),
+            rollback: RollbackCheck {
+                files: Vec::new(),
+                changed_since: Vec::new(),
+                created: Vec::new(),
+            },
+            tasks: None,
+            tasks_error: None,
+            run: None,
+        }
+    }
+}
+
+impl Drop for FakeHost {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.data);
+    }
+}
+
+impl FakeHost {
+    fn id(&mut self) -> u64 {
+        self.next += 1;
+        self.next
+    }
+
+    fn claude_call(&mut self, line: String) -> Result<(), String> {
+        self.claude.push(line);
+        match self.fail.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Telegram's calls so far: (request id, method, parameters).
+    pub fn tg_calls(&self) -> Vec<(u64, String, Value)> {
+        self.http
+            .iter()
+            .map(|(id, url, body)| {
+                let method = url.rsplit('/').next().unwrap_or_default().to_string();
+                (*id, method, params_of(body))
+            })
+            .collect()
+    }
+
+    /// The last call of a method: (request id, parameters).
+    pub fn last_call(&self, method: &str) -> Option<(u64, Value)> {
+        self.tg_calls()
+            .into_iter()
+            .rev()
+            .find(|(_, name, _)| name == method)
+            .map(|(id, _, params)| (id, params))
+    }
+}
+
+/// A call's parameters: its JSON, or the fields of a `multipart/form-data` upload — a field as JSON
+/// when it is (numbers, buttons), the file as `{"filename", "text"}`.
+fn params_of(body: &[u8]) -> Value {
+    if let Ok(value) = serde_json::from_slice(body) {
+        return value;
+    }
+    let text = String::from_utf8_lossy(body);
+    let Some(boundary) = text.lines().next().and_then(|line| line.strip_prefix("--")) else {
+        return Value::Null;
+    };
+    let mut params = serde_json::Map::new();
+    for part in text.split(&format!("--{boundary}")) {
+        let Some((head, content)) = part.split_once("\r\n\r\n") else {
+            continue;
+        };
+        let content = content.strip_suffix("\r\n").unwrap_or(content);
+        let field = |name: &str| {
+            head.split(&format!("{name}=\""))
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .map(str::to_string)
+        };
+        let Some(name) = field("name") else {
+            continue;
+        };
+        let value = match field("filename") {
+            Some(filename) => json!({ "filename": filename, "text": content }),
+            None => serde_json::from_str(content).unwrap_or_else(|_| json!(content)),
+        };
+        params.insert(name, value);
+    }
+    Value::Object(params)
+}
+
+/// Finishes a request with Telegram's `ok` and this result.
+pub fn reply(bot: &mut Bot, host: &mut FakeHost, request: u64, result: Value) {
+    let body = serde_json::to_vec(&json!({ "ok": true, "result": result })).unwrap();
+    bot.on_http_head(request, 200);
+    bot.on_http_body(request, &body);
+    bot.on_http_done(host, request, None);
+}
+
+/// Answers every Telegram call in flight but the poll, as Telegram would — `getMe` with a bot whose
+/// topics are on, a topic (threads 500, 501… in the order they were asked for), a message (its id is
+/// 600 + the request's), `true` — until none is left. Timers aren't fired.
+pub fn settle(bot: &mut Bot, host: &mut FakeHost) {
+    let mut answered = std::collections::BTreeSet::new();
+    loop {
+        let calls = host.tg_calls();
+        let open = calls
+            .iter()
+            .find(|(id, method, _)| method != "getUpdates" && !answered.contains(id));
+        let Some((id, method, params)) = open.cloned() else {
+            return;
+        };
+        answered.insert(id);
+        let result = match method.as_str() {
+            "getMe" => json!({
+                "id": 77, "is_bot": true, "first_name": "Flux", "username": "flux_bot",
+                "has_topics_enabled": true
+            }),
+            "createForumTopic" => {
+                let before = calls
+                    .iter()
+                    .filter(|(other, method, _)| method == "createForumTopic" && *other < id)
+                    .count();
+                json!({ "message_thread_id": 500 + before as i64, "name": params["name"] })
+            }
+            "sendMessage" | "sendRichMessage" | "editMessageText" => json!({
+                "message_id": 600 + id as i64,
+                "chat": { "id": params["chat_id"], "type": "private" },
+            }),
+            _ => json!(true),
+        };
+        reply(bot, host, id, result);
+    }
+}
+
+/// A session as Flux tells of it.
+pub fn session(id: &str, project: &str, state: SessionState) -> Session {
+    Session {
+        id: id.into(),
+        project: project.into(),
+        title: String::new(),
+        state,
+        activity: String::new(),
+        mode: Mode::Ask,
+        window: Some(1),
+        updated: 1_795_000_000,
+        request: None,
+        unseen: false,
+    }
+}
+
+/// Finishes a request with Telegram's error.
+pub fn reply_error(bot: &mut Bot, host: &mut FakeHost, request: u64, code: u16, description: &str) {
+    let body =
+        serde_json::to_vec(&json!({ "ok": false, "error_code": code, "description": description }))
+            .unwrap();
+    bot.on_http_head(request, code);
+    bot.on_http_body(request, &body);
+    bot.on_http_done(host, request, None);
+}
+
+impl Host for FakeHost {
+    fn http_post(&mut self, url: &str, body: Vec<u8>, _timeout_ms: u32) -> u64 {
+        let id = self.id();
+        self.http.push((id, url.into(), body));
+        id
+    }
+
+    fn http_post_raw(
+        &mut self,
+        url: &str,
+        _content_type: &str,
+        body: Vec<u8>,
+        timeout_ms: u32,
+    ) -> u64 {
+        self.http_post(url, body, timeout_ms)
+    }
+
+    fn http_get(&mut self, url: &str, _timeout_ms: u32) -> u64 {
+        let id = self.id();
+        self.http.push((id, url.into(), Vec::new()));
+        self.gets.insert(id);
+        id
+    }
+
+    fn http_cancel(&mut self, request: u64) {
+        self.cancelled.push(request);
+    }
+
+    fn timer(&mut self, ms: u32) -> u64 {
+        let id = self.id();
+        self.timers.push((id, ms));
+        id
+    }
+
+    fn cancel_timer(&mut self, timer: u64) {
+        self.timers.retain(|(id, _)| *id != timer);
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.now
+    }
+
+    fn random(&mut self, bytes: usize) -> Vec<u8> {
+        // Another value each call (a new code differs from the old one), the same in every run.
+        let salt = self.id() as u8;
+        (0..bytes)
+            .map(|index| {
+                (index as u8)
+                    .wrapping_mul(37)
+                    .wrapping_add(11)
+                    .wrapping_add(salt)
+            })
+            .collect()
+    }
+
+    fn data_dir(&self) -> String {
+        self.data.clone()
+    }
+
+    fn load(&self, key: &str) -> Option<Value> {
+        self.storage.get(key).cloned()
+    }
+
+    fn save(&mut self, key: &str, value: Option<&Value>) {
+        match value {
+            Some(value) => self.storage.insert(key.into(), value.clone()),
+            None => self.storage.remove(key),
+        };
+    }
+
+    fn secret(&self, key: &str) -> Option<String> {
+        self.secrets.get(key).cloned()
+    }
+
+    fn setting(&self, key: &str) -> Option<Value> {
+        self.settings.get(key).cloned()
+    }
+
+    fn set_setting(&mut self, key: &str, value: &Value) -> Result<(), String> {
+        self.settings.insert(key.into(), value.clone());
+        Ok(())
+    }
+
+    fn status(&mut self, key: &str, line: Option<(&str, Tone, bool)>) {
+        match line {
+            Some((text, _, _)) => self.statuses.insert(key.into(), text.into()),
+            None => self.statuses.remove(key),
+        };
+    }
+
+    fn tr(&self, text: &str) -> String {
+        text.into()
+    }
+
+    fn log(&mut self, text: &str) {
+        self.logs.push(text.into());
+    }
+
+    fn notify(&mut self, title: &str) {
+        self.notices.push(title.into());
+    }
+
+    fn utc_offset(&self, _at: i64) -> i32 {
+        0
+    }
+
+    fn broadcast(&mut self, message: &ToWindow) {
+        self.windows.push(message.clone());
+    }
+
+    fn watch(&mut self, on: bool) -> Result<(), String> {
+        self.claude_call(format!("watch {on}"))
+    }
+
+    fn sessions(&mut self) -> Result<Vec<Session>, String> {
+        Ok(self.sessions.clone())
+    }
+
+    fn transcript(&mut self, session: &str, count: u32) -> Result<Vec<TranscriptItem>, String> {
+        self.claude_call(format!("transcript {session} {count}"))?;
+        Ok(self.transcript.clone())
+    }
+
+    fn send(&mut self, session: &str, text: &str, images: &[String]) -> Result<(), String> {
+        let images = if images.is_empty() {
+            String::new()
+        } else {
+            format!(" +{}", images.join(","))
+        };
+        self.claude_call(format!("send {session} {text}{images}"))
+    }
+
+    fn answer(&mut self, session: &str, request: &str, response: &Response) -> Result<(), String> {
+        self.claude_call(format!("answer {session} {request} {response:?}"))
+    }
+
+    fn interrupt(&mut self, session: &str) -> Result<(), String> {
+        self.claude_call(format!("interrupt {session}"))
+    }
+
+    fn set_mode(&mut self, session: &str, mode: Mode) -> Result<(), String> {
+        self.claude_call(format!("mode {session} {mode:?}"))
+    }
+
+    fn rename(&mut self, session: &str, title: &str) -> Result<(), String> {
+        self.claude_call(format!("rename {session} {title}"))
+    }
+
+    fn close(&mut self, session: &str) -> Result<(), String> {
+        self.claude_call(format!("close {session}"))
+    }
+
+    fn new_session(&mut self, spec: &NewSession) -> Result<String, String> {
+        let images = if spec.images.is_empty() {
+            String::new()
+        } else {
+            format!(" +{}", spec.images.join(","))
+        };
+        self.claude_call(format!(
+            "new {} {}{images}",
+            spec.project,
+            spec.prompt.as_deref().unwrap_or_default()
+        ))?;
+        self.started.push(spec.clone());
+        Ok(self.new_session_id.clone())
+    }
+
+    fn projects(&mut self) -> Result<Vec<Project>, String> {
+        Ok(self.projects.clone())
+    }
+
+    fn set_awake(&mut self, awake: Awake) -> Result<(), String> {
+        self.claude_call(format!("awake {awake:?}"))
+    }
+
+    fn system_status(&mut self) -> Result<SystemState, String> {
+        Ok(self.system)
+    }
+
+    fn limits(&mut self) -> Result<UsageLimits, String> {
+        self.claude_call("limits".into())?;
+        self.limits.ok_or_else(|| "Claude Code isn't ready".into())
+    }
+
+    fn region(&mut self, check_again: bool) -> Result<RegionState, String> {
+        self.claude_call(format!("region {check_again}"))?;
+        Ok(self.region.clone())
+    }
+
+    fn turn_diff(&mut self, session: &str, turn: u32) -> Result<String, String> {
+        self.claude_call(format!("diff {session} {turn}"))?;
+        Ok(self.diff.clone())
+    }
+
+    fn check_rollback(&mut self, session: &str, turn: u32) -> Result<RollbackCheck, String> {
+        self.claude_call(format!("check {session} {turn}"))?;
+        Ok(self.rollback.clone())
+    }
+
+    fn rollback(&mut self, session: &str, turn: u32) -> Result<(), String> {
+        self.claude_call(format!("rollback {session} {turn}"))
+    }
+
+    fn my_tasks(&mut self) -> Result<Vec<Task>, String> {
+        self.claude.push("tasks mine".into());
+        if let Some(error) = &self.tasks_error {
+            return Err(error.clone());
+        }
+        self.tasks
+            .clone()
+            .ok_or_else(|| "No plugin gives tasks".into())
+    }
+
+    fn search_tasks(&mut self, words: &str) -> Result<Vec<Task>, String> {
+        self.claude.push(format!("tasks search {words}"));
+        let words = words.to_lowercase();
+        Ok(self
+            .tasks
+            .clone()
+            .ok_or("No plugin gives tasks")?
+            .into_iter()
+            .filter(|task| {
+                format!("{} {}", task.key, task.title)
+                    .to_lowercase()
+                    .contains(&words)
+            })
+            .collect())
+    }
+
+    fn task(&mut self, key: &str) -> Result<Option<Task>, String> {
+        self.claude.push(format!("task {key}"));
+        Ok(self
+            .tasks
+            .clone()
+            .ok_or("No plugin gives tasks")?
+            .into_iter()
+            .find(|task| task.key == key))
+    }
+
+    fn run_task(&mut self, run: &TaskRun) -> Result<TaskStarted, String> {
+        self.claude
+            .push(format!("run {} {} {}", run.key, run.action, run.project));
+        self.run.clone().unwrap_or_else(|| {
+            Ok(TaskStarted {
+                session: self.new_session_id.clone(),
+                notes: Vec::new(),
+            })
+        })
+    }
+}
+
+// --- Agent B: a bound bot, Telegram answering in order, the user's updates ---
+
+/// The owner of [`bound_bot`] (and so the private chat).
+pub const OWNER: i64 = 5;
+/// «Общее» of [`bound_bot`].
+pub const GENERAL: i64 = 900;
+
+/// A bot bound to [`OWNER`] with «Общее» made, its calls going (no polling).
+pub fn bound_bot(host: &mut FakeHost) -> Bot {
+    let mut bot = Bot::new(host);
+    bot.store.owner = Some(crate::store::Owner {
+        id: OWNER,
+        name: "Egor".into(),
+    });
+    bot.store.general = Some(GENERAL);
+    bot.tg.set_token(host, Some("1:T".into()));
+    bot
+}
+
+/// The transport's pauses [`Telegram::flush`] lets pass (longer ones are the modules': the
+/// thinking draft's refresh, the binding code's end).
+pub const SHORT_TIMER_MS: u32 = 3_000;
+
+/// Telegram answering the bot's calls one by one, as it would: a message gets a new id.
+#[derive(Default)]
+pub struct Telegram {
+    answered: std::collections::BTreeSet<u64>,
+    messages: i64,
+    topics: i64,
+}
+
+impl Telegram {
+    /// Answers every call until none waits — the transport's own pauses (a draft's pace, a
+    /// `Latest` call's, a retry: up to [`SHORT_TIMER_MS`]) pass as their time comes: the calls, as
+    /// (method, parameters).
+    pub fn flush(&mut self, bot: &mut Bot, host: &mut FakeHost) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        loop {
+            // A file's download: its bytes are "bytes of <its path>".
+            if let Some((id, url, _)) = host
+                .http
+                .iter()
+                .find(|(id, _, _)| host.gets.contains(id) && !self.answered.contains(id))
+                .cloned()
+            {
+                self.answered.insert(id);
+                let path = url.split_once("/file/bot").map_or("", |(_, rest)| {
+                    rest.split_once('/').map_or("", |(_, path)| path)
+                });
+                bot.on_http_head(id, 200);
+                bot.on_http_body(id, format!("bytes of {path}").as_bytes());
+                bot.on_http_done(host, id, None);
+                out.push(("GET".into(), json!({ "path": path })));
+                continue;
+            }
+            let Some((id, method, params)) = host.tg_calls().into_iter().find(|(id, method, _)| {
+                method != "getUpdates" && !self.answered.contains(id) && !host.gets.contains(id)
+            }) else {
+                let Some(&(timer, ms)) = host.timers.iter().find(|(_, ms)| *ms <= SHORT_TIMER_MS)
+                else {
+                    break;
+                };
+                host.timers.retain(|(id, _)| *id != timer);
+                host.now += u64::from(ms);
+                bot.on_timer(host, timer);
+                continue;
+            };
+            self.answered.insert(id);
+            let result = match method.as_str() {
+                "sendMessage" | "sendRichMessage" | "editMessageText" | "sendDocument" => {
+                    self.messages += 1;
+                    let id = params["message_id"].as_i64().unwrap_or(100 + self.messages);
+                    json!({ "message_id": id, "chat": { "id": OWNER, "type": "private" },
+                            "message_thread_id": params["message_thread_id"] })
+                }
+                // A photo's file is a JPEG, a document's keeps no name.
+                "getFile" => {
+                    let file = params["file_id"].as_str().unwrap_or_default();
+                    let path = if file.starts_with("photo") {
+                        format!("photos/{file}.jpg")
+                    } else {
+                        format!("documents/{file}")
+                    };
+                    json!({ "file_id": file, "file_size": 1000, "file_path": path })
+                }
+                // Topics 800, 801… in the order they were asked for.
+                "createForumTopic" => {
+                    self.topics += 1;
+                    json!({ "message_thread_id": 799 + self.topics, "name": params["name"] })
+                }
+                _ => json!(true),
+            };
+            out.push((method, params));
+            reply(bot, host, id, result);
+        }
+        out
+    }
+
+    /// Answers the next call with Telegram's error instead.
+    pub fn refuse(&mut self, bot: &mut Bot, host: &mut FakeHost, description: &str) -> String {
+        let (id, method, _) = host
+            .tg_calls()
+            .into_iter()
+            .find(|(id, method, _)| {
+                method != "getUpdates" && !self.answered.contains(id) && !host.gets.contains(id)
+            })
+            .expect("a call waits");
+        self.answered.insert(id);
+        reply_error(bot, host, id, 400, description);
+        method
+    }
+}
+
+/// [`FakeHost`]'s clock at the start, in seconds: the date of the user's messages.
+pub const NOW_S: i64 = 1_795_000_000;
+
+/// The owner's message in a topic (none — outside topics), sent at [`NOW_S`].
+pub fn user_message(update: i64, thread: Option<i64>, text: &str) -> crate::telegram::Update {
+    let mut message = json!({
+        "message_id": 10_000 + update, "from": { "id": OWNER, "is_bot": false, "first_name": "Egor" },
+        "chat": { "id": OWNER, "type": "private" }, "date": NOW_S, "text": text,
+    });
+    if let Some(thread) = thread {
+        message["message_thread_id"] = json!(thread);
+        message["is_topic_message"] = json!(true);
+    }
+    crate::telegram::Update {
+        update_id: update,
+        message: Some(serde_json::from_value(message).unwrap()),
+        ..Default::default()
+    }
+}
+
+/// The service message of the topic the user's message outside topics opens.
+pub fn topic_created(update: i64, thread: i64, name: &str) -> crate::telegram::Update {
+    let message = json!({
+        "message_id": 10_000 + update, "message_thread_id": thread, "is_topic_message": true,
+        "from": { "id": OWNER, "is_bot": false, "first_name": "Egor" },
+        "chat": { "id": OWNER, "type": "private" }, "date": 1,
+        "forum_topic_created": { "name": name, "icon_color": 7322096, "is_name_implicit": true },
+    });
+    crate::telegram::Update {
+        update_id: update,
+        message: Some(serde_json::from_value(message).unwrap()),
+        ..Default::default()
+    }
+}
+
+/// The owner's press of a button with `data` under the bot's message.
+pub fn press(update: i64, message: i64, thread: i64, data: &str) -> crate::telegram::Update {
+    let query = json!({
+        "id": format!("q{update}"), "from": { "id": OWNER, "is_bot": false, "first_name": "Egor" },
+        "message": { "message_id": message, "message_thread_id": thread, "chat": { "id": OWNER, "type": "private" },
+                     "from": { "id": 77, "is_bot": true, "first_name": "Flux" } },
+        "data": data,
+    });
+    crate::telegram::Update {
+        update_id: update,
+        callback_query: Some(serde_json::from_value(query).unwrap()),
+        ..Default::default()
+    }
+}
+
+/// A bound bot with a topic `thread` for `session`.
+pub fn bot_with_topic(host: &mut FakeHost, thread: i64, session: &str) -> Bot {
+    let mut bot = bound_bot(host);
+    bot.store.add_topic(crate::store::Topic {
+        thread,
+        session: session.into(),
+        project: "/work/project".into(),
+        title: String::new(),
+        head: None,
+    });
+    bot
+}
+
+/// The data of the button whose text has `text`, on a call that carries buttons.
+pub fn button(call: &Value, text: &str) -> String {
+    call["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| row.as_array().unwrap())
+        .find(|button| button["text"].as_str().unwrap().contains(text))
+        .unwrap_or_else(|| panic!("no «{text}» in {call}"))["callback_data"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The buttons' texts of a call, row by row.
+pub fn buttons(call: &Value) -> Vec<Vec<String>> {
+    call["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    row.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|button| button["text"].as_str().unwrap().to_string())
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}

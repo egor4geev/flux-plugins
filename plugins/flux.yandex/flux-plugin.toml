@@ -4,13 +4,16 @@
 # PKCE); the organization is found by itself (Yandex 360) or entered — Yandex 360 or Yandex Cloud.
 id = "flux.yandex"
 name = "Yandex Tracker"
-version = "0.2.0"
-api = "0.3"
+version = "0.3.0"
+api = "0.6"
 authors = ["Egor Ageev"]
 description = "Yandex Tracker in Flux: the board of tasks, a task with its links, comments and history, your own Claude actions on a task — Take to Work moves it, makes its branch, opens its tabs and hands Claude your prompt at once; links to tasks in code, commits and Claude's chat."
 repository = "https://github.com/egor4geev/flux-plugins"
 icon = "icons/yandex.svg"
 wasm = "target/wasm32-wasip2/release/flux_yandex.wasm"
+# The user's tasks for other plugins — a bot on the phone: My Tasks, Open Task's search, a task with
+# its text and its Claude actions, and a run of one in a project's window, asking nothing.
+task-source = true
 
 [permissions]
 # Git branches, the commit message template, the tabs of a task (contexts).

@@ -10,6 +10,8 @@
 //! - [`window`] — the window: what it shows and its input; the filter and status pickers.
 //! - [`edit`] — changing the task's fields from its card: pickers under the properties, forms.
 //! - [`work`] — the actions, taking to work, the active task and its timer, Close and Log Time.
+//! - [`source`] — the task source (API 0.6): the user's tasks for another plugin — the bot on the
+//!   phone — and its runs of the actions, asking nothing.
 //! - [`poll`] — news by polling; [`links`] — `TRACK-142` in code, commits and the chat.
 //! - [`api`] and [`model`] — Tracker's API; [`actions`] — the actions and their prompts.
 
@@ -21,6 +23,7 @@ pub mod fields;
 mod links;
 pub mod model;
 mod poll;
+mod source;
 mod sync;
 mod window;
 mod work;
@@ -306,7 +309,7 @@ impl Tracker {
     }
 
     /// Everything the sign-in and the board don't claim: the window, links, Git, its
-    /// own timers, dialogs and pickers.
+    /// own timers, dialogs and pickers, another plugin's queries for tasks.
     pub fn on_event(&mut self, event: Event, auth: &Auth) {
         match event {
             // Shown (again — Flux repeats it for a window open at the start): what's there shows
@@ -344,6 +347,7 @@ impl Tracker {
                 }
             }
             Event::GitDone((id, result)) => self.git_done(id, result, auth),
+            Event::TaskQuery(query) => self.task_query(query, auth),
             Event::Timer(id) if self.chain.timer() == Some(id) => self.run_step(auth),
             Event::Timer(id) if self.work.tick_timer() == Some(id) => {
                 self.work.tick();
@@ -373,7 +377,7 @@ impl Tracker {
     pub fn run_favorite(&mut self, key: &str, auth: &Auth) {
         let actions = actions::actions();
         if let Some(action) = actions::favorite(&actions).cloned() {
-            self.run_action(key, action, auth);
+            self.run_action(key, action, work::Caller::User, auth);
         }
     }
 

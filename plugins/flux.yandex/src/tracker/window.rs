@@ -17,8 +17,10 @@ use super::api::{self, Search};
 use super::model::{ChangelogEntry, Comment, FieldMeta, Issue, IssueLink, StatusKind};
 use super::{
     ALL_FIELDS, Asked, Filter, PickerPurpose, Tracker, WINDOW, actions, fields, open_in_browser,
+    work,
 };
 use crate::auth::Auth;
+use crate::client::ClientError;
 use crate::settings::{self, MY_QUERY};
 use crate::{text as words, time};
 
@@ -123,8 +125,7 @@ impl Tracker {
 
     pub(super) fn filter_query(&self) -> String {
         match &self.filter {
-            Filter::Mine => settings::text(MY_QUERY)
-                .unwrap_or_else(|| "Assignee: me() Resolution: empty()".to_string()),
+            Filter::Mine => my_query(),
             Filter::Following => {
                 "Followers: me() Resolution: empty() \"Sort by\": Updated DESC".to_string()
             }
@@ -880,7 +881,7 @@ impl Tracker {
             return;
         };
         if let Some(action) = actions::actions().into_iter().nth(index) {
-            self.run_action(&key, action, auth);
+            self.run_action(&key, action, work::Caller::User, auth);
         }
     }
 
@@ -985,11 +986,9 @@ impl Tracker {
         let mine = if self.filter == Filter::Mine && self.list.loaded_at.is_some() {
             Ok(self.list.issues.clone())
         } else {
-            let query = settings::text(MY_QUERY)
-                .unwrap_or_else(|| "Assignee: me() Resolution: empty()".to_string());
             api::search(
                 auth,
-                Search::Query(&query),
+                Search::Query(&my_query()),
                 OPEN_TASK_FIRST,
                 api::PICKER_FIELDS,
             )
@@ -1015,38 +1014,13 @@ impl Tracker {
     pub(super) fn open_task_query(&mut self, id: u64, query: &str, auth: &Auth) {
         let query = query.trim();
         let mine = tr("My Tasks");
-        let lower = query.to_lowercase();
-        let local: Vec<&Issue> = self
-            .open_task_items
-            .iter()
-            .filter(|issue| {
-                lower.is_empty()
-                    || issue.key.to_lowercase().contains(&lower)
-                    || issue.summary.to_lowercase().contains(&lower)
-            })
-            .collect();
+        let local = matching(&self.open_task_items, query);
         if query.is_empty() {
             picker::update(id, local.iter().map(|issue| task_item(issue, &mine)), false);
             return;
         }
         picker::update(id, local.iter().map(|issue| task_item(issue, &mine)), true);
-        let found = if words::is_key(query) {
-            api::search(
-                auth,
-                Search::Keys(&[query.to_ascii_uppercase()]),
-                OPEN_TASK_FIRST,
-                api::PICKER_FIELDS,
-            )
-        } else {
-            let search = format!("Summary: {} \"Sort by\": Updated DESC", words::quote(query));
-            api::search(
-                auth,
-                Search::Query(&search),
-                OPEN_TASK_FIRST,
-                api::PICKER_FIELDS,
-            )
-        };
-        let found = found.map(|(issues, _)| issues).unwrap_or_else(|err| {
+        let found = find_typed(auth, query).unwrap_or_else(|err| {
             log::warn(&format!("Open Task: {}", err.message()));
             Vec::new()
         });
@@ -1105,6 +1079,66 @@ impl Tracker {
             }
         }
     }
+}
+
+/// The query of My Tasks: the `my-query` setting.
+pub(super) fn my_query() -> String {
+    settings::text(MY_QUERY).unwrap_or_else(|| "Assignee: me() Resolution: empty()".to_string())
+}
+
+/// What Open Task asks Tracker for the text typed.
+#[derive(Debug, PartialEq)]
+pub(super) enum Lookup {
+    /// A key: that task.
+    Key(String),
+    /// Words: a query of the tasks with them in the title, the latest changed first.
+    Query(String),
+}
+
+/// Open Task's search for the text typed.
+pub(super) fn lookup(typed: &str) -> Lookup {
+    let typed = typed.trim();
+    if words::is_key(typed) {
+        Lookup::Key(typed.to_ascii_uppercase())
+    } else {
+        Lookup::Query(format!(
+            "Summary: {} \"Sort by\": Updated DESC",
+            words::quote(typed)
+        ))
+    }
+}
+
+/// The tasks Tracker finds for the text typed in Open Task ([`lookup`]).
+pub(super) fn find_typed(auth: &Auth, typed: &str) -> Result<Vec<Issue>, ClientError> {
+    let found = match lookup(typed) {
+        Lookup::Key(key) => api::search(
+            auth,
+            Search::Keys(&[key]),
+            OPEN_TASK_FIRST,
+            api::PICKER_FIELDS,
+        ),
+        Lookup::Query(query) => api::search(
+            auth,
+            Search::Query(&query),
+            OPEN_TASK_FIRST,
+            api::PICKER_FIELDS,
+        ),
+    };
+    found.map(|(issues, _)| issues)
+}
+
+/// The tasks the text typed in Open Task matches among `issues` (the user's): in the key or the
+/// title, in any case; all of them for no text.
+pub(super) fn matching<'a>(issues: &'a [Issue], typed: &str) -> Vec<&'a Issue> {
+    let lower = typed.trim().to_lowercase();
+    issues
+        .iter()
+        .filter(|issue| {
+            lower.is_empty()
+                || issue.key.to_lowercase().contains(&lower)
+                || issue.summary.to_lowercase().contains(&lower)
+        })
+        .collect()
 }
 
 /// A task as an item of the Open Task picker.
