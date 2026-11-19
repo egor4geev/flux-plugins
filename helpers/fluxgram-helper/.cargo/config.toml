@@ -1,0 +1,9 @@
+# Flux runs on macOS 12 and later: so does its helper, and its TDLib is built for 12.0 too
+# (.github/workflows/tdlib.yml).
+[env]
+MACOSX_DEPLOYMENT_TARGET = "12.0"
+
+# Windows: the C runtime linked in (/MT), as TDLib, OpenSSL and zlib are built (tdlib.yml) and as
+# Flux.exe is — no Visual C++ runtime DLLs needed. build.rs checks it.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
