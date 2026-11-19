@@ -3,6 +3,10 @@
 //! settings say — then Claude gets the action's prompt filled from the card; the active task in
 //! the status bar with its timer (counted while Flux runs) and menu; Close Active Task and Log Time
 //! (forms). The active task is kept in the plugin's storage (`active-task`, read by the board too).
+//!
+//! An action runs the same way for another plugin ([`super::source`]: the bot, nobody at the
+//! computer), only quietly ([`Caller`]): Git's quiet calls — a branch that can't be checked out is
+//! left alone — and notes instead of notifications, answered with Claude's session.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -10,10 +14,15 @@ use std::time::Duration;
 use flux_plugin_api::dialog::{Form, Values};
 use flux_plugin_api::git::{self, Branch};
 use flux_plugin_api::picker::{self, Picker};
-use flux_plugin_api::{claude, contexts, log, notify, status, storage, timers, tr, trf};
+use flux_plugin_api::tasks::{self, TaskStarted};
+use flux_plugin_api::{claude, contexts, log, notify, status, storage, timers};
+#[cfg(not(test))]
+use flux_plugin_api::{tr, trf};
 use serde::{Deserialize, Serialize};
 
 use super::actions::{self, Action, Mode, PromptData};
+#[cfg(test)]
+use super::facts::{tr, trf};
 use super::model::{Comment, Issue, IssueLink, Transition};
 use super::{Asked, PickerPurpose, Tracker, api, open_in_browser};
 use crate::auth::Auth;
@@ -58,11 +67,88 @@ pub(super) struct Start {
     links: Vec<IssueLink>,
     comments: Vec<Comment>,
     action: Action,
+    caller: Caller,
     /// The task in work before this one: its tabs are saved under it.
     previous: Option<ActiveTask>,
     branch: Option<String>,
     start_branch: Option<String>,
     root: Option<String>,
+}
+
+/// Who an action runs for. The user at the computer — the card's button, the board's, the status
+/// bar's menu: what goes wrong is a notification, and Git's checkout asks when local changes are
+/// in the way. Another plugin's run (`Query::Run`: the bot, nobody at the computer) is quiet:
+/// nothing is asked — Git's quiet calls; a branch that can't be checked out is left alone and
+/// Claude works on the current one — what would be a notification is a note, and the end —
+/// Claude's session, or why there is none — is the run's answer, `tasks::started`.
+pub(super) enum Caller {
+    User,
+    Run {
+        /// The query to answer.
+        query: u64,
+        /// What went otherwise than at the computer, a sentence each.
+        notes: Vec<String>,
+    },
+}
+
+impl Caller {
+    /// Nobody is at the computer.
+    fn quiet(&self) -> bool {
+        matches!(self, Caller::Run { .. })
+    }
+
+    /// A problem on the way; the action goes on.
+    fn warn(&mut self, title: &str, detail: &str) {
+        match self {
+            Caller::User => {
+                notify::warning(title, Some(detail));
+            }
+            Caller::Run { notes, .. } => notes.push(sentences(title, detail)),
+        }
+    }
+
+    /// The action stopped before Claude's session.
+    fn failed(self, title: &str, detail: &str) {
+        match self {
+            Caller::User => {
+                notify::warning(title, Some(detail));
+            }
+            Caller::Run { query, .. } => tasks::started(query, Err(sentences(title, detail))),
+        }
+    }
+
+    /// Claude's session opened: a run's answer, its id and the notes.
+    fn opened(self, session: String) {
+        if let Caller::Run { query, notes } = self {
+            tasks::started(query, Ok(TaskStarted { session, notes }));
+        }
+    }
+}
+
+/// A notification's title and its detail as a note: two sentences.
+fn sentences(title: &str, detail: &str) -> String {
+    match detail.trim() {
+        "" => format!("{title}."),
+        detail => format!("{title}. {detail}"),
+    }
+}
+
+/// The note of a run whose branch wasn't checked out: why — Git's sentence names the branch;
+/// else the branch with Git's words — and that Claude works on the current one.
+pub(super) fn branch_note(branch: &str, current: Option<&str>, why: &str) -> String {
+    let why = why.trim().trim_end_matches('.');
+    let what = if why.contains(branch) {
+        why.to_string()
+    } else if why.is_empty() {
+        trf("Couldn't check out the branch {0}", &[&branch])
+    } else {
+        trf("Couldn't check out the branch {0}: {1}", &[&branch, &why])
+    };
+    let instead = match current {
+        Some(current) => trf("Claude works on the current branch, {0}.", &[&current]),
+        None => tr("Claude works on the current branch."),
+    };
+    format!("{what}. {instead}")
 }
 
 pub(super) enum GitOp {
@@ -278,24 +364,21 @@ fn local_name(branch: &str, branches: &[Branch]) -> String {
 impl Tracker {
     /// Runs an action of the settings on the task: with `start` it takes the task to work first;
     /// Claude gets the prompt filled from the card.
-    pub(super) fn run_action(&mut self, key: &str, action: Action, auth: &Auth) {
+    pub(super) fn run_action(&mut self, key: &str, action: Action, caller: Caller, auth: &Auth) {
         let (issue, links, comments) = match self.task_data(key, auth) {
             Ok(data) => data,
-            Err(err) => {
-                notify::warning(&trf("Couldn't read {0}", &[&key]), Some(&err.message()));
-                return;
-            }
+            Err(err) => return caller.failed(&trf("Couldn't read {0}", &[&key]), &err.message()),
         };
         if action.start {
-            self.start_work(issue, links, comments, action, auth);
+            self.start_work(issue, links, comments, action, caller, auth);
         } else {
             let branch = self.branch_of(&issue);
-            send_prompt(&issue, &links, &comments, &branch, &action);
+            send_prompt(&issue, &links, &comments, &branch, &action, caller);
         }
     }
 
     /// The task's branch for a prompt: the one it's worked on, else the name it would get.
-    fn branch_of(&self, issue: &Issue) -> String {
+    pub(super) fn branch_of(&self, issue: &Issue) -> String {
         if let Some(task) = self.work.active().filter(|task| task.key == issue.key)
             && let Some(branch) = &task.branch
         {
@@ -304,14 +387,15 @@ impl Tracker {
         new_branch_name(issue)
     }
 
-    /// Takes the task to work: the status now, then the branch (Flux's own flow; the rest waits
-    /// for it), the tabs, the timer, the commit template, Claude.
+    /// Takes the task to work: the status now, then the branch (Flux's own flow, quiet for a run;
+    /// the rest waits for it), the tabs, the timer, the commit template, Claude.
     fn start_work(
         &mut self,
         issue: Issue,
         links: Vec<IssueLink>,
         comments: Vec<Comment>,
         action: Action,
+        mut caller: Caller,
         auth: &Auth,
     ) {
         let key = issue.key.clone();
@@ -326,10 +410,7 @@ impl Tracker {
                     Some(transition) => match api::execute(auth, &key, &transition.id) {
                         Ok(()) => self.mark_changed(&key),
                         Err(err) => {
-                            notify::warning(
-                                &trf("Couldn't move {0} to work", &[&key]),
-                                Some(&err.message()),
-                            );
+                            caller.warn(&trf("Couldn't move {0} to work", &[&key]), &err.message())
                         }
                     },
                     None => log::info(&format!(
@@ -337,12 +418,7 @@ impl Tracker {
                         issue.status_name()
                     )),
                 },
-                Err(err) => {
-                    notify::warning(
-                        &trf("Couldn't move {0} to work", &[&key]),
-                        Some(&err.message()),
-                    );
-                }
+                Err(err) => caller.warn(&trf("Couldn't move {0} to work", &[&key]), &err.message()),
             }
         }
         let previous = self.work.active().cloned();
@@ -352,6 +428,7 @@ impl Tracker {
             links,
             comments,
             action,
+            caller,
             previous: previous.filter(|_| !same),
             branch: None,
             start_branch: None,
@@ -373,17 +450,18 @@ impl Tracker {
                         .unwrap_or_else(|| new_branch_name(&start.issue));
                     start.branch = Some(wanted.clone());
                     if repository.branch.as_deref() != Some(wanted.as_str()) {
-                        let id = match &existing {
-                            Some(branch) => git::checkout(&repository.root, branch),
-                            None => git::new_branch(&repository.root, &wanted, None),
+                        let root = &repository.root;
+                        let id = match (&existing, start.caller.quiet()) {
+                            (Some(branch), false) => git::checkout(root, branch),
+                            (Some(branch), true) => git::checkout_quietly(root, branch),
+                            (None, false) => git::new_branch(root, &wanted, None),
+                            (None, true) => git::new_branch_quietly(root, &wanted, None),
                         };
                         self.work.pending.insert(id, GitOp::Start(Box::new(start)));
                         return;
                     }
                 }
-                Err(err) => {
-                    notify::warning(&tr("Couldn't read the branches"), Some(&err));
-                }
+                Err(err) => start.caller.warn(&tr("Couldn't read the branches"), &err),
             }
         }
         self.finish_start(start, auth);
@@ -426,6 +504,7 @@ impl Tracker {
             &start.comments,
             &branch,
             &start.action,
+            start.caller,
         );
         self.mark_changed(&key);
         self.render(auth);
@@ -434,12 +513,21 @@ impl Tracker {
     /// A Git operation of the work ended.
     pub(super) fn git_done(&mut self, id: u64, result: Result<(), String>, auth: &Auth) {
         match self.work.pending.remove(&id) {
-            Some(GitOp::Start(start)) => {
+            Some(GitOp::Start(mut start)) => {
                 if let Err(err) = result {
-                    notify::warning(
-                        &trf("The branch of {0} didn't work out", &[&start.issue.key]),
-                        Some(&err),
-                    );
+                    match &mut start.caller {
+                        Caller::User => {
+                            notify::warning(
+                                &trf("The branch of {0} didn't work out", &[&start.issue.key]),
+                                Some(&err),
+                            );
+                        }
+                        Caller::Run { notes, .. } => notes.push(branch_note(
+                            start.branch.as_deref().unwrap_or_default(),
+                            start.start_branch.as_deref(),
+                            &err,
+                        )),
+                    }
                 }
                 self.finish_start(*start, auth);
             }
@@ -525,7 +613,7 @@ impl Tracker {
                     .and_then(|index| index.parse::<usize>().ok());
                 if let Some(action) = index.and_then(|index| actions::actions().into_iter().nth(index))
                 {
-                    self.run_action(&key, action, auth);
+                    self.run_action(&key, action, Caller::User, auth);
                 }
             }
         }
@@ -774,6 +862,7 @@ fn send_prompt(
     comments: &[Comment],
     branch: &str,
     action: &Action,
+    caller: Caller,
 ) {
     let data = PromptData {
         issue,
@@ -783,11 +872,10 @@ fn send_prompt(
     };
     let prompt = actions::fill_prompt(&action.prompt, &data);
     if prompt.is_empty() {
-        notify::warning(
+        return caller.failed(
             &trf("The action \"{0}\" has no prompt", &[&action.title()]),
-            Some(&tr("Write it in the plugin's settings: Claude actions")),
+            &tr("Write it in the plugin's settings: Claude actions"),
         );
-        return;
     }
     let mut session = claude::session()
         .title(&format!("{}: {}", issue.key, text::ellipsis(&issue.summary, 60)))
@@ -796,8 +884,9 @@ fn send_prompt(
     if action.mode == Mode::Plan {
         session = session.plan_mode();
     }
-    if let Err(err) = session.start() {
-        notify::warning(&tr("Couldn't open a Claude session"), Some(&err));
+    match session.start() {
+        Ok(id) => caller.opened(id),
+        Err(err) => caller.failed(&tr("Couldn't open a Claude session"), &err),
     }
 }
 
@@ -841,6 +930,30 @@ mod tests {
         let by_name = [transition("t1", "Взять в работу", "doing")];
         assert_eq!(in_progress_transition(&by_name).unwrap().id, "t1");
         assert!(in_progress_transition(&[transition("close", "Закрыть", "closed")]).is_none());
+    }
+
+    #[test]
+    fn a_warning_of_a_run_is_a_note() {
+        let mut caller = Caller::Run {
+            query: 7,
+            notes: Vec::new(),
+        };
+        caller.warn(
+            "Couldn't move TRACK-142 to work",
+            " No access: the queue is closed ",
+        );
+        caller.warn("Couldn't read the branches", "");
+        let Caller::Run { notes, .. } = caller else {
+            unreachable!()
+        };
+        assert_eq!(
+            notes,
+            [
+                "Couldn't move TRACK-142 to work. No access: the queue is closed",
+                "Couldn't read the branches."
+            ]
+        );
+        assert!(!Caller::User.quiet());
     }
 
     fn branch(name: &str, remote: bool) -> Branch {

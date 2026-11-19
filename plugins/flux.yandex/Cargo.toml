@@ -11,8 +11,9 @@ crate-type = ["cdylib"]
 doctest = false
 
 [dependencies]
-# The SDK of the Flux commit with plugin API 0.3 (part 10.3).
-flux-plugin-api = { git = "https://github.com/egor4geev/flux", rev = "14bba127222980a9d57f3b5d6ec8b4a67eb967fc" }
+# Until the release: the SDK of the bot's Flux branch (API 0.6 — the task source, `wt/bot/flux`
+# beside this checkout); the release pins it by `rev`, as the other plugins.
+flux-plugin-api = { path = "../../../flux/crates/flux-plugin-api" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The sign-in's PKCE: a random verifier, its SHA-256 challenge in base64url.

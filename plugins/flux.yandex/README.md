@@ -97,3 +97,12 @@ tags) shows what the filter finds.
 - A task opens in the Tracker window on the right with a double click or ↵.
 - The board refreshes when its tab shows, every two minutes while it shows, and when a task on it
   changes in Flux; ⟳ refreshes it now, the globe opens it in Tracker.
+
+## From the phone
+
+Other plugins may ask Flux for your tasks — Flux Remote, Claude from the phone through your own
+Telegram bot, does: it gets My Tasks, a search as Open Task finds, a task with its text and
+comments, and your Claude actions as its buttons. An action run from there does what the card's
+button does — the status, the branch, the tabs, the timer, Claude's prompt — but asks nothing: when
+local changes keep the task's branch from being checked out, the branch stays as it is, Claude works
+on the current one, and the bot tells you so.

@@ -396,3 +396,12 @@
 "The filter is kept for this board, in the saved filters' menu." = "Фильтр сохранится для этой доски — в меню сохранённых фильтров."
 "A name" = "Название"
 "My filter" = "Мой фильтр"
+
+# --- Y: part 3 — the task source: the tasks and their Claude actions for another plugin (the bot) ---
+"Sign in to Yandex in the Yandex Tracker plugin's settings." = "Войдите в Яндекс в настройках плагина «Яндекс Трекер»."
+"Choose the organization in the Yandex Tracker plugin's settings." = "Выберите организацию в настройках плагина «Яндекс Трекер»."
+"No Claude action \"{0}\" in the Yandex Tracker plugin's settings." = "В настройках плагина «Яндекс Трекер» нет действия Claude «{0}»."
+"Couldn't check out the branch {0}" = "Не удалось перейти на ветку {0}"
+"Couldn't check out the branch {0}: {1}" = "Не удалось перейти на ветку {0}: {1}"
+"Claude works on the current branch, {0}." = "Claude работает на текущей ветке {0}."
+"Claude works on the current branch." = "Claude работает на текущей ветке."
