@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The words to look for in the messages' texts and captions."
+    },
+    "chat": {
+      "type": "string",
+      "description": "The key of the chat to search (from the chats tool); none — every chat available to Claude."
+    },
+    "before": {
+      "type": "string",
+      "description": "With chat: the matches older than this message's id — the next page, as the previous answer's \"More: before=…\" says."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "How many matches: 20 by default, at most 50.",
+      "minimum": 1,
+      "maximum": 50
+    }
+  },
+  "required": ["query"]
+}

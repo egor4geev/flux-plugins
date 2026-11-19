@@ -57,6 +57,14 @@
 //! say, the web's asked first as Settings → FluxGram → Links say. ⋯ of a chat a link opened that
 //! isn't in the list offers Add to FluxGram in place of Remove.
 //!
+//! Claude (part 6, [`crate::claude`]): ⋯ of a chat in the list (not a hidden one) has Available
+//! to Claude, checked while Claude may read the chat; a choice turns it on or off in the service.
+//! There too — a message's Reply with Claude (its menu, its hover bar) and the field's button
+//! beside Send: the chat goes on for Claude, and the service makes the new session's attachment
+//! (the message, or the field's unfinished text), which the window opens. Edit on Claude's card
+//! (`send_message`) brings the chat's tab here with the text in the field and the quote over it
+//! ([`Tabs::claude_draft`]).
+//!
 //! The field has its panel (part 4): Flux's emoji, the account's stickers and GIFs — the service
 //! fills the tabs ([`PanelAsk`]) and sends what is chosen, answering the quote over the field. A
 //! voice or round message played for the first time is told to the service, which marks it
@@ -84,9 +92,11 @@ use flux_plugin_api::view::*;
 use flux_plugin_api::{notify, picker, service, system, timers, tr, trf};
 
 use crate::ads::{AdAsk, AdInfo};
+use crate::claude::{Card, ClaudeAsk};
 use crate::convert::{
-    ABOUT_AD, COPY_LINK, DELETE, DELETE_FOR_ME, EDIT, FAVE_STICKER, FORWARD, PIN, REPLY, REPORT_AD,
-    RETRACT_VOTE, SAVE_GIF, STOP_POLL, UNFAVE_STICKER, UNPIN, highlighted, search_words,
+    ABOUT_AD, COPY_LINK, DELETE, DELETE_FOR_ME, EDIT, FAVE_STICKER, FORWARD, PIN, REPLY,
+    REPLY_CLAUDE, REPORT_AD, RETRACT_VOTE, SAVE_GIF, STOP_POLL, UNFAVE_STICKER, UNPIN, highlighted,
+    search_words,
 };
 use crate::feed::{SearchAsk, SearchTold};
 use crate::links::{LinkAsk, LinkTold, Shown, Target, Web};
@@ -292,8 +302,13 @@ pub struct Tabs {
     /// The chats in each account's list: ⋯ of another chat's tab (opened by a link) offers Add
     /// to FluxGram.
     listed: HashMap<String, HashSet<i64>>,
+    /// The chats available to Claude in each account's list (part 6): ⋯'s item is checked.
+    claude: HashMap<String, HashSet<i64>>,
     /// A message a link reveals in a chat whose feed hasn't come yet: asked for once it has.
     jumps: HashMap<ChatKey, String>,
+    /// Claude's text Edit put into a tab whose feed hasn't come yet (part 6): it wins over the
+    /// saved draft the feed's first fill brings.
+    claude_drafts: HashMap<ChatKey, String>,
     /// The last search request's id.
     requests: u64,
 }
@@ -321,7 +336,9 @@ impl Tabs {
             invite_asked: None,
             stickers_asked: None,
             listed: HashMap::new(),
+            claude: HashMap::new(),
             jumps: HashMap::new(),
+            claude_drafts: HashMap::new(),
             requests: 0,
         }
     }
@@ -629,6 +646,17 @@ impl Tabs {
             "folder" => self.go.push(TabGo::Folder(key)),
             "remove" => ask(&Request::RemoveChat { key }),
             "add" => ask(&Request::AddChat { key }),
+            // Claude (part 6): on or off; the rows bring the change back.
+            "claude" => {
+                let on = !self.claude_on(&key);
+                let chats = self.claude.entry(key.account.clone()).or_default();
+                if on {
+                    chats.insert(key.chat);
+                } else {
+                    chats.remove(&key.chat);
+                }
+                ask(&Request::Claude(ClaudeAsk::Set { key, on }))
+            }
             // A bot (part 5): stopped after a question, restarted at once.
             "stop-bot" => self.stop_bot(key),
             "restart-bot" => ask(&Request::BotStart { key, restart: true }),
@@ -842,8 +870,13 @@ impl Tabs {
         let Some(tab) = self.tabs.get_mut(key).filter(|tab| !tab.gone) else {
             return;
         };
+        let claude = self.claude_drafts.get(key);
         for change in &mut changes {
             match change {
+                // Edit on Claude's card opened the tab (part 6): its text, not the saved draft.
+                Change::Draft(text) if claude.is_some() => {
+                    *text = claude.cloned().unwrap_or_default();
+                }
                 Change::Put(messages) => {
                     for message in messages.iter_mut() {
                         tab.messages.insert(message.id.clone(), message.clone());
@@ -879,6 +912,9 @@ impl Tabs {
             }
         }
         conv::update(&tab.window, FEED, changes);
+        if !tab.messages.is_empty() {
+            self.claude_drafts.remove(key);
+        }
         // A link's message (part 5): revealed once the feed is there.
         if !tab.messages.is_empty()
             && let Some(message) = self.jumps.remove(key)
@@ -1078,6 +1114,10 @@ impl Tabs {
             (FEED, UiEvent::ComposerAction((action, _))) if action == BOT_MENU => {
                 self.open_commands(&key)
             }
+            // Reply with Claude (part 6): the field's text goes along; it stays in the field.
+            (FEED, UiEvent::ComposerAction((action, composed))) if action == REPLY_CLAUDE => {
+                self.reply_with_claude(&key, None, Some(composed.text))
+            }
             (FEED, UiEvent::LinkClicked((message, link))) => self.link(&key, &message, &link),
             // A scenario's menu items (`menu/hide`) and message actions: `reply/<id>`,
             // `edit/<id>`, `delete/<id>`.
@@ -1177,6 +1217,7 @@ impl Tabs {
                 conv::update(&tab.window, FEED, vec![conv::reply_to(Some(quote))]);
                 self.set_reply(key, Some(message.to_string()));
             }
+            REPLY_CLAUDE => self.reply_with_claude(key, Some(message.to_string()), None),
             EDIT => {
                 // As Markdown: saving parses it back, so the bold and the links stay.
                 let text = crate::convert::markdown(found);
@@ -1511,8 +1552,83 @@ impl Tabs {
     }
 
     /// The chats in an account's list (part 5): ⋯ of another chat's tab offers Add to FluxGram.
+    /// Reply with Claude follows the list (part 6): the tabs of a chat that joined or left it
+    /// are drawn again — the first rows may come after the tab was drawn.
     pub fn listed(&mut self, account: &str, chats: impl Iterator<Item = i64>) {
-        self.listed.insert(account.to_string(), chats.collect());
+        let old = self.listed.insert(account.to_string(), chats.collect());
+        let new = self.listed.get(account);
+        let changed: Vec<ChatKey> = self
+            .tabs
+            .iter()
+            .filter(|(key, tab)| {
+                key.account == account
+                    && for_claude(tab.hidden, old.as_ref(), key.chat)
+                        != for_claude(tab.hidden, new, key.chat)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in changed {
+            self.render(&key);
+        }
+    }
+
+    /// The chats of an account's list available to Claude (part 6): ⋯'s item is checked.
+    pub fn claude(&mut self, account: &str, chats: impl Iterator<Item = i64>) {
+        self.claude.insert(account.to_string(), chats.collect());
+    }
+
+    /// The chat is available to Claude.
+    fn claude_on(&self, key: &ChatKey) -> bool {
+        self.claude
+            .get(&key.account)
+            .is_some_and(|chats| chats.contains(&key.chat))
+    }
+
+    /// Reply with Claude (part 6): the chat on for Claude (⋯'s item at once; the service's rows
+    /// bring the list's mark), and the service makes the session's attachment — of a message, or
+    /// of the field's unfinished text — which comes back to open ([`crate::model::Note::Session`]).
+    fn reply_with_claude(&mut self, key: &ChatKey, message: Option<String>, draft: Option<String>) {
+        self.claude
+            .entry(key.account.clone())
+            .or_default()
+            .insert(key.chat);
+        ask(&Request::Claude(ClaudeAsk::Reply {
+            key: key.clone(),
+            message,
+            draft,
+        }));
+    }
+
+    /// Edit on Claude's card (part 6, `send_message`): the chat's tab here, its field with the
+    /// text and the quote of the message answered, taking the keyboard. The user sends it.
+    pub fn claude_draft(&mut self, card: &Card) {
+        let key = &card.chat;
+        self.open(key, Some(&card.title));
+        self.go.push(TabGo::Opened(key.clone()));
+        let Some(tab) = self.tabs.get(key) else {
+            return;
+        };
+        // The feed not here yet: its first fill may bring the saved draft — this text wins.
+        if tab.messages.is_empty() {
+            self.claude_drafts.insert(key.clone(), card.text.clone());
+        }
+        let mut changes = vec![conv::draft(&card.text)];
+        if let Some(reply) = &card.reply {
+            // A part of another message quoted before is forgotten: the whole one is answered.
+            ask(&Request::Quote {
+                key: key.clone(),
+                message: reply.message.clone(),
+                quote: None,
+            });
+            changes.push(conv::reply_to(Some(MessageQuote {
+                message: Some(reply.message.clone()),
+                author: reply.author.clone(),
+                color: reply.color,
+                text: reply.text.clone(),
+            })));
+        }
+        conv::update(&tab.window, FEED, changes);
+        self.set_reply(key, card.reply.as_ref().map(|reply| reply.message.clone()));
     }
 
     /// A chat's tab came into sight, or went out of it (a tab Flux brought back comes here first).
@@ -1546,6 +1662,7 @@ impl Tabs {
         let Some(tab) = self.tabs.remove(&key) else {
             return;
         };
+        self.claude_drafts.remove(&key);
         if tab.gone {
             return;
         }
@@ -1837,6 +1954,12 @@ impl Tabs {
         } else {
             picker::item("unread", &tr("Mark as Unread")).icon("icons/unread.svg")
         };
+        // A chat a link opened that isn't in the list (part 5): Add to FluxGram.
+        let listed = tab.hidden
+            || self
+                .listed
+                .get(&key.account)
+                .is_none_or(|chats| chats.contains(&key.chat));
         let mut items = vec![
             picker::item("search", &tr("Search")).icon("search"),
             picker::item("profile", &tr("Profile")).icon("info"),
@@ -1844,6 +1967,15 @@ impl Tabs {
             read,
             mute,
         ];
+        // Claude (part 6): a chat of the list, never a hidden one; ✓ while it is on.
+        if for_claude(tab.hidden, self.listed.get(&key.account), key.chat) {
+            let icon = if self.claude_on(key) {
+                "check"
+            } else {
+                "claude"
+            };
+            items.push(picker::item("claude", &tr("Available to Claude")).icon(icon));
+        }
         // The folders are plaintext: a hidden chat never goes into one.
         if !tab.hidden {
             items.push(picker::item("folder", &tr("Add to Folder…")).icon("folder-plus"));
@@ -1857,12 +1989,6 @@ impl Tabs {
             None => {}
         }
         items.push(hide);
-        // A chat a link opened that isn't in the list (part 5): Add to FluxGram.
-        let listed = tab.hidden
-            || self
-                .listed
-                .get(&key.account)
-                .is_none_or(|chats| chats.contains(&key.chat));
         items.push(match listed {
             true => picker::item("remove", &tr("Remove from FluxGram")).icon("close"),
             false => picker::item("add", &tr("Add to FluxGram")).icon("plus"),
@@ -2007,9 +2133,17 @@ impl Tabs {
             let outside = header.filter(|header| !header.joined);
             let can_send = header.is_some_and(|header| header.can_send) && outside.is_none();
             let saved = header.is_some_and(|header| header.saved);
+            // Reply with Claude (part 6): where ⋯ has Available to Claude.
+            let claude = for_claude(tab.hidden, self.listed.get(&key.account), key.chat);
             let mut spec = conv::spec()
                 .empty_text(&tr("No messages here yet"))
-                .message_action(REPLY, &tr("Reply"), Some("arrow-left"))
+                .message_action(REPLY, &tr("Reply"), Some("arrow-left"));
+            // Its icon on the hover bar after Reply's; every message offers it but the chat's
+            // own lines.
+            if claude {
+                spec = spec.message_action(REPLY_CLAUDE, &tr("Reply with Claude"), Some("claude"));
+            }
+            spec = spec
                 .message_action(EDIT, &tr("Edit"), Some("pencil"))
                 .message_action(DELETE, &tr("Delete"), Some("trash"))
                 .message_action(DELETE_FOR_ME, &tr("Delete"), Some("trash"))
@@ -2055,6 +2189,10 @@ impl Tabs {
                 // A bot's menu of commands (part 5).
                 if header.is_some_and(|header| !header.commands.is_empty()) {
                     composer = composer.action(BOT_MENU, &tr("Menu"), Some("slash"));
+                }
+                if claude {
+                    composer =
+                        composer.action(REPLY_CLAUDE, &tr("Reply with Claude"), Some("claude"));
                 }
                 spec = spec.composer(composer);
             }
@@ -2208,6 +2346,12 @@ fn offers(message: &Message, action: &str) -> bool {
 
 /// The quote over the field for a reply: the author ("You" for the user's own, the person in a
 /// one-to-one chat) and a line of the message.
+/// Claude may be given the chat (part 6: Available to Claude, Reply with Claude): one of the
+/// account's list (`listed`; not known yet — it is), never a hidden one nor one a link opened.
+fn for_claude(hidden: bool, listed: Option<&HashSet<i64>>, chat: i64) -> bool {
+    !hidden && listed.is_none_or(|chats| chats.contains(&chat))
+}
+
 fn quote_of(message: &Message, tab: &Tab, tr: &dyn Fn(&str) -> String) -> MessageQuote {
     let (author, color) = match (&message.author, message.outgoing) {
         (_, true) => (tr("You"), 0),
@@ -2397,5 +2541,17 @@ mod tests {
             (quote.author.as_str(), quote.text.as_str()),
             ("Forwarding a message", "Anna Smirnova: Hi there")
         );
+    }
+
+    #[test]
+    fn claude_is_offered_for_the_list_s_chats_only() {
+        let listed: HashSet<i64> = [101, -5].into();
+        assert!(for_claude(false, Some(&listed), 101));
+        // The list not known yet: offered.
+        assert!(for_claude(false, None, 101));
+        // A hidden chat, one a link opened: never.
+        assert!(!for_claude(true, Some(&listed), 101));
+        assert!(!for_claude(true, None, 101));
+        assert!(!for_claude(false, Some(&listed), 202));
     }
 }

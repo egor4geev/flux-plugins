@@ -6,7 +6,8 @@ or several), `forwardMessages` (part 5: forwarded copies; "Old project" protects
 `sendChatAction`, `setChatDraftMessage`, `downloadFile` (every file: media, profile and chat
 photos), `cancelDownloadFile`.
 
-- The histories: "Backend · team" has every kind of message (text with nested entities in Cyrillic
+- The histories: "Backend · team" has every kind of message, over four days (part 6: 150 and more,
+  for Claude's pages) (text with nested entities in Cyrillic
   and emoji — TDLib's offsets are UTF-16 —, code, quotes, spoilers, links, mentions; photos with
   minithumbnails, a sticker, a document, voice, round and other videos, a GIF, a poll, a location,
   a contact, forwards, replies — one to an old message —, reactions, an edit, the chat's own lines);
@@ -366,9 +367,18 @@ def fill_backend() -> None:
     say(chat, 101, {"@type": "messageSupergroupChatCreate", "title": "Backend · team"}, t)
     say(chat, 101, {"@type": "messageChatAddMembers", "member_user_ids": [103, 102]}, t + 60)
     old = say(chat, 103, text("Do we keep the old API for the mobile app until spring?"), t + 120)
-    for i in range(70):
+    # Part 6: enough history for Claude's pages — 120 lines over three days (with the rest, more
+    # than 150 messages), replies to the old question and a forward among them.
+    for i in range(120):
         sender = 0 if i % 6 == 0 else TEAM[i % len(TEAM)]
-        say(chat, sender, text(FILLER[i % len(FILLER)]), t + 600 + i * 2400)
+        extra = {}
+        if i % 25 == 7:
+            extra["reply_to"] = {"@type": "messageReplyToMessage", "chat_id": chat,
+                                 "message_id": old["id"]}
+        if i % 40 == 13:
+            extra["forward_info"] = {"@type": "messageForwardInfo", "date": t,
+                                     "origin": {"@type": "messageOriginUser", "sender_user_id": 104}}
+        say(chat, sender, text(FILLER[i % len(FILLER)]), t + 600 + i * 2400, **extra)
     t = NOW - 3 * 3600
     plan = "Release plan for Friday: Thursday is too early, secret: v2. Run cargo build, see https://example.com/release and the doc, ask @dimakim or Petya, mail team@example.com, call +7 900 123-45-67, #release /deploy@flux_bot"
     say(chat, 101, rich_text(

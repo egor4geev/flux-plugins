@@ -63,6 +63,9 @@ pub const UNPIN: &str = "unpin";
 pub const COPY_LINK: &str = "copy-link";
 /// Forward the message (part 5): where Telegram lets it go — not a protected chat's.
 pub const FORWARD: &str = "forward";
+/// Reply with Claude (part 6): every sent message but the chat's own lines; the tab offers it
+/// only where Claude may be given the chat.
+pub const REPLY_CLAUDE: &str = "reply-claude";
 /// A sticker message: its sticker to the favorites (or out of them); a GIF message: its GIF to
 /// the saved ones (part 5).
 pub const FAVE_STICKER: &str = "fave-sticker";
@@ -1346,6 +1349,7 @@ fn actions(cx: &Context, value: &Value, chat: i64, outgoing: bool) -> Vec<&'stat
     // own lines.
     let kind = value["content"]["@type"].as_str().unwrap_or_default();
     if sent && !is_service(kind) {
+        actions.push(REPLY_CLAUDE);
         if cx.store.can_pin(chat) {
             actions.push(if value["is_pinned"] == true {
                 UNPIN
@@ -2129,10 +2133,16 @@ mod tests {
         assert!(private.message.author.is_none());
         let stranger = convert_with(&store, &message(6, GROUP, 999, text("Hi", json!([]))), None);
         assert_eq!(stranger.missing_users, [999]);
-        // Anyone may pin in a one-to-one chat (part 5), and forward from it.
+        // Anyone may pin in a one-to-one chat (part 5), and forward from it; Reply with Claude
+        // (part 6) — the tab offers it where Claude may be given the chat.
         assert_eq!(
             private.message.actions,
-            Some(vec![REPLY.into(), PIN.into(), FORWARD.into()])
+            Some(vec![
+                REPLY.into(),
+                REPLY_CLAUDE.into(),
+                PIN.into(),
+                FORWARD.into()
+            ])
         );
         // A protected chat's messages don't go anywhere (part 5); a message's own word wins.
         let mut protected = self::store();
@@ -2142,7 +2152,10 @@ mod tests {
             &message(7, 101, 101, text("Hi", json!([]))),
             None,
         );
-        assert_eq!(kept.message.actions, Some(vec![REPLY.into(), PIN.into()]));
+        assert_eq!(
+            kept.message.actions,
+            Some(vec![REPLY.into(), REPLY_CLAUDE.into(), PIN.into()])
+        );
         let mut allowed = message(8, 101, 101, text("Hi", json!([])));
         allowed["can_be_forwarded"] = json!(true);
         let allowed = convert_with(&protected, &allowed, None);
@@ -2169,6 +2182,7 @@ mod tests {
             read.message.actions,
             Some(vec![
                 REPLY.into(),
+                REPLY_CLAUDE.into(),
                 COPY_LINK.into(),
                 FORWARD.into(),
                 EDIT.into(),
@@ -2195,12 +2209,30 @@ mod tests {
         old["can_be_deleted_for_all_users"] = json!(false);
         old["can_be_deleted_only_for_self"] = json!(true);
         let actions = convert_with(&store, &old, None).message.actions.unwrap();
-        assert_eq!(actions, [REPLY, COPY_LINK, FORWARD, EDIT, DELETE_FOR_ME]);
-        // Someone else's message: Reply, its link and Forward only.
+        assert_eq!(
+            actions,
+            [REPLY, REPLY_CLAUDE, COPY_LINK, FORWARD, EDIT, DELETE_FOR_ME]
+        );
+        // Someone else's message: Reply, Reply with Claude, its link and Forward only.
         let theirs = convert_with(&store, &message(9, GROUP, 103, text("x", json!([]))), None);
         assert_eq!(
             theirs.message.actions,
-            Some(vec![REPLY.into(), COPY_LINK.into(), FORWARD.into()])
+            Some(vec![
+                REPLY.into(),
+                REPLY_CLAUDE.into(),
+                COPY_LINK.into(),
+                FORWARD.into()
+            ])
+        );
+        // The chat's own lines: nothing to reply to with Claude.
+        let joined = json!({"@type": "message", "id": 10, "chat_id": GROUP, "date": 1_763_380_000,
+            "sender_id": {"@type": "messageSenderUser", "user_id": 103}, "is_outgoing": false,
+            "content": {"@type": "messageChatAddMembers", "member_user_ids": [103]}});
+        let joined = convert_with(&store, &joined, None).message.actions;
+        assert!(
+            !joined
+                .unwrap_or_default()
+                .contains(&REPLY_CLAUDE.to_string())
         );
     }
 

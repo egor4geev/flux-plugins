@@ -10,7 +10,9 @@
 //! the chat's tab with the messages to forward ([`Go::Forward`]). A row opens its chat's tab; its actions put it in a folder
 //! (or take it out of the one shown), hide it, remove it from the list; its ⋯ (part 5) opens a menu
 //! under it — Mark as Read / Unread, Mute (a choice: an hour, 8 hours, 2 days, for good) or
-//! Unmute, Add to Folder…. The unread messages count
+//! Unmute, Add to Folder…, Available to Claude (part 6: checked while Claude may read the chat;
+//! never a hidden chat's) — and a chat available to Claude has Claude's mark after its title
+//! (the `claude` icon, in Claude's color). The unread messages count
 //! on the window's launchpad icon and put a dot on the chats' tabs (`ui::set_badge`).
 //!
 //! The rows come from the service whole, per account ([`Note::Chats`](crate::model::Note::Chats):
@@ -39,6 +41,7 @@ use flux_plugin_api::{notify, picker, service, timers, tr, trf};
 
 use crate::chat::{CHAT, Forward, MORE};
 use crate::chats::{Folder, FolderAsk, HiddenAsk, HiddenRow, HiddenTold, folder_name};
+use crate::claude::ClaudeAsk;
 use crate::hidden;
 use crate::model::{AccountView, ChatKey, ChatRow, FoundChat, Request, Snapshot, account_labels};
 use crate::window::MAIN;
@@ -64,6 +67,9 @@ const SETTINGS_FORGET: &str = "hidden-forget";
 const DIALOG_PHRASE: &str = "hide-phrase";
 const DIALOG_HIDE: &str = "hide-confirm";
 const DIALOG_CANCEL: &str = "hide-cancel";
+
+/// A row's ⋯ item: Available to Claude (part 6).
+const CLAUDE_ITEM: &str = "claude";
 
 /// The search's text is tried as the phrase once typing stops this long.
 const PHRASE_AFTER: Duration = Duration::from_millis(300);
@@ -393,6 +399,9 @@ impl List {
         ];
         if !hidden {
             items.push(picker::item("folder", &tr("Add to Folder…")).icon("folder-plus"));
+            // Claude (part 6): never a hidden chat; ✓ while it is on.
+            let icon = if row.claude { "check" } else { "claude" };
+            items.push(picker::item(CLAUDE_ITEM, &tr("Available to Claude")).icon(icon));
         }
         if row.bot {
             items.push(match row.blocked {
@@ -405,6 +414,14 @@ impl List {
             .under(MAIN, &row_anchor(key))
             .open();
         self.row_menu = Some((id, key.clone()));
+    }
+
+    /// The chat of the list is available to Claude (part 6).
+    fn claude_on(&self, key: &ChatKey) -> bool {
+        self.lists
+            .get(&key.account)
+            .and_then(|rows| rows.iter().find(|row| row.chat == key.chat))
+            .is_some_and(|row| row.claude)
     }
 
     /// Mute's choice under the row (part 5).
@@ -782,6 +799,10 @@ impl List {
                 Some("mute") => self.mute_menu(&chat),
                 Some("unmute") => return vec![Go::Mute(chat, None)],
                 Some("folder") => self.folder_menu(&chat, false),
+                Some(CLAUDE_ITEM) => {
+                    let on = !self.claude_on(&chat);
+                    ask(Request::Claude(ClaudeAsk::Set { key: chat, on }))
+                }
                 // A bot's (part 5): Stop asks first, as the tab's ⋯ does.
                 Some("stop-bot") => return vec![Go::StopBot(chat)],
                 Some("restart-bot") => ask(Request::BotStart {
@@ -1669,6 +1690,10 @@ fn tree_row(account: &str, chat: &ChatRow, now: i64, kind: RowKind) -> TreeRow {
     if chat.muted {
         label_icons.push("icons/muted.svg".to_string());
     }
+    // Available to Claude (part 6): Flux draws `claude` in Claude's color.
+    if chat.claude && !hidden {
+        label_icons.push("claude".to_string());
+    }
     TreeRow {
         key: ChatKey::new(account, chat.chat).tab(),
         parent: None,
@@ -1878,6 +1903,7 @@ mod tests {
             draft: None,
             bot: false,
             blocked: false,
+            claude: false,
         }
     }
 

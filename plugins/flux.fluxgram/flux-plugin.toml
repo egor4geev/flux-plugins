@@ -15,6 +15,11 @@ wasm = "target/wasm32-wasip2/release/flux_fluxgram.wasm"
 # One instance for the whole app holds the program and the accounts: TDLib opens a database once.
 service = true
 
+# Reply with Claude (part 6): a message's action and the field's button open a Claude session
+# with the chat attached.
+[permissions]
+claude = true
+
 # The plugin's program: TDLib (helpers/fluxgram-helper, built by this repository's CI). Its files
 # and checksums come with its first release; until then Flux takes a developer's build from
 # FLUX_DEV_HELPERS.
@@ -85,6 +90,35 @@ location = "dialog"
 id = "sign-in"
 title = "Add Account"
 location = "dialog"
+
+# Claude's tools (part 6, src/claude.rs): the Claude sessions of the window get them as
+# mcp__flux__fluxgram_*. They read only the chats the user made available to Claude (⋯ → Available
+# to Claude, the profile's switch) — never a hidden one; a message leaves only by the user's Send
+# on send_message's card.
+[[tools]]
+name = "chats"
+title = "Chats"
+description = "Lists the Telegram chats the user made available to Claude in FluxGram, across their accounts: each chat's key (for read_chat and search_chat), title, kind (private chat, group, channel, bot, saved messages), the account, the unread count and the last message. Call it first when the user asks about their chats or messages. Other chats can't be read: the user turns a chat on with «Available to Claude» in its ⋯ menu."
+schema = "tools/chats.json"
+
+[[tools]]
+name = "read_chat"
+title = "Read Chat"
+description = "Reads a page of a chat's messages (one per line, oldest to newest: [id] date author (reply to [id]) (forwarded from …) (edited): text; media described; the user's own messages as You). With no before or around: the newest messages. To go further back, call again with before = the id the page ends with («Older: before=…») until you understand the context. around = a message's id: the page around an old message. The chat's key comes from the chats tool."
+schema = "tools/read_chat.json"
+
+[[tools]]
+name = "search_chat"
+title = "Search Chats"
+description = "Searches the messages of one chat (chat = its key) or of every chat available to Claude (no chat) for words; the matches newest first, in read_chat's line format, with their ids — read_chat with around = an id shows a match in its context. For more matches of a chat, call again with its chat and before, as the answer says."
+schema = "tools/search_chat.json"
+
+[[tools]]
+name = "send_message"
+title = "Message to a Chat"
+description = "Proposes a message for a chat available to Claude (chat = its key from the chats tool), as a reply to a message (reply_to = its id) or a new one. It isn't sent by itself: the user sees it on a card in this chat and sends it, edits it in the chat's field, or declines — the answer says which; after an edit or a decline, don't send it again. Read the chat first (read_chat) so the reply fits the conversation; write in the chat's language and tone."
+schema = "tools/send_message.json"
+write = true
 
 # Settings → FluxGram → Media (part 4): what plays by itself, what downloads by itself, the cache.
 [[commands]]

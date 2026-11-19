@@ -4,25 +4,36 @@
 //! dialog (a QR code, or the number, the code and the password). This module draws the last two
 //! and routes the rest.
 //!
+//! Claude's tools (part 6, [`crate::claude`]): a call comes here (`tool-called`) and goes on to
+//! the service, which holds TDLib; its answer comes back ([`Note::Tool`]) and goes to Flux
+//! (`tools.respond`). A call the service can't take, or one a restarted service never heard of,
+//! is answered with an error here: a call never hangs. `send_message`'s card comes the same way
+//! ([`Note::Card`]) and is shown here (`tools.confirm`): Send goes back to the service, Edit puts
+//! the text and the quote into the chat's field in this window, Don't Send is answered here.
+//! Reply with Claude's session ([`Note::Session`]) opens here: the service has no window.
+//!
 //! A view is set only when it differs from the one set before, and the countdowns (the QR code's
 //! refresh, the code's other way) tick only while their screen is on show: an idle window costs
 //! nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use flux_plugin_api::dialog::Ask;
 use flux_plugin_api::host::ui::{self, View};
+use flux_plugin_api::tools::{self, ConfirmChoice, ToolOutput};
 use flux_plugin_api::view::*;
-use flux_plugin_api::{Event, UiEvent, service, timers, tr, trf};
+use flux_plugin_api::{Event, UiEvent, claude, notify, service, timers, tr, trf};
 
 use crate::chat::{self, TabGo, Tabs};
+use crate::claude::{Answer, Card, ClaudeAsk};
 use crate::list::{Go, HIDDEN, HIDE, List};
 use crate::model::{
     AccountView, ChatKey, CodeSent, Note, Request, Screen, SignIn, Snapshot, countdown, initials,
     unix_now,
 };
 use crate::profile_view::{PROFILE, ProfileGo, ProfileView, Section};
+use crate::service::HostWords;
 
 /// The window on the left.
 pub const MAIN: &str = "fluxgram";
@@ -57,6 +68,10 @@ pub struct Window {
     cache_asked: Option<u64>,
     /// The views set, by window: an unchanged one isn't set again.
     views: HashMap<&'static str, View>,
+    /// Claude's calls passed to the service, not answered yet (part 6).
+    calls: HashSet<u64>,
+    /// The `send_message` cards shown, by call: what Edit puts into the chat's field.
+    cards: HashMap<u64, Card>,
 }
 
 impl Window {
@@ -74,6 +89,8 @@ impl Window {
             asked: None,
             cache_asked: None,
             views: HashMap::new(),
+            calls: HashSet::new(),
+            cards: HashMap::new(),
         }
     }
 
@@ -118,6 +135,10 @@ impl Window {
                         .listed(&account, rows.iter().map(|row| row.chat));
                     // ⋯ of a tab a link opened offers Add to FluxGram by it too (part 5).
                     self.tabs.listed(&account, rows.iter().map(|row| row.chat));
+                    // Available to Claude (part 6): the tabs' ⋯ and the profile's switch.
+                    let claude = || rows.iter().filter(|row| row.claude).map(|row| row.chat);
+                    self.tabs.claude(&account, claude());
+                    self.profile.claude(&account, claude());
                     self.list.chats(&account, rows)
                 }
                 Some(Note::Found { request, chats }) => self.list.found(request, chats),
@@ -152,6 +173,38 @@ impl Window {
                     self.tabs_go();
                 }
                 Some(Note::ForceReply { key, message }) => self.tabs.force_reply(&key, &message),
+                // A tool's answer (part 6): to Flux, unless the call is gone.
+                Some(Note::Tool { call, answer }) => {
+                    if self.calls.remove(&call) {
+                        tools::respond(call, output(answer));
+                    }
+                }
+                // A `send_message` card (part 6): shown at the call's step, unless the call is gone.
+                Some(Note::Card { call, card }) => {
+                    if !self.calls.contains(&call) {
+                        return;
+                    }
+                    match tools::confirm(call, &card.confirmation(&HostWords)) {
+                        Ok(()) => {
+                            self.cards.insert(call, card);
+                        }
+                        Err(err) => {
+                            self.calls.remove(&call);
+                            tools::respond(call, ToolOutput::error(&err));
+                            let _ =
+                                service::send_json(&Request::Claude(ClaudeAsk::Cancel { call }));
+                        }
+                    }
+                }
+                // Reply with Claude (part 6): the new session, its field taking the keyboard.
+                Some(Note::Session(reply)) => {
+                    let session = claude::session()
+                        .title(&reply.title)
+                        .attach(&reply.label, &reply.markdown);
+                    if let Err(err) = session.start() {
+                        notify::error(&tr("Couldn't open Claude"), Some(&err));
+                    }
+                }
                 // What a link opens (part 5).
                 Some(Note::Link(told)) => {
                     self.tabs.link_told(told);
@@ -160,9 +213,58 @@ impl Window {
                 None => {}
             },
             Event::ServiceStarted => {
+                // A service started again never heard of the calls passed to the old one.
+                for call in std::mem::take(&mut self.calls) {
+                    tools::respond(call, ToolOutput::error(OFFLINE));
+                }
+                self.cards.clear();
                 let _ = service::send_json(&Request::Hello);
                 self.tabs.service_started();
                 self.list.service_started();
+            }
+            // Claude's tools (part 6): the service answers.
+            Event::ToolCalled(call) => {
+                let ask = Request::Claude(ClaudeAsk::Call {
+                    call: call.id,
+                    tool: call.tool,
+                    arguments: call.arguments,
+                });
+                match service::send_json(&ask) {
+                    Ok(()) => {
+                        self.calls.insert(call.id);
+                    }
+                    Err(_) => tools::respond(call.id, ToolOutput::error(OFFLINE)),
+                }
+            }
+            Event::ToolCancelled(call) => {
+                self.cards.remove(&call);
+                if self.calls.remove(&call) {
+                    let _ = service::send_json(&Request::Claude(ClaudeAsk::Cancel { call }));
+                }
+            }
+            // The user chose on a `send_message` card (part 6): Send — the service sends it;
+            // Edit — the text and the quote into the chat's field here; Don't Send.
+            Event::ToolConfirmed((call, choice)) => {
+                let Some(card) = self.cards.remove(&call) else {
+                    return;
+                };
+                if choice == ConfirmChoice::Confirmed {
+                    if service::send_json(&Request::Claude(ClaudeAsk::Confirm { call })).is_err()
+                        && self.calls.remove(&call)
+                    {
+                        tools::respond(call, ToolOutput::error(OFFLINE));
+                    }
+                    return;
+                }
+                let edit = choice == ConfirmChoice::Edit;
+                if edit {
+                    self.tabs.claude_draft(&card);
+                    self.tabs_go();
+                }
+                if self.calls.remove(&call) {
+                    tools::respond(call, output(card.declined(edit, &HostWords)));
+                    let _ = service::send_json(&Request::Claude(ClaudeAsk::Cancel { call }));
+                }
             }
             Event::ToolWindowShown(window) if window == SIGN_IN => {
                 self.dialog = true;
@@ -751,5 +853,19 @@ fn resend_wait(next: CodeSent) -> &'static str {
         CodeSent::Sms => "Send by SMS in {0}",
         CodeSent::Call | CodeSent::FlashCall | CodeSent::MissedCall => "Call Me in {0}",
         _ => "Send Again in {0}",
+    }
+}
+
+/// What Claude is told when FluxGram's service can't take a call.
+const OFFLINE: &str = "FluxGram isn't running right now: try again in a moment.";
+
+/// A tool's answer as Flux takes it.
+fn output(answer: Answer) -> ToolOutput {
+    ToolOutput {
+        text: answer.text,
+        error: answer.error,
+        summary: answer.summary,
+        detail: answer.detail,
+        excerpt: answer.excerpt,
     }
 }

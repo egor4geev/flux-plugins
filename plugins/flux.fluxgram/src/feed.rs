@@ -168,7 +168,8 @@ pub enum Ask {
     /// The chat of a chat being opened, which the store lacked: the history follows.
     Opened { chat: i64, epoch: u64 },
     /// A message, or an album, sent: the pending messages come back.
-    Sent { chat: i64 },
+    /// `call` — Claude's message (part 6, `send_message`): the call hears how it went.
+    Sent { chat: i64, call: Option<u64> },
     /// The field's text (`text`) through TDLib's Markdown (`parseMarkdown`: `**bold**`,
     /// `__italic__`, `~~strike~~`, `||spoiler||`, `` `code` ``, ```` ```pre``` ````,
     /// `[text](url)`), as Telegram's apps send it: then sent, or saved as an edit.
@@ -298,6 +299,9 @@ pub enum Then {
     /// Sent with the field's files and reply; `true` — without sound; then the messages to
     /// forward (part 5): their chat and ids.
     Send(Box<Composed>, bool, Option<Box<(ChatKey, Vec<String>)>>),
+    /// Claude's message (part 6, `send_message` confirmed on its card): sent with its reply; the
+    /// call (its id) hears how it went.
+    Claude(Box<Composed>, u64),
     /// A message's new text, or its caption (an album's: its captioned item).
     Edit { message: i64 },
 }
@@ -1283,7 +1287,7 @@ impl Feed {
                     self.update(cx, account, &Value::Null, touched);
                 }
             }
-            Ask::Sent { chat } => {
+            Ask::Sent { chat, .. } => {
                 if let Some(error) = error {
                     log::warn(&format!("{account}:{chat}: sendMessage failed: {error}"));
                     // A forum whose General is closed (part 5): only a reply goes, into its topic.
@@ -1333,11 +1337,14 @@ impl Feed {
                 crate::suggest::mention_names(&mut formatted);
                 match then {
                     Then::Send(composed, silent, forward) => {
-                        self.send_formatted(cx, &key, &composed, formatted, silent);
+                        self.send_formatted(cx, &key, &composed, formatted, silent, None);
                         if let Some(forward) = forward {
                             let (from, messages) = *forward;
                             self.forward(cx, &key, &from, &messages, silent);
                         }
+                    }
+                    Then::Claude(composed, call) => {
+                        self.send_formatted(cx, &key, &composed, formatted, false, Some(call))
                     }
                     Then::Edit { message } => self.edit_formatted(cx, &key, message, formatted),
                 }
@@ -2525,7 +2532,7 @@ impl Feed {
         let files = !composed.files.is_empty();
         let text = composed.text.trim().to_string();
         if text.is_empty() {
-            self.send_formatted(cx, key, &composed, formatted_text(""), silent);
+            self.send_formatted(cx, key, &composed, formatted_text(""), silent, None);
             if let Some((from, messages)) = forward {
                 self.forward(cx, key, &from, &messages, silent);
             }
@@ -2558,6 +2565,39 @@ impl Feed {
         if has_draft && files {
             save_draft(cx, key, "");
         }
+    }
+
+    /// Claude's message (part 6): `send_message` confirmed on its card goes as the field's text
+    /// does — the Markdown parsed into entities, the reply, the topic —, and its call (`call`)
+    /// hears how it went ([`Ask::Sent`]).
+    pub fn send_claude(
+        &mut self,
+        cx: &mut Cx,
+        key: &ChatKey,
+        text: String,
+        reply_to: Option<String>,
+        call: u64,
+    ) {
+        self.answered(cx, key, reply_to.as_deref());
+        let composed = Composed {
+            text: text.clone(),
+            files: Vec::new(),
+            reply_to,
+        };
+        cx.td.send(
+            &key.account,
+            json!({"@type": "parseMarkdown", "text": formatted_text(&text)}),
+            Asked::Feed(Ask::Markdown {
+                chat: key.chat,
+                text,
+                then: Then::Claude(Box::new(composed), call),
+            }),
+        );
+    }
+
+    /// A message of an open chat as TDLib gave it (part 6: what Reply with Claude attaches).
+    pub fn message(&self, key: &ChatKey, id: i64) -> Option<&Value> {
+        self.chats.get(key)?.raw.get(&id)
     }
 
     /// The reply over the chat's field quotes a part of its message (`quote`: the text, its
@@ -2702,7 +2742,10 @@ impl Feed {
             json!({"@type": "sendMessage", "chat_id": key.chat, "topic_id": topic,
                 "reply_to": reply, "options": null, "reply_markup": null,
                 "input_message_content": content}),
-            Asked::Feed(Ask::Sent { chat: key.chat }),
+            Asked::Feed(Ask::Sent {
+                chat: key.chat,
+                call: None,
+            }),
         );
     }
 
@@ -2723,12 +2766,16 @@ impl Feed {
             json!({"@type": "sendInlineQueryResultMessage", "chat_id": key.chat,
                 "topic_id": topic, "reply_to": reply, "options": null, "query_id": query,
                 "result_id": result, "hide_via_bot": true}),
-            Asked::Feed(Ask::Sent { chat: key.chat }),
+            Asked::Feed(Ask::Sent {
+                chat: key.chat,
+                call: None,
+            }),
         );
     }
 
     /// The field's text parsed (`text`: TDLib's `formattedText`, empty when there is none) goes:
-    /// as a message, or as the caption of the first file; `silent` — without a notification.
+    /// as a message, or as the caption of the first file; `silent` — without a notification;
+    /// `call` — Claude's message (part 6), whose call hears how it went.
     fn send_formatted(
         &mut self,
         cx: &mut Cx,
@@ -2736,6 +2783,7 @@ impl Feed {
         composed: &Composed,
         text: Value,
         silent: bool,
+        call: Option<u64>,
     ) {
         let topic = self.topic(cx, key, composed.reply_to.as_deref());
         let reply_to = self.reply_of(key, composed.reply_to.as_deref());
@@ -2802,7 +2850,10 @@ impl Feed {
             cx.td.send(
                 &key.account,
                 request,
-                Asked::Feed(Ask::Sent { chat: key.chat }),
+                Asked::Feed(Ask::Sent {
+                    chat: key.chat,
+                    call,
+                }),
             );
         }
     }

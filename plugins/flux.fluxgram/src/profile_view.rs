@@ -2,6 +2,7 @@
 //! Telegram's profile box — a person's or a group's top (a large picture, the name, "online" /
 //! "5 members"), the info rows, the buttons (Send Message, Add to FluxGram or Remove — a hidden
 //! chat's Show in List while the hidden chats are open in the window, part 5 —, Mute), and
+//! Available to Claude (part 6: a switch, for a chat of the list — never a hidden one), and
 //! the parts under them, a chip each with its count: Members (groups: admins first, a search),
 //! Photos and Videos (a gallery by month), Files, Links, Voice. A member opens their own profile
 //! in the dialog (Back returns).
@@ -13,7 +14,8 @@
 //! squares in sight, a file when it is clicked — opened by the system once it is there.
 //!
 //! A scenario reaches the dialog through `ui:<plugin>/profile/<element>`: the buttons by their
-//! ids (`profile-message`, `profile-list`, `profile-mute`, `profile-back`, `part/<part>`), a
+//! ids (`profile-message`, `profile-list`, `profile-mute`, `profile-claude`, `profile-back`,
+//! `part/<part>`), a
 //! member by `member/<user id>`, a media item by `item/<message id>`, and
 //! `ui-submit:…/profile/members-search=<text>` searches the members.
 
@@ -27,6 +29,7 @@ use flux_plugin_api::host::ui::{self, View};
 use flux_plugin_api::view::*;
 use flux_plugin_api::{log, notify, service, system, timers, tr, trf};
 
+use crate::claude::ClaudeAsk;
 use crate::model::{ChatKey, Request};
 use crate::profile::{MediaItem, MediaKind, Member, Profile, ProfileAsk, ProfileTold};
 
@@ -148,6 +151,8 @@ pub struct ProfileView {
     open_when_ready: Option<(MediaKind, i64)>,
     /// The chats in each account's list (Add to FluxGram, or Remove).
     listed: HashMap<String, HashSet<i64>>,
+    /// The chats of each account's list available to Claude (part 6): the switch.
+    claude: HashMap<String, HashSet<i64>>,
     /// The hidden chats open in the window's list (Show in List; part 5) — none while they are
     /// closed: a hidden chat's profile is then any chat's that isn't in the list.
     hidden: HashSet<ChatKey>,
@@ -168,6 +173,7 @@ impl ProfileView {
             media: HashMap::new(),
             open_when_ready: None,
             listed: HashMap::new(),
+            claude: HashMap::new(),
             hidden: HashSet::new(),
             view: None,
         }
@@ -340,6 +346,18 @@ impl ProfileView {
         }
     }
 
+    /// The chats of the account's list available to Claude changed (part 6): the switch.
+    pub fn claude(&mut self, account: &str, chats: impl IntoIterator<Item = i64>) {
+        let chats: HashSet<i64> = chats.into_iter().collect();
+        if self.claude.get(account) == Some(&chats) {
+            return;
+        }
+        self.claude.insert(account.to_string(), chats);
+        if self.key().is_some_and(|key| key.account == account) {
+            self.render();
+        }
+    }
+
     /// The hidden chats open in the window's list changed (opened, closed, one hidden or shown).
     pub fn set_hidden(&mut self, hidden: Vec<ChatKey>) {
         let hidden: HashSet<ChatKey> = hidden.into_iter().collect();
@@ -384,6 +402,16 @@ impl ProfileView {
                     chats.insert(key.chat);
                     request(Request::AddChat { key });
                 }
+            }
+            // Available to Claude (part 6): shown at once; the list's rows follow.
+            ("profile-claude", UiEvent::Toggled(on)) => {
+                let chats = self.claude.entry(key.account.clone()).or_default();
+                if on {
+                    chats.insert(key.chat);
+                } else {
+                    chats.remove(&key.chat);
+                }
+                request(Request::Claude(ClaudeAsk::Set { key, on }));
             }
             ("profile-mute", UiEvent::Clicked) => {
                 if let Some(profile) = &mut self.profile {
@@ -656,7 +684,13 @@ impl ProfileView {
                 } else {
                     Listed::No
                 };
-                children.extend(top(profile, listed));
+                // Claude (part 6): a chat of the list only — never a hidden one.
+                let claude = (listed == Listed::Yes).then(|| {
+                    self.claude
+                        .get(&key.account)
+                        .is_some_and(|chats| chats.contains(&key.chat))
+                });
+                children.extend(top(profile, listed, claude));
                 children.push(chips(profile, self.part()));
                 children.extend(self.part_view());
             }
@@ -782,7 +816,7 @@ enum Listed {
     No,
 }
 
-fn top(profile: &Profile, listed: Listed) -> Vec<Element> {
+fn top(profile: &Profile, listed: Listed, claude: Option<bool>) -> Vec<Element> {
     let status = (!profile.status.is_empty()).then(|| {
         let tone = if profile.online {
             Tone::Accent
@@ -836,6 +870,9 @@ fn top(profile: &Profile, listed: Listed) -> Vec<Element> {
     };
     buttons.push(button("profile-mute", &tr(label)).icon(icon).into());
     parts.push(row("profile-actions", buttons));
+    if let Some(on) = claude {
+        parts.push(switch("profile-claude", &tr("Available to Claude"), on));
+    }
     parts.push(divider("profile-divider"));
     parts
 }

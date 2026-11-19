@@ -194,6 +194,8 @@ pub enum Step {
 struct List {
     /// The chats added, in the order added.
     chats: Vec<i64>,
+    /// The chats available to Claude (part 6), in the order turned on: always some of `chats`.
+    claude: Vec<i64>,
     /// The account's client is ready: the chats are asked for, and new messages notify.
     ready: bool,
     /// Listed chats TDLib doesn't have (`getChat` failed): left out of the rows.
@@ -281,10 +283,13 @@ impl Chats {
         self.phrase_set = storage::get::<Sealed>(HIDDEN).is_some();
         for account in accounts {
             let chats: Vec<i64> = storage::get(&storage_key(account)).unwrap_or_default();
+            let mut claude: Vec<i64> = storage::get(&claude_key(account)).unwrap_or_default();
+            claude.retain(|chat| chats.contains(chat));
             self.lists.insert(
                 account.clone(),
                 List {
                     chats,
+                    claude,
                     dirty: true,
                     ..List::default()
                 },
@@ -306,8 +311,9 @@ impl Chats {
     /// The chats in the account's list, and its hidden ones while some window has them open:
     /// the helper passes their updates.
     ///
-    /// Claude (part 6) must never see the hidden chats: what it is given of the chats comes from
-    /// the account's list (`List::chats`), never from this function or [`Unlocked`].
+    /// Claude (part 6) never sees the hidden chats: what it is given of the chats comes from the
+    /// account's list ([`Chats::claude_chats`]: `List::claude`, a part of `List::chats`), never
+    /// from this function or [`Unlocked`].
     pub fn listed(&self, account: &str) -> Vec<i64> {
         let mut chats = self
             .lists
@@ -318,6 +324,53 @@ impl Chats {
             chats.extend(unlocked.list.chats(account));
         }
         chats
+    }
+
+    /// The account's chats available to Claude (part 6), in the order turned on: in its list,
+    /// so never a hidden one; none while the account has no list (signed out).
+    pub fn claude_chats(&self, account: &str) -> Vec<i64> {
+        self.lists
+            .get(account)
+            .map(|list| {
+                list.claude
+                    .iter()
+                    .copied()
+                    .filter(|chat| list.chats.contains(chat) && !list.missing.contains(chat))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Claude may read the chat now (part 6): on, and in the account's list.
+    pub fn claude_available(&self, key: &ChatKey) -> bool {
+        self.claude_chats(&key.account).contains(&key.chat)
+    }
+
+    /// Available to Claude, on or off (part 6): only a chat of the list is turned on — a hidden
+    /// one is in none. Kept in the storage; the rows carry it to every window.
+    pub fn set_claude(&mut self, key: &ChatKey, on: bool) {
+        if self.turn_claude(key, on)
+            && let Some(list) = self.lists.get(&key.account)
+        {
+            storage::set(&claude_key(&key.account), &list.claude);
+        }
+    }
+
+    /// [`Chats::set_claude`] without the storage: true — it changed.
+    fn turn_claude(&mut self, key: &ChatKey, on: bool) -> bool {
+        let Some(list) = self.lists.get_mut(&key.account) else {
+            return false;
+        };
+        let has = list.claude.contains(&key.chat);
+        if on && !has && list.chats.contains(&key.chat) {
+            list.claude.push(key.chat);
+        } else if !on && has {
+            list.claude.retain(|chat| *chat != key.chat);
+        } else {
+            return false;
+        }
+        list.dirty = true;
+        true
     }
 
     /// The account's client is ready (signed in now, or the helper started again): load the list.
@@ -351,6 +404,7 @@ impl Chats {
     pub fn account_gone(&mut self, account: &str) {
         self.lists.remove(account);
         storage::remove(&storage_key(account));
+        storage::remove(&claude_key(account));
         if keep_listed(&mut self.folders, |key| key.account != account) {
             self.save_folders();
         }
@@ -510,6 +564,8 @@ impl Chats {
                     storage::set(&storage_key(&key.account), &list.chats);
                     list.dirty = true;
                 }
+                // Claude's access goes with the chat: no access without the mark that shows it.
+                self.set_claude(&key, false);
                 // A hidden chat removed (its tab's ⋯): it leaves the hidden list too.
                 if let Some(unlocked) = &mut self.unlocked
                     && unlocked.list.unhide(&key.account, key.chat)
@@ -891,6 +947,28 @@ fn storage_key(account: &str) -> String {
     format!("chats/{account}")
 }
 
+/// The storage's key of the account's chats available to Claude (part 6).
+fn claude_key(account: &str) -> String {
+    format!("claude/{account}")
+}
+
+#[cfg(test)]
+impl Chats {
+    /// An account's list with the chats available to Claude among them: other modules' tests.
+    pub fn with_list(account: &str, chats: Vec<i64>, claude: Vec<i64>) -> Self {
+        let mut all = Chats::new();
+        all.lists.insert(
+            account.to_string(),
+            List {
+                chats,
+                claude,
+                ..List::default()
+            },
+        );
+        all
+    }
+}
+
 // --- What the rows and the popup say (no host: tested natively) ---
 
 /// The account's rows in order; none while a listed chat is neither in the store nor known to be
@@ -932,7 +1010,14 @@ fn rows(store: &Store, list: &List, words: &dyn Words) -> Option<Vec<ChatRow>> {
             row.chat,
         )
     });
-    Some(rows.into_iter().map(|(_, _, row)| row).collect())
+    Some(
+        rows.into_iter()
+            .map(|(_, _, mut row)| {
+                row.claude = list.claude.contains(&row.chat);
+                row
+            })
+            .collect(),
+    )
 }
 
 /// Telegram's order of a chat: pinned first, then its place in the main list (the archive's, or
@@ -1035,6 +1120,8 @@ pub fn row(store: &Store, chat: i64, words: &dyn Words) -> Option<ChatRow> {
             .filter(|draft| !draft.is_empty()),
         bot: store.is_bot(chat),
         blocked: found.blocked,
+        // The list's own: `rows` sets it.
+        claude: false,
     })
 }
 
@@ -1335,6 +1422,9 @@ impl Chats {
             storage::set(&storage_key(&key.account), &visible.chats);
             visible.dirty = true;
         }
+        // Claude never sees a hidden chat (part 6): its access goes, and doesn't come back when
+        // it is shown again.
+        self.set_claude(&key, false);
         // The folders are plaintext: a hidden chat is never in one.
         self.leave_folders(&key);
         self.drop_card(&key);
@@ -1666,6 +1756,53 @@ mod tests {
             row(&store, team, &English).unwrap().last.as_deref(),
             Some("Anna Smirnova joined the group")
         );
+    }
+
+    #[test]
+    fn claude_sees_only_the_chats_turned_on_in_the_list() {
+        let mut chats = Chats::new();
+        chats.lists.insert(
+            "a1".into(),
+            List {
+                chats: vec![-1000000001001, 101],
+                ..List::default()
+            },
+        );
+        let group = ChatKey::new("a1", -1000000001001);
+        // Off by default.
+        assert!(!chats.claude_available(&group));
+        assert!(chats.claude_chats("a1").is_empty());
+        assert!(chats.turn_claude(&group, true));
+        assert!(!chats.turn_claude(&group, true));
+        assert!(chats.claude_available(&group));
+        assert_eq!(chats.claude_chats("a1"), [-1000000001001]);
+        // The rows carry it: the mark, the menus' item, the profile's switch.
+        let store = store();
+        let rows = rows(&store, &chats.lists["a1"], &English).unwrap();
+        let claude: Vec<(i64, bool)> = rows.iter().map(|row| (row.chat, row.claude)).collect();
+        assert_eq!(claude, [(-1000000001001, true), (101, false)]);
+        // A chat out of the list — a hidden one is — is never turned on, nor read by its key.
+        let hidden = ChatKey::new("a1", -1000000001003);
+        assert!(!chats.turn_claude(&hidden, true));
+        assert!(!chats.claude_available(&hidden));
+        // One that leaves the list (hidden, removed) is unavailable at once.
+        chats
+            .lists
+            .get_mut("a1")
+            .unwrap()
+            .chats
+            .retain(|chat| *chat != group.chat);
+        assert!(!chats.claude_available(&group));
+        chats.lists.get_mut("a1").unwrap().chats.push(group.chat);
+        assert!(chats.claude_available(&group));
+        // Off.
+        assert!(chats.turn_claude(&group, false));
+        assert!(!chats.claude_available(&group));
+        // A signed-out account has no list; an unknown key is no chat.
+        assert!(chats.turn_claude(&group, true));
+        chats.lists.remove("a1");
+        assert!(!chats.claude_available(&group));
+        assert!(!chats.claude_available(&ChatKey::new("zz", 101)));
     }
 
     #[test]

@@ -469,6 +469,9 @@ pub enum Request {
         message: String,
         emoji: String,
     },
+    // --- Claude (part 6, `claude.rs`) ---
+    /// Available to Claude turned on or off; a tool's call, or its cancel.
+    Claude(crate::claude::ClaudeAsk),
 }
 
 // --- The chats (part 3) ---
@@ -557,6 +560,20 @@ pub enum Note {
     },
     /// What a link opens (part 5, `links.rs`): to the window that asked.
     Link(crate::links::LinkTold),
+    /// The answer to a call of Claude's tool (part 6, `claude.rs`): to the window that got the
+    /// call, which hands it to Flux.
+    Tool {
+        call: u64,
+        answer: crate::claude::Answer,
+    },
+    /// The card of a `send_message` call (part 6): to the window that got the call, which shows
+    /// it and acts on the user's choice.
+    Card {
+        call: u64,
+        card: crate::claude::Card,
+    },
+    /// Reply with Claude (part 6): the session the window that asked opens.
+    Session(crate::claude::Reply),
 }
 
 /// A row of the list on the left.
@@ -587,6 +604,10 @@ pub struct ChatRow {
     pub bot: bool,
     #[serde(default)]
     pub blocked: bool,
+    /// Available to Claude (part 6): the mark after the title; the ⋯ menu's item and the
+    /// profile's switch are on.
+    #[serde(default)]
+    pub claude: bool,
 }
 
 /// A chat's header in its tab: the title, the picture, who it is and what is going on.

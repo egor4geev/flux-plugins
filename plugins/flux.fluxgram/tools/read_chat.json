@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "chat": {
+      "type": "string",
+      "description": "The chat's key, as the chats tool lists it: \"<account>:<chat id>\"."
+    },
+    "before": {
+      "type": "string",
+      "description": "A message's id (the [id] of a line): the page of messages older than it. The previous page ends with the id to give here."
+    },
+    "around": {
+      "type": "string",
+      "description": "A message's id: the page centred on it, for an old message the user asks about (from search_chat). Not with before."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "How many messages: 50 by default, at most 100.",
+      "minimum": 1,
+      "maximum": 100
+    }
+  },
+  "required": ["chat"]
+}

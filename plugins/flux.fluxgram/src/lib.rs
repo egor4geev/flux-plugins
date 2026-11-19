@@ -26,6 +26,9 @@
 //!   and commands do what they say, the web's are asked first as the settings say, a spoofed
 //!   address always (no host: tested natively);
 //! - [`hidden`] — the hidden chats' list, sealed with a key derived from the user's phrase;
+//! - [`claude`] — Claude in the chats (part 6): the chats available to it, its tools (`chats`,
+//!   `read_chat`, `search_chat`, `send_message` — the card the user sends from) answered by the
+//!   service, a message in Claude's line, Reply with Claude's attachment;
 //! - [`convert`] — TDLib's messages as Flux shows them (no host: tested natively);
 //! - [`summary`] — a message in one line: the list's last line, a notification, a quote;
 //! - [`profile`] / [`profile_view`] — the profile dialog: a person, a group and its members, the
@@ -38,6 +41,7 @@ mod ads;
 mod bots;
 mod chat;
 mod chats;
+mod claude;
 mod config;
 mod convert;
 mod feed;

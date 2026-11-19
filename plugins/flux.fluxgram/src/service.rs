@@ -163,6 +163,8 @@ pub enum Asked {
     Panel(panel::Ask),
     /// A request of a link's (part 5): its answer goes there.
     Link(crate::links::Ask),
+    /// A request of a call of Claude's tools (part 6): its answer goes there.
+    Claude(crate::claude::Ask),
     /// The helper's render of an animation (`fluxgram.render`): its output.
     Render(String),
     /// The size of an account's cache (`getStorageStatisticsFast`): measured with the
@@ -300,6 +302,8 @@ pub struct Service {
     cache_checked: HashMap<String, Instant>,
     /// The helper's chat filter of each account, as last sent (`fluxgram.chats`).
     filters: HashMap<String, Vec<i64>>,
+    /// Claude's tools' calls in progress (part 6).
+    tools: crate::claude::Tools,
 }
 
 impl Service {
@@ -325,6 +329,7 @@ impl Service {
             panels: panel::Panels::new(),
             cache_checked: HashMap::new(),
             filters: HashMap::new(),
+            tools: crate::claude::Tools::default(),
         }
     }
 
@@ -466,6 +471,7 @@ impl Service {
 
     /// The account is gone (signed out): its store, list and feeds go.
     fn account_gone(&mut self, key: &str) {
+        self.tools.fail(Some(key));
         self.stores.remove(key);
         self.filters.remove(key);
         self.chats.account_gone(key);
@@ -539,6 +545,8 @@ impl Service {
         self.td.helper = None;
         self.live.clear();
         self.td.asked.clear();
+        // Claude's calls in progress won't get TDLib's answers: they end now.
+        self.tools.fail(None);
         // The closing clients' folders are left: no TDLib holds them now.
         for key in std::mem::take(&mut self.discarded) {
             remove_folder(&key);
@@ -671,13 +679,26 @@ impl Service {
         if let Some(extra) = value["@extra"].as_u64() {
             match cx.td.asked.remove(&extra) {
                 Some(Asked::Chats(ask)) => self.chats.answer(&mut cx, key, ask, value),
-                Some(Asked::Feed(ask)) => self.feed.answer(&mut cx, key, ask, value),
+                Some(Asked::Feed(ask)) => {
+                    // Claude's message (part 6): its call hears how the send went.
+                    if let crate::feed::Ask::Sent {
+                        call: Some(call), ..
+                    } = &ask
+                    {
+                        self.tools.sent(*call, value);
+                    }
+                    self.feed.answer(&mut cx, key, ask, value)
+                }
                 Some(Asked::Profile(ask)) => self.profiles.answer(&mut cx, key, ask, value),
                 Some(Asked::Panel(ask)) => {
                     self.panels.answer(&mut cx, &mut self.feed, key, ask, value)
                 }
                 Some(Asked::Link(ask)) => {
                     crate::links::answer(&mut cx, &mut self.feed, key, ask, value)
+                }
+                Some(Asked::Claude(ask)) => {
+                    let names = account_names(&self.accounts);
+                    self.tools.answer(&mut cx, &self.chats, &names, ask, value)
                 }
                 // The sign-in's and the account's own: `answer` takes them.
                 Some(asked) => {
@@ -689,6 +710,8 @@ impl Service {
         }
         self.chats.update(&mut cx, key, value, touched);
         self.feed.update(&mut cx, key, value, touched);
+        // Claude's message sent (part 6): Telegram's id for its call.
+        self.tools.send_update(key, value);
         self.profiles.update(&mut cx, key, value, touched);
         self.panels.update(key, touched);
     }
@@ -1181,6 +1204,75 @@ impl Service {
                 self.chats.hidden(&mut cx, window, ask);
             }
             Request::Folders(ask) => self.chats.folders(ask),
+            // Claude (part 6): the access, the tools' calls.
+            Request::Claude(ask) => match ask {
+                crate::claude::ClaudeAsk::Set { key, on } => self.chats.set_claude(&key, on),
+                crate::claude::ClaudeAsk::Call {
+                    call,
+                    tool,
+                    arguments,
+                } => {
+                    let names = account_names(&self.accounts);
+                    let mut cx = Cx {
+                        td: &mut self.td,
+                        stores: &mut self.stores,
+                    };
+                    self.tools.call(
+                        &mut cx,
+                        &self.chats,
+                        &names,
+                        window,
+                        (call, &tool, &arguments),
+                    );
+                }
+                crate::claude::ClaudeAsk::Cancel { call } => self.tools.cancel(call),
+                // Send on a card: the feed sends it as the field does, if Claude may still write.
+                crate::claude::ClaudeAsk::Confirm { call } => {
+                    let item = HostWords.tr(crate::claude::ITEM);
+                    match self.tools.confirmed(&self.chats, call, &item) {
+                        Some(Ok((key, text, reply_to))) => {
+                            let mut cx = Cx {
+                                td: &mut self.td,
+                                stores: &mut self.stores,
+                            };
+                            self.feed.send_claude(&mut cx, &key, text, reply_to, call);
+                        }
+                        Some(Err((window, answer))) => crate::claude::respond(window, call, answer),
+                        None => {}
+                    }
+                }
+                // Reply with Claude: the chat on (its mark shows it), the session's attachment
+                // back to the window.
+                crate::claude::ClaudeAsk::Reply {
+                    key,
+                    message,
+                    draft,
+                } => {
+                    self.chats.set_claude(&key, true);
+                    let names = account_names(&self.accounts);
+                    let empty = Store::default();
+                    let store = self.stores.get(&key.account).unwrap_or(&empty);
+                    let message = message
+                        .and_then(|id| id.parse::<i64>().ok())
+                        .and_then(|id| self.feed.message(&key, id));
+                    let replied = message
+                        .and_then(crate::claude::reply_to)
+                        .and_then(|id| self.feed.message(&key, id));
+                    let reply = crate::claude::reply_session(
+                        store,
+                        &key,
+                        names.get(&key.account).map(String::as_str),
+                        message,
+                        replied,
+                        draft.as_deref(),
+                        crate::claude::now(),
+                        &HostWords,
+                    );
+                    if let Err(err) = service::send_json_to(window, &Note::Session(reply)) {
+                        log::warn(&format!("Reply with Claude didn't reach its window: {err}"));
+                    }
+                }
+            },
             Request::Panel(ask) => {
                 let mut cx = Cx {
                     td: &mut self.td,
@@ -1595,6 +1687,18 @@ fn remove_folder(key: &str) {
 }
 
 /// The secret with the database's encryption key of the account `key`.
+/// The accounts' names for Claude, by key, where there are several: "Egor Ageev"; one account
+/// needs none.
+fn account_names(accounts: &[Account]) -> HashMap<String, String> {
+    if accounts.len() < 2 {
+        return HashMap::new();
+    }
+    accounts
+        .iter()
+        .map(|account| (account.key.clone(), account.name()))
+        .collect()
+}
+
 fn secret_key(key: &str) -> String {
     format!("database/{key}")
 }

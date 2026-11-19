@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "properties": {
+    "chat": {
+      "type": "string",
+      "description": "The chat's key, as the chats tool lists it: \"<account>:<chat id>\"."
+    },
+    "text": {
+      "type": "string",
+      "description": "The message's text in Telegram's Markdown, as the user's field takes it: **bold**, __italic__, ~~strikethrough~~, ||spoiler||, `code`, ```code block```, [text](address). At most 4096 characters."
+    },
+    "reply_to": {
+      "type": "string",
+      "description": "The id of the message this one answers (the [id] of a line read_chat or search_chat showed): sent as a reply, quoting it. None — a new message."
+    }
+  },
+  "required": ["chat", "text"]
+}
