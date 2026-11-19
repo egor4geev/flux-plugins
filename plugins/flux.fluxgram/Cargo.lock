@@ -133,7 +133,8 @@ dependencies = [
 
 [[package]]
 name = "flux-plugin-api"
-version = "0.4.1"
+version = "0.5.0"
+source = "git+https://github.com/egor4geev/flux?rev=406a379eb858f1f6cff52955f43f6760d5efec9b#406a379eb858f1f6cff52955f43f6760d5efec9b"
 dependencies = [
  "serde",
  "serde_json",

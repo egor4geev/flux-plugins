@@ -11,9 +11,7 @@ crate-type = ["cdylib"]
 doctest = false
 
 [dependencies]
-# Development: the SDK of the Flux tree next to this repository (branch feature/fluxgram, API 0.5).
-# Pinned to the Flux commit by `rev` before the pull request, as the other plugins are.
-flux-plugin-api = { path = "../../../flux/crates/flux-plugin-api" }
+flux-plugin-api = { git = "https://github.com/egor4geev/flux", rev = "406a379eb858f1f6cff52955f43f6760d5efec9b" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Each account's database key: 32 random bytes, base64, in Flux's secrets.

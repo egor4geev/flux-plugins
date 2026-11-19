@@ -20,13 +20,17 @@ service = true
 [permissions]
 claude = true
 
-# The plugin's program: TDLib (helpers/fluxgram-helper, built by this repository's CI). Its files
-# and checksums come with its first release; until then Flux takes a developer's build from
-# FLUX_DEV_HELPERS.
+# The plugin's program: TDLib (helpers/fluxgram-helper, built by this repository's CI) — the files
+# of its release fluxgram-helper-v0.2.0 and their checksums (of the .gz files). A developer's build
+# still comes from FLUX_DEV_HELPERS.
 [[helpers]]
 name = "fluxgram-helper"
 
 [helpers.platforms]
+macos-aarch64 = { url = "https://github.com/egor4geev/flux-plugins/releases/download/fluxgram-helper-v0.2.0/fluxgram-helper-macos-aarch64.gz", sha256 = "d865387a6c74c85100d4eeb630b372fa4582012116fc296456958c97f3d0524d" }
+macos-x86_64 = { url = "https://github.com/egor4geev/flux-plugins/releases/download/fluxgram-helper-v0.2.0/fluxgram-helper-macos-x86_64.gz", sha256 = "1a45c531a423a506a9ddb062a77c0ef37db6db7695a61502403f8f5a9615096c" }
+windows-x86_64 = { url = "https://github.com/egor4geev/flux-plugins/releases/download/fluxgram-helper-v0.2.0/fluxgram-helper-windows-x86_64.gz", sha256 = "302c9a753ca6bea7c0df275655dfb3b8ad0c755ecca000919f8de1c6a28757cc" }
+windows-aarch64 = { url = "https://github.com/egor4geev/flux-plugins/releases/download/fluxgram-helper-v0.2.0/fluxgram-helper-windows-aarch64.gz", sha256 = "386796b85f3f6e55f2185a3ef3a3bf0312743a4fc7a90d21674d6d1b9000affd" }
 
 [[commands]]
 id = "add-account"
