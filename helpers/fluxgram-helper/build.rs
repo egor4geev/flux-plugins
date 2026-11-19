@@ -1,7 +1,8 @@
-//! Links TDLib in statically: the static libraries of the pinned `tdlib-rs` release for the target
-//! (TDLib 1.8.61 with OpenSSL and zlib), downloaded and checked against their SHA-256 into
-//! `target/tdlib/<platform>/` once — or taken from `TDLIB_DIR`, a folder with `lib/` (a TDLib of
-//! one's own build: the same libraries).
+//! Links TDLib in statically: TDLib 1.8.61 with OpenSSL and zlib as static libraries, built by this
+//! repository's `.github/workflows/tdlib.yml` — for macOS 12.0, for Windows' static C runtime
+//! (/MT) — and released as `tdlib-v1.8.61`; the target's archive is downloaded and checked against
+//! its SHA-256 into `target/tdlib/<platform>/` once — or taken from `TDLIB_DIR`, a folder with
+//! `lib/` (a TDLib of one's own build: the same libraries, built the same way).
 //!
 //! The download needs `curl` and `tar` (both come with macOS and Windows 10+).
 //!
@@ -17,8 +18,9 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-/// The release of `tdlib-rs` with TDLib's prebuilt libraries: `tdlib-<version>-<platform>.zip`.
-const RELEASE: &str = "https://github.com/FedericoBruzzone/tdlib-rs/releases/download/v1.4.0";
+/// The release with TDLib's libraries (tdlib.yml): `tdlib-<version>-<platform>.tar.gz`, a
+/// `tdlib/` folder with `lib/`.
+const RELEASE: &str = "https://github.com/egor4geev/flux-plugins/releases/download/tdlib-v1.8.61";
 const TDLIB_VERSION: &str = "1.8.61";
 
 /// The archives this program is built from, by platform, with their SHA-256 (pinned: a release's
@@ -26,19 +28,19 @@ const TDLIB_VERSION: &str = "1.8.61";
 const ARCHIVES: &[(&str, &str)] = &[
     (
         "macos-aarch64",
-        "6600d1fbc6ebf7a3df669b9ae84d48265a28f3c7456a2b64cfd0327aceb88620",
+        "9b053dc6136681448edb542bf35f391052d7b29bc774ee302005e4c937ddcad3",
     ),
     (
         "macos-x86_64",
-        "2e96b32a8b92d86629b1f116f1e40fd2eed9e7373584cfd947304b90a07013a6",
+        "25ef60f75d4a6264d2b882ad607069fb837680a56506c7c66b6525b0238c9ebc",
     ),
     (
         "windows-x86_64",
-        "20f226518578b040028556bb862668f6802d16d3a5726df3dccb867dca4e9de1",
+        "9cdd831d6533138ca0286117fc7ada747ac140e49578a059ac2c10097b8afa36",
     ),
     (
         "windows-aarch64",
-        "ff37a0edc69c738d5b91bafea53a88983f97be4844b107f8b938f8fd4ff57559",
+        "aebbc03e0cb0703eeda65f121b9251edac63f70079271ca73077d9fcca3d3fe4",
     ),
 ];
 
@@ -103,9 +105,14 @@ fn main() {
         ] {
             println!("cargo:rustc-link-lib=dylib={system}");
         }
-        // TDLib's libraries are built for the C runtime in DLLs (/MD), OpenSSL's and zlib's for the
-        // static one (/MT): one runtime in the program, the DLLs', as Rust's default.
-        println!("cargo:rustc-link-arg=/NODEFAULTLIB:libcmt.lib");
+        // TDLib, OpenSSL and zlib are built for the static C runtime (/MT): so is the program
+        // (`+crt-static`, .cargo/config.toml), one runtime and no Visual C++ DLLs to need.
+        let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        assert!(
+            features.split(',').any(|feature| feature == "crt-static"),
+            "fluxgram-helper is built with the static C runtime on Windows, as its TDLib: \
+             +crt-static (.cargo/config.toml: cargo is run in the helper's folder)"
+        );
     }
 }
 
@@ -237,36 +244,35 @@ fn fetch(platform: &str) -> PathBuf {
         fs::remove_dir_all(&dir).unwrap();
     }
     fs::create_dir_all(&dir).unwrap();
-    let name = format!("tdlib-{TDLIB_VERSION}-{platform}.zip");
-    let zip = dir.join(&name);
+    let name = format!("tdlib-{TDLIB_VERSION}-{platform}.tar.gz");
+    let archive = dir.join(&name);
     let url = format!("{RELEASE}/{name}");
     eprintln!("downloading TDLib {TDLIB_VERSION} ({platform}): {url}");
     let status = Command::new("curl")
         .args(["-fsSL", "--retry", "3", "-o"])
-        .arg(&zip)
+        .arg(&archive)
         .arg(&url)
         .status()
         .expect("curl is needed to download TDLib");
     assert!(status.success(), "couldn't download {url}");
 
-    let actual = file_sha256(&zip);
+    let actual = file_sha256(&archive);
     assert!(
         actual == sha256,
         "{name}: SHA-256 {actual}, expected {sha256} — the release's file changed"
     );
 
-    // Only the libraries: the archive's DLLs and headers aren't used (the program declares the
-    // four functions of td_json_client.h itself).
+    // Only the libraries (the program declares the four functions of td_json_client.h itself).
     let status = Command::new(tar())
         .arg("-xf")
-        .arg(&zip)
+        .arg(&archive)
         .arg("-C")
         .arg(&dir)
         .arg("tdlib/lib")
         .status()
         .expect("tar is needed to unpack TDLib");
-    assert!(status.success(), "couldn't unpack {}", zip.display());
-    fs::remove_file(&zip).unwrap();
+    assert!(status.success(), "couldn't unpack {}", archive.display());
+    fs::remove_file(&archive).unwrap();
     fs::write(&marker, sha256).unwrap();
     lib
 }
@@ -281,8 +287,7 @@ fn target_dir() -> PathBuf {
     }
 }
 
-/// Windows' own bsdtar unpacks zip archives; the GNU tar of Git's tools, first on some PATHs,
-/// doesn't.
+/// Windows' own bsdtar: the GNU tar of Git's tools, first on some PATHs, takes `C:` for a host.
 fn tar() -> PathBuf {
     if cfg!(windows) {
         let root = env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());

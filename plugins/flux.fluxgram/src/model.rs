@@ -275,10 +275,24 @@ pub enum Request {
         first: String,
         last: String,
     },
-    /// The field was sent: the text, the files, the message answered.
+    /// The field was sent: the text, the files, the message answered; `silent` — Send Without
+    /// Sound (part 5): the chat gets no notification.
     Send {
         key: ChatKey,
         composed: Composed,
+        #[serde(default)]
+        silent: bool,
+        /// Messages to forward after the text (part 5): their chat and ids, in order.
+        #[serde(default)]
+        forward: Option<(ChatKey, Vec<String>)>,
+    },
+    /// The field's word asks for suggestions (part 5): "@" — the members to mention matching
+    /// `text`, "/" — the bots' commands; the answer is a [`Note::Feed`] of `suggestions` to this
+    /// window only.
+    Suggest {
+        key: ChatKey,
+        trigger: String,
+        text: String,
     },
     /// A message's new text (the field in editing).
     Edit {
@@ -290,6 +304,22 @@ pub enum Request {
     Delete {
         key: ChatKey,
         message: String,
+    },
+    /// Delete selected messages, confirmed by the user (part 5): for everyone (`revoke`), or
+    /// only for the user.
+    DeleteMany {
+        key: ChatKey,
+        messages: Vec<String>,
+        revoke: bool,
+    },
+    /// Forward messages of the chat `from` into the chat `key` (part 5), in this order, with no
+    /// text (`Send`'s `forward` goes after one); the account is the same (Telegram forwards only
+    /// within one).
+    Forward {
+        key: ChatKey,
+        from: ChatKey,
+        messages: Vec<String>,
+        silent: bool,
     },
     /// A part the user clicked that isn't there yet: a file, a picture, a video — download it.
     Download {
@@ -341,6 +371,104 @@ pub enum Request {
     // --- FluxGram's folders (`chats.rs`) ---
     /// Create, rename, delete a folder; put a chat in one, or take it out.
     Folders(crate::chats::FolderAsk),
+
+    // --- The pinned messages and the chat's menus (part 5, `feed.rs`) ---
+    /// The pinned message's bar was clicked on `message`: it is revealed (the feed loaded around
+    /// it when it isn't), and the bar goes to the next older pinned one.
+    PinnedClicked {
+        key: ChatKey,
+        message: String,
+    },
+    /// Pin a message, confirmed: `notify` — the group's members are told; `for_both` — pinned
+    /// for the other person of a one-to-one chat too.
+    Pin {
+        key: ChatKey,
+        message: String,
+        notify: bool,
+        for_both: bool,
+    },
+    /// Unpin a message, confirmed.
+    Unpin {
+        key: ChatKey,
+        message: String,
+    },
+    /// The bar's × where the user can't unpin: no bar in the chat until a newer message is
+    /// pinned; `remember` — after a restart too (never for a hidden chat: no trace of it).
+    HidePinned {
+        key: ChatKey,
+        message: String,
+        remember: bool,
+    },
+    /// Mark the chat as read (every message, mention and reaction), or as unread.
+    MarkRead {
+        key: ChatKey,
+        read: bool,
+    },
+    /// Copy a message's link: the service tells this window ([`Note::Copied`]).
+    CopyLink {
+        key: ChatKey,
+        message: String,
+    },
+    /// A sticker message's sticker to the favorites (`keep`) or out of them; a GIF message's GIF
+    /// to the saved ones.
+    KeepMedia {
+        key: ChatKey,
+        message: String,
+        keep: bool,
+    },
+    // --- Channels and bots (part 5) ---
+    /// Join the channel (the field's button «Join»).
+    Join {
+        key: ChatKey,
+    },
+    /// An advertisement clicked or reported (`ads.rs`).
+    Ad(crate::ads::AdAsk),
+    /// A bot's button (`bots.rs`): a callback — the bot's answer comes to this window
+    /// ([`Note::BotAnswer`]); a text of the keyboard over the field, sent.
+    BotCallback {
+        key: ChatKey,
+        message: String,
+        data: String,
+    },
+    BotText {
+        key: ChatKey,
+        text: String,
+    },
+    /// Start the bot (the field's «Start»: `sendBotStartMessage`, with the parameter of the link
+    /// that opened the chat); `restart` — unblock it first (⋯ → Restart Bot).
+    BotStart {
+        key: ChatKey,
+        restart: bool,
+    },
+    /// Block the chat's bot or person (⋯ → Stop Bot, confirmed), or unblock it.
+    Block {
+        key: ChatKey,
+        blocked: bool,
+    },
+    // --- Links (part 5, `links.rs`) ---
+    /// A Telegram link, a mention, an invite or a sticker set to open: the answer is a
+    /// [`Note::Link`] to this window only.
+    Link(crate::links::LinkAsk),
+    // --- Polls and reactions (part 5) ---
+    /// A vote in the poll of `message`: the options' indices; none — the vote taken back
+    /// (Retract Vote).
+    Vote {
+        key: ChatKey,
+        message: String,
+        options: Vec<u32>,
+    },
+    /// Stop the poll of `message`, confirmed: its results are final.
+    StopPoll {
+        key: ChatKey,
+        message: String,
+    },
+    /// The user's reaction `emoji` on `message`: taken back when it is the user's, else put
+    /// (the oldest of the user's own going first when they are at the limit).
+    React {
+        key: ChatKey,
+        message: String,
+        emoji: String,
+    },
 }
 
 // --- The chats (part 3) ---
@@ -398,6 +526,37 @@ pub enum Note {
     /// FluxGram's folders, whole (`chats.rs`): to every window when they changed, and to a window
     /// that has just started.
     Folders { folders: Vec<crate::chats::Folder> },
+    /// A message's link for the clipboard (part 5): to the window that asked, which copies it and
+    /// says so.
+    Copied { link: String },
+    /// The chat's advertisement (part 5, `ads.rs`): what the window's clicks and About the Ad
+    /// need; none — no ad. To the windows that have the chat open.
+    Ad {
+        key: ChatKey,
+        ad: Option<crate::ads::AdInfo>,
+    },
+    /// A bot's answer to a button (part 5): a notification, or a calm dialog (`alert`) under the
+    /// bot's name; a page to open. To the window that asked.
+    BotAnswer {
+        key: ChatKey,
+        bot: String,
+        text: String,
+        alert: bool,
+        url: String,
+    },
+    /// A bot asks for a reply to `message` (part 5): its quote goes over the field. To the
+    /// windows that have the chat open.
+    ForceReply { key: ChatKey, message: String },
+    /// Report the ad: the options Telegram offers (id, text) under its title — the window asks
+    /// the user to choose. To the window that asked.
+    AdReport {
+        key: ChatKey,
+        message: String,
+        title: String,
+        options: Vec<(String, String)>,
+    },
+    /// What a link opens (part 5, `links.rs`): to the window that asked.
+    Link(crate::links::LinkTold),
 }
 
 /// A row of the list on the left.
@@ -422,6 +581,12 @@ pub struct ChatRow {
     pub pinned: bool,
     /// The user's unsent draft: the row shows "Draft: …" in place of the last message.
     pub draft: Option<String>,
+    /// A chat with a bot, and the bot stopped (part 5): the row's ⋯ offers Stop Bot or Restart
+    /// Bot, as the tab's does.
+    #[serde(default)]
+    pub bot: bool,
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 /// A chat's header in its tab: the title, the picture, who it is and what is going on.
@@ -440,6 +605,34 @@ pub struct ChatHeader {
     /// The user may write here: the field; otherwise a feed only.
     pub can_send: bool,
     pub muted: bool,
+    /// Unread messages, or marked as unread (part 5): ⋯ offers Mark as Read, else Mark as Unread.
+    #[serde(default)]
+    pub unread: bool,
+    /// Saved Messages (part 5): nobody to notify — no Send Without Sound.
+    #[serde(default)]
+    pub saved: bool,
+    /// A channel (part 5): where the user can't post, a button in place of the field — Mute or
+    /// Unmute, or Join when the user isn't in it (`joined`).
+    #[serde(default)]
+    pub channel: bool,
+    #[serde(default)]
+    pub joined: bool,
+    /// A one-to-one chat with a bot (part 5): ⋯ offers Stop Bot, or Restart Bot when `blocked`;
+    /// with no messages yet, «Start» in place of the field; blocked, «Unblock».
+    #[serde(default)]
+    pub bot: bool,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default)]
+    pub empty: bool,
+    /// The bot's menu (part 5): its commands ("/start", the description) — the field's Menu
+    /// button; empty — no menu (none, or the bot's menu is an app).
+    #[serde(default)]
+    pub commands: Vec<(String, String)>,
+    /// The reactions the user may put in the chat (part 5), in order: the chat's own list, or
+    /// Telegram's when it allows all; empty — none (only shown).
+    #[serde(default)]
+    pub reactions: Vec<String>,
 }
 
 /// A chat the Add Chat popup offers.
@@ -452,6 +645,9 @@ pub struct FoundChat {
     pub detail: Option<String>,
     /// Already in the list.
     pub added: bool,
+    /// The user's own chat, Saved Messages (part 5): on top of the Forward picker.
+    #[serde(default)]
+    pub saved: bool,
 }
 
 /// The words of the chats the service makes: the host's translation in the plugin, English in
@@ -990,6 +1186,7 @@ pub const KEPT: &[&str] = &[
     "updateChatPhoto",
     "updateChatAccentColors",
     "updateChatPermissions",
+    "updateChatHasProtectedContent",
     "updateChatLastMessage",
     "updateChatPosition",
     "updateChatReadInbox",
@@ -1001,6 +1198,14 @@ pub const KEPT: &[&str] = &[
     "updateBasicGroup",
     "updateSupergroup",
     "updateUserStatus",
+    // A forum's topics renamed, recolored, closed (part 5).
+    "updateForumTopicInfo",
+    // A bot's keyboard over the field, a bot stopped (part 5).
+    "updateChatReplyMarkup",
+    "updateChatBlockList",
+    // The reactions a chat allows, and Telegram's when it allows all (part 5).
+    "updateChatAvailableReactions",
+    "updateActiveEmojiReactions",
 ];
 
 #[cfg(test)]

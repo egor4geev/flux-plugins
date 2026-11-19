@@ -116,6 +116,8 @@ impl Window {
                     // The profile dialog offers Add to FluxGram or Remove by the list.
                     self.profile
                         .listed(&account, rows.iter().map(|row| row.chat));
+                    // ⋯ of a tab a link opened offers Add to FluxGram by it too (part 5).
+                    self.tabs.listed(&account, rows.iter().map(|row| row.chat));
                     self.list.chats(&account, rows)
                 }
                 Some(Note::Found { request, chats }) => self.list.found(request, chats),
@@ -126,8 +128,35 @@ impl Window {
                 Some(Note::Hidden(told)) => {
                     let go = self.list.hidden_told(told);
                     self.go(go);
+                    // The profile offers Show in List for the hidden chats open here (part 5).
+                    self.profile.set_hidden(self.list.hidden_chats());
                 }
                 Some(Note::Folders { folders }) => self.list.folders(folders),
+                Some(Note::Copied { link }) => self.tabs.copied(&link),
+                Some(Note::Ad { key, ad }) => self.tabs.ad_told(&key, ad),
+                Some(Note::AdReport {
+                    key,
+                    message,
+                    title,
+                    options,
+                }) => self.tabs.ad_report(key, message, &title, options),
+                // A bot's answer, its ask for a reply (part 5).
+                Some(Note::BotAnswer {
+                    key,
+                    bot,
+                    text,
+                    alert,
+                    url,
+                }) => {
+                    self.tabs.bot_answer(&key, &bot, &text, alert, &url);
+                    self.tabs_go();
+                }
+                Some(Note::ForceReply { key, message }) => self.tabs.force_reply(&key, &message),
+                // What a link opens (part 5).
+                Some(Note::Link(told)) => {
+                    self.tabs.link_told(told);
+                    self.tabs_go();
+                }
                 None => {}
             },
             Event::ServiceStarted => {
@@ -187,6 +216,10 @@ impl Window {
             }
             // A folder's name (New Folder, Rename…): the list's.
             Event::TextAnswered((id, text)) => self.list.text_answered(id, text),
+            // Pin's question (part 5): the tabs'.
+            Event::FormAnswered((id, values)) => {
+                self.tabs.form_answered(id, values);
+            }
             // A tab's menu (⋯) is the tabs'; the Add Chat popup is the list's.
             Event::PickerQuery((picker, query)) if !self.tabs.owns_picker(picker) => {
                 self.list.picker_query(picker, &query)
@@ -234,9 +267,12 @@ impl Window {
                 TabGo::Profile(key) => self.profile.open(&key, Section::Info),
                 TabGo::Media(key) => self.profile.open(&key, Section::Media),
                 TabGo::Mute(key, muted) => self.profile.mute(&key, muted),
+                TabGo::MuteFor(key, seconds) => self.profile.mute_for(&key, seconds),
                 TabGo::Hide(key) => self.list.hide(&key),
                 TabGo::Unhide(key) => self.list.unhide(&key),
                 TabGo::Folder(key) => self.list.folder_menu(&key, true),
+                TabGo::Forward(forward) => self.list.forward(forward),
+                TabGo::Opened(key) => self.list.tab_opened(&key),
             }
         }
     }
@@ -249,6 +285,16 @@ impl Window {
                     let title = self.list.title(&key);
                     self.tabs.open(&key, title.as_deref());
                     self.list.tab_opened(&key);
+                }
+                ProfileGo::Unhide(key) => self.list.unhide(&key),
+                // A link of the chat's media (part 5): Telegram's opens in FluxGram, over which
+                // the dialog would stay.
+                ProfileGo::Link(key, url) => {
+                    if crate::links::is_telegram(&url) {
+                        ui::hide(PROFILE);
+                    }
+                    self.tabs.follow(&key, &url, crate::links::Shown::Address);
+                    self.tabs_go();
                 }
             }
         }
@@ -263,6 +309,13 @@ impl Window {
                     self.tabs.open(&key, title.as_deref());
                     self.list.tab_opened(&key);
                 }
+                // Part 5: the Forward picker's chat — its bar first, then the tab.
+                Go::Forward(key, forward) => {
+                    self.tabs.set_forward(&key, forward);
+                    let title = self.list.title(&key);
+                    self.tabs.open(&key, title.as_deref());
+                    self.list.tab_opened(&key);
+                }
                 Go::OpenHidden(key) => {
                     let title = self.list.title(&key);
                     self.tabs.open_hidden(&key, title.as_deref());
@@ -271,8 +324,13 @@ impl Window {
                 Go::CloseHidden => self.tabs.close_hidden(),
                 Go::MarkHidden(key, hidden) => self.tabs.set_hidden(&key, hidden),
                 Go::AddAccount => self.add_account(),
+                Go::Mute(key, Some(seconds)) => self.profile.mute_for(&key, seconds),
+                Go::Mute(key, None) => self.profile.mute(&key, false),
+                Go::StopBot(key) => self.tabs.stop_bot(key),
             }
         }
+        // The hidden chats may have closed (the phrase left the search): the profile forgets them.
+        self.profile.set_hidden(self.list.hidden_chats());
     }
 
     fn ask(&self, request: Request) {

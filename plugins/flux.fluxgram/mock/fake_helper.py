@@ -27,7 +27,9 @@ The rules, by the number:
 The chats (part 3): a signed-in account sees the people, groups and messages of `fake_world.py`;
 the requests this file doesn't answer go to the handlers `fake_chats.py` (the list) and
 `fake_feed.py` (a chat) register there. Media (part 4): `fake_media.py` — the panel's stickers and
-GIFs, @gif, opening a voice message, `fluxgram.render`.
+GIFs, @gif, opening a voice message, `fluxgram.render`; the cache (part 5): `fluxgram.cache`,
+`getStorageStatisticsFast` (FAKE_FILES_SIZE=<bytes> added to the files' size: a cache over the
+limit) and `optimizeStorage` (answered, nothing removed); polls and reactions: `fake_polls.py`.
 
 FAKE_LOG=<path>: every request is appended there as it came (a scenario checks what was asked).
 """
@@ -49,6 +51,11 @@ import fake_feed  # noqa: F401 — registers a chat's handlers
 import fake_search  # noqa: F401 — registers the search in a chat
 import fake_profile  # noqa: F401 — registers the profiles: people, groups, members, muting
 import fake_media  # registers the panel's stickers and GIFs, @gif, opening media; renders
+import fake_pins  # noqa: F401 — registers the pinned messages and the chat's menus (part 5)
+import fake_channels  # noqa: F401 — registers the channels, the ads, joining, the forum (part 5)
+import fake_bots  # noqa: F401 — registers the bots' buttons, keyboards, Start and Stop (part 5)
+import fake_links  # noqa: F401 — registers the links: Telegram's, the entities', the web's (part 5)
+import fake_polls  # noqa: F401 — registers the polls and the reactions (part 5)
 
 LOCK = threading.Lock()
 # The helper's filter: ("keep", types) — only these updates pass; ("drop", types) — all but these.
@@ -325,6 +332,10 @@ class Client:
         elif kind == "close":
             self.ok(request)
             self.close_now()
+        elif kind == "getStorageStatisticsFast":
+            self.answer(request, fake_media.storage_statistics(self.params))
+        elif kind == "optimizeStorage":
+            self.answer(request, {"@type": "storageStatistics", "size": 0, "count": 0, "by_chat": []})
         elif kind in fake_world.HANDLERS:
             fake_world.HANDLERS[kind](self, request)
         else:
@@ -364,6 +375,12 @@ def main() -> int:
             with open(log, "a") as out:
                 out.write(raw + "\n")
         kind = request.get("@type", "")
+        if kind == "fluxgram.cache":
+            answer = fake_media.cache(request)
+            if "@extra" in request:
+                answer["@extra"] = request["@extra"]
+            emit(answer)
+            continue
         if kind == "fluxgram.render":
             answer = fake_media.render(request)
             if "@extra" in request:

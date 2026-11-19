@@ -4,9 +4,12 @@
 //! Two threads: this one reads the plugin's lines and passes them to TDLib (`td_send` takes any
 //! thread); the receiver waits in `td_receive` — no timers: an idle program sleeps — and writes
 //! what's ready at once as one batch. At the end of input every client is closed first, so the
-//! accounts' databases are left whole. Animated stickers are rendered on threads of their own
-//! (`render`), their answers written as whole lines between the batches.
+//! accounts' databases are left whole. Animated stickers are rendered in worker processes — the
+//! program itself, started with `--render-worker` (`worker`) — kept by threads of their own
+//! (`render`); a cache folder is trimmed on a thread of its own (`cache`); their answers are
+//! written as whole lines between the batches.
 
+mod cache;
 mod fxa;
 mod pixels;
 mod relay;
@@ -14,6 +17,7 @@ mod render;
 mod td;
 mod tgs;
 mod webm;
+mod worker;
 
 use std::ffi::c_int;
 use std::io::{self, BufRead, Write};
@@ -55,6 +59,10 @@ static SHARED: LazyLock<Shared> = LazyLock::new(|| Shared {
 });
 
 fn main() {
+    // A render worker: nothing of TDLib's, only the renderers.
+    if std::env::args().nth(1).as_deref() == Some(worker::ARG) {
+        worker::serve();
+    }
     let options = match options(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(message) => {
@@ -195,6 +203,7 @@ fn read_input() {
                 SHARED.clients.lock().unwrap().set_chats(&key, chats)
             }
             Ok(Input::Render { render, extra }) => render::submit(render, extra, write_out),
+            Ok(Input::Cache { cache, extra }) => cache::submit(cache, extra, write_out),
             Ok(Input::Quit) => return,
             Ok(Input::Nothing) => {}
             Err(error) => write_out(error.line().as_bytes()),

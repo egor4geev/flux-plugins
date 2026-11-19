@@ -1,6 +1,7 @@
 //! The profile dialog (part 3+): the window `profile` (`location = "dialog"`) over Flux, as
 //! Telegram's profile box — a person's or a group's top (a large picture, the name, "online" /
-//! "5 members"), the info rows, the buttons (Send Message, Add to FluxGram or Remove, Mute), and
+//! "5 members"), the info rows, the buttons (Send Message, Add to FluxGram or Remove — a hidden
+//! chat's Show in List while the hidden chats are open in the window, part 5 —, Mute), and
 //! the parts under them, a chip each with its count: Members (groups: admins first, a search),
 //! Photos and Videos (a gallery by month), Files, Links, Voice. A member opens their own profile
 //! in the dialog (Back returns).
@@ -47,6 +48,11 @@ pub enum Section {
 pub enum ProfileGo {
     /// Open the chat's tab (Send Message).
     Open(ChatKey),
+    /// Show a hidden chat in the list again (Show in List): the list knows how.
+    Unhide(ChatKey),
+    /// Follow a link of the chat's media (part 5): as the feed's links go ([`crate::links`]),
+    /// with the account of the profile's chat.
+    Link(ChatKey, String),
 }
 
 /// A part of the dialog under the info: a chip each.
@@ -142,6 +148,9 @@ pub struct ProfileView {
     open_when_ready: Option<(MediaKind, i64)>,
     /// The chats in each account's list (Add to FluxGram, or Remove).
     listed: HashMap<String, HashSet<i64>>,
+    /// The hidden chats open in the window's list (Show in List; part 5) — none while they are
+    /// closed: a hidden chat's profile is then any chat's that isn't in the list.
+    hidden: HashSet<ChatKey>,
     /// The view set last: an unchanged one isn't set again.
     view: Option<View>,
 }
@@ -159,6 +168,7 @@ impl ProfileView {
             media: HashMap::new(),
             open_when_ready: None,
             listed: HashMap::new(),
+            hidden: HashSet::new(),
             view: None,
         }
     }
@@ -330,6 +340,18 @@ impl ProfileView {
         }
     }
 
+    /// The hidden chats open in the window's list changed (opened, closed, one hidden or shown).
+    pub fn set_hidden(&mut self, hidden: Vec<ChatKey>) {
+        let hidden: HashSet<ChatKey> = hidden.into_iter().collect();
+        if hidden == self.hidden {
+            return;
+        }
+        self.hidden = hidden;
+        if self.key().is_some() {
+            self.render();
+        }
+    }
+
     /// The user did something in the dialog.
     pub fn ui(&mut self, element: &str, event: UiEvent) -> Vec<ProfileGo> {
         let Some(key) = self.key() else {
@@ -348,6 +370,10 @@ impl ProfileView {
                 go.push(ProfileGo::Open(key));
                 ui::hide(PROFILE);
                 return go;
+            }
+            // A hidden chat's Show in List: the list unhides it (it joins the list).
+            ("profile-list", UiEvent::Clicked) if self.hidden.contains(&key) => {
+                go.push(ProfileGo::Unhide(key));
             }
             ("profile-list", UiEvent::Clicked) => {
                 let chats = self.listed.entry(key.account.clone()).or_default();
@@ -387,7 +413,17 @@ impl ProfileView {
             (GALLERY, UiEvent::Visible((first, last))) => self.visible(&first, &last),
             (GALLERY, UiEvent::LoadOlder) | ("media-more", UiEvent::Clicked) => self.more(),
             (FILES, UiEvent::Activated(message)) => self.activate(MediaKind::Files, &message),
-            (LINKS, UiEvent::Activated(message)) => self.activate(MediaKind::Links, &message),
+            (LINKS, UiEvent::Activated(message)) => {
+                let url = message
+                    .parse()
+                    .ok()
+                    .and_then(|id| self.item(MediaKind::Links, id))
+                    .and_then(|item| item.url.clone());
+                match url {
+                    Some(url) => go.push(ProfileGo::Link(key, url)),
+                    None => self.activate(MediaKind::Links, &message),
+                }
+            }
             (VOICE, UiEvent::Activated(message)) => self.activate(MediaKind::Voice, &message),
             (FILES, UiEvent::RowAction((message, action))) if action == SHOW => {
                 let path = message
@@ -549,6 +585,20 @@ impl ProfileView {
         }
     }
 
+    /// Mute a chat for `seconds` (a chat tab's ⋯ → Mute's choice; part 5).
+    pub fn mute_for(&mut self, key: &ChatKey, seconds: i64) {
+        ask(ProfileAsk::MuteFor {
+            key: key.clone(),
+            seconds,
+        });
+        if self.key().as_ref() == Some(key)
+            && let Some(profile) = &mut self.profile
+        {
+            profile.muted = true;
+            self.render();
+        }
+    }
+
     /// Mute or unmute a chat (a chat tab's ⋯ menu).
     pub fn mute(&mut self, key: &ChatKey, muted: bool) {
         ask(ProfileAsk::Mute {
@@ -595,10 +645,17 @@ impl ProfileView {
                 children.push(progress("profile-loading", None));
             }
             Some(profile) => {
-                let listed = self
+                let listed = if self.hidden.contains(&key) {
+                    Listed::Hidden
+                } else if self
                     .listed
                     .get(&key.account)
-                    .is_some_and(|chats| chats.contains(&key.chat));
+                    .is_some_and(|chats| chats.contains(&key.chat))
+                {
+                    Listed::Yes
+                } else {
+                    Listed::No
+                };
                 children.extend(top(profile, listed));
                 children.push(chips(profile, self.part()));
                 children.extend(self.part_view());
@@ -717,7 +774,15 @@ fn open_file(path: &str) {
 }
 
 /// The top: the header, the info, the buttons.
-fn top(profile: &Profile, listed: bool) -> Vec<Element> {
+/// Where the profile's chat is: in the list, among the hidden chats open in the window, neither.
+#[derive(Clone, Copy, PartialEq)]
+enum Listed {
+    Yes,
+    Hidden,
+    No,
+}
+
+fn top(profile: &Profile, listed: Listed) -> Vec<Element> {
     let status = (!profile.status.is_empty()).then(|| {
         let tone = if profile.online {
             Tone::Accent
@@ -758,10 +823,10 @@ fn top(profile: &Profile, listed: bool) -> Vec<Element> {
                 .into(),
         );
     }
-    let (label, icon) = if listed {
-        ("Remove from FluxGram", "minus")
-    } else {
-        ("Add to FluxGram", "plus")
+    let (label, icon) = match listed {
+        Listed::Yes => ("Remove from FluxGram", "minus"),
+        Listed::Hidden => ("Show in List", "icons/eye.svg"),
+        Listed::No => ("Add to FluxGram", "plus"),
     };
     buttons.push(button("profile-list", &tr(label)).icon(icon).into());
     let (label, icon) = if profile.muted {

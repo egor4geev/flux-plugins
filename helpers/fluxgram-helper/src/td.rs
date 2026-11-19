@@ -43,17 +43,3 @@ unsafe fn owned(text: *const c_char) -> Option<String> {
     let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
-
-/// libc++'s handler of a failed check in its code (TDLib's libraries call it). macOS's libc++
-/// has it since 13.3 only, and TDLib's libraries are built for macOS 15: the program's own
-/// handler — libc++ lets a program define it — keeps it running on macOS 12, Flux's minimum.
-/// The format's arguments aren't read: the format names the check.
-#[cfg(target_os = "macos")]
-#[unsafe(export_name = "_ZNSt3__122__libcpp_verbose_abortEPKcz")]
-extern "C" fn libcpp_verbose_abort(format: *const c_char) -> ! {
-    if !format.is_null() {
-        let format = unsafe { CStr::from_ptr(format) }.to_string_lossy();
-        eprintln!("fluxgram-helper: libc++: {}", format.trim_end());
-    }
-    std::process::abort()
-}

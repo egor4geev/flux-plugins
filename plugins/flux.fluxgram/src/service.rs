@@ -161,10 +161,19 @@ pub enum Asked {
     Profile(profile::Ask),
     /// A request of the field's panel: its answer goes there.
     Panel(panel::Ask),
+    /// A request of a link's (part 5): its answer goes there.
+    Link(crate::links::Ask),
     /// The helper's render of an animation (`fluxgram.render`): its output.
     Render(String),
-    /// The size of an account's cache (`getStorageStatisticsFast`): over the limit — optimized.
+    /// The size of an account's cache (`getStorageStatisticsFast`): measured with the
+    /// animations' folder, over the limit — both trimmed.
     Cache(String),
+    /// The size of the animations' folder (`fluxgram.cache`, part 5), asked with an account's
+    /// files' size (`files`): the two together against the limit.
+    Frames { key: String, files: u64 },
+    /// The animations' folder trimmed (the open chats look for their animations again) or
+    /// cleared (the accounts' caches are measured again).
+    FramesTrimmed { cleared: bool },
     /// Anything else: an error goes to the log.
     Other(&'static str),
 }
@@ -667,6 +676,9 @@ impl Service {
                 Some(Asked::Panel(ask)) => {
                     self.panels.answer(&mut cx, &mut self.feed, key, ask, value)
                 }
+                Some(Asked::Link(ask)) => {
+                    crate::links::answer(&mut cx, &mut self.feed, key, ask, value)
+                }
                 // The sign-in's and the account's own: `answer` takes them.
                 Some(asked) => {
                     cx.td.asked.insert(extra, asked);
@@ -735,14 +747,47 @@ impl Service {
                 self.panels.rendered(&output, ok);
             }
             (Asked::Cache(key), None) => self.cache_size(&key, value),
+            (Asked::Frames { key, files }, _) => {
+                // A helper that can't (an older one, a failure): only TDLib's part counts.
+                let frames = match value["@type"] == "fluxgram.cacheSize" {
+                    true => value["size"].as_u64().unwrap_or_default(),
+                    false => {
+                        log::warn(&format!("The animations' cache: {}", value["message"]));
+                        0
+                    }
+                };
+                self.cache_total(&key, files, frames);
+            }
+            (Asked::FramesTrimmed { cleared }, _) => {
+                if value["@type"] != "fluxgram.cacheSize" {
+                    log::warn(&format!("The animations' cache: {}", value["message"]));
+                    // A helper without `fluxgram.cache` (before 0.2.0): the folder goes as part 4
+                    // removed it.
+                    if cleared {
+                        remove_frames();
+                    }
+                }
+                // What the open chats found on disk before the helper got to it is gone now:
+                // they look again (and render it again).
+                self.feed.animations_trimmed();
+                self.panels.animations_trimmed();
+                if cleared {
+                    self.cache_checked.clear();
+                    let keys: Vec<String> = self.stores.keys().cloned().collect();
+                    for key in keys {
+                        self.check_cache(&key);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    // --- The cache (part 4) ---
+    // --- The cache (parts 4–5) ---
 
     /// Looks at the account's cache when a download ends (at most every `CACHE_CHECK_EVERY`):
-    /// over the limit, TDLib deletes the files used longest ago.
+    /// TDLib's files and the animations' folder together — over the limit, the files and the
+    /// animations used longest ago go.
     fn check_cache(&mut self, key: &str) {
         if !self.stores.contains_key(key)
             || self
@@ -760,31 +805,67 @@ impl Service {
         );
     }
 
-    /// The cache's size: over the limit — `optimizeStorage` down to it (files of the last hour
-    /// stay: they are on screen).
+    /// TDLib's part of the cache: the animations' folder is measured next (the animations used
+    /// again since the last time touched first, so they go last).
     fn cache_size(&mut self, key: &str, statistics: &Value) {
-        let size = statistics["files_size"].as_u64().unwrap_or_default();
-        let limit = cache_limit();
-        if limit == 0 || size <= limit {
-            return;
-        }
-        log::info(&format!(
-            "{key}: the cache is {} MB, over its {} MB: optimizing",
-            size >> 20,
-            limit >> 20
-        ));
-        self.td.send(
-            key,
-            json!({"@type": "optimizeStorage", "size": limit, "ttl": 10 * 365 * 86_400,
-                "count": 1_000_000, "immunity_delay": -1, "file_types": [], "chat_ids": [],
-                "exclude_chat_ids": [], "return_deleted_file_statistics": false,
-                "chat_limit": 0}),
-            Asked::Other("optimizeStorage"),
+        let files = statistics["files_size"].as_u64().unwrap_or_default();
+        let touch = self.feed.frames.take_touched();
+        self.td.ask(
+            json!({"@type": "fluxgram.cache", "dir": frames_dir(), "touch": touch}),
+            Asked::Frames {
+                key: key.to_string(),
+                files,
+            },
         );
     }
 
+    /// The cache's size — TDLib's `files` and the animations' `frames` — shown in Settings; over
+    /// the limit, each part is trimmed to its share of it: TDLib's by `optimizeStorage` (files
+    /// of the last hour stay: they are on screen), the folder by the helper, the least recently
+    /// used first. Each account's files count with the whole folder (it is shared).
+    fn cache_total(&mut self, key: &str, files: u64, frames: u64) {
+        let total = files + frames;
+        flux_plugin_api::settings::status(
+            "cache-size",
+            &trf(
+                "In use: {0}",
+                &[&match total {
+                    0 => trf("{0} MB", &[&0]),
+                    _ => profile::size_text(total, &HostWords),
+                }],
+            ),
+            flux_plugin_api::settings::Tone::Muted,
+        );
+        let limit = cache_limit();
+        let Some((files_to, frames_to)) = cache_shares(files, frames, limit) else {
+            return;
+        };
+        log::info(&format!(
+            "{key}: the cache is {} MB, over its {} MB: trimming",
+            total >> 20,
+            limit >> 20
+        ));
+        if files > files_to {
+            self.td.send(
+                key,
+                json!({"@type": "optimizeStorage", "size": files_to, "ttl": 10 * 365 * 86_400,
+                    "count": 1_000_000, "immunity_delay": -1, "file_types": [], "chat_ids": [],
+                    "exclude_chat_ids": [], "return_deleted_file_statistics": false,
+                    "chat_limit": 0}),
+                Asked::Other("optimizeStorage"),
+            );
+        }
+        if frames > frames_to {
+            self.td.ask(
+                json!({"@type": "fluxgram.cache", "dir": frames_dir(), "limit": frames_to}),
+                Asked::FramesTrimmed { cleared: false },
+            );
+        }
+    }
+
     /// Clear Cache (Settings, confirmed): every account's media files and the rendered
-    /// animations go; the open chats download what they show again.
+    /// animations go (the helper empties their folder); the open chats download what they show
+    /// again, and the cache is measured again for Settings.
     fn clear_cache(&mut self) {
         let keys: Vec<String> = self.stores.keys().cloned().collect();
         for key in keys {
@@ -798,11 +879,13 @@ impl Service {
                 Asked::Other("optimizeStorage"),
             );
         }
-        let frames = frames_dir();
-        if let Err(err) = std::fs::remove_dir_all(&frames)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
-            log::warn(&format!("Couldn't clear the animations: {err}"));
+        if self.td.running() {
+            self.td.ask(
+                json!({"@type": "fluxgram.cache", "dir": frames_dir(), "limit": 0, "clear": true}),
+                Asked::FramesTrimmed { cleared: true },
+            );
+        } else {
+            remove_frames();
         }
         self.feed.cache_cleared();
         self.panels.cache_cleared();
@@ -1106,6 +1189,13 @@ impl Service {
                 self.panels.request(&mut cx, &mut self.feed, window, ask);
             }
             Request::ClearCache => self.clear_cache(),
+            Request::Link(ask) => {
+                let mut cx = Cx {
+                    td: &mut self.td,
+                    stores: &mut self.stores,
+                };
+                crate::links::request(&mut cx, window, ask);
+            }
             // The list's.
             Request::AddChat { .. }
             | Request::RemoveChat { .. }
@@ -1124,13 +1214,32 @@ impl Service {
             | Request::LoadNewer { .. }
             | Request::Visible { .. }
             | Request::Send { .. }
+            | Request::Suggest { .. }
             | Request::Edit { .. }
             | Request::Delete { .. }
+            | Request::DeleteMany { .. }
+            | Request::Forward { .. }
             | Request::Download { .. }
             | Request::JumpTo { .. }
             | Request::Draft { .. }
             | Request::MediaPlayed { .. }
-            | Request::Quote { .. } => {
+            | Request::Quote { .. }
+            | Request::PinnedClicked { .. }
+            | Request::Pin { .. }
+            | Request::Unpin { .. }
+            | Request::HidePinned { .. }
+            | Request::MarkRead { .. }
+            | Request::CopyLink { .. }
+            | Request::KeepMedia { .. }
+            | Request::Join { .. }
+            | Request::BotCallback { .. }
+            | Request::BotText { .. }
+            | Request::BotStart { .. }
+            | Request::Block { .. }
+            | Request::Vote { .. }
+            | Request::StopPoll { .. }
+            | Request::React { .. }
+            | Request::Ad(_) => {
                 let mut cx = Cx {
                     td: &mut self.td,
                     stores: &mut self.stores,
@@ -1422,6 +1531,28 @@ fn cache_limit() -> u64 {
     gb << 30
 }
 
+/// What each part of the cache — TDLib's `files`, the animations' `frames` — is trimmed to when
+/// together they are over `limit` (0 — none): its share of the limit, as of the total. None —
+/// within it.
+fn cache_shares(files: u64, frames: u64, limit: u64) -> Option<(u64, u64)> {
+    let total = files + frames;
+    if limit == 0 || total <= limit {
+        return None;
+    }
+    // u128: a limit of 10 GB times a folder of gigabytes.
+    let frames_to = (u128::from(limit) * u128::from(frames) / u128::from(total)) as u64;
+    Some((limit - frames_to, frames_to))
+}
+
+/// The animations' folder removed by the plugin itself (no helper to ask, or one too old).
+fn remove_frames() {
+    if let Err(err) = std::fs::remove_dir_all(frames_dir())
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn(&format!("Couldn't clear the animations: {err}"));
+    }
+}
+
 /// The rendered animations: `<data>/cache/frames`.
 pub fn frames_dir() -> String {
     format!("{}/cache/frames", storage::dir())
@@ -1486,4 +1617,24 @@ fn new_key() -> String {
 /// A new database encryption key: 32 random bytes, base64.
 fn database_key() -> String {
     base64::engine::general_purpose::STANDARD.encode(random::<32>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cache_limit_is_shared_by_tdlibs_files_and_the_animations() {
+        const GB: u64 = 1 << 30;
+        // Within the limit, or none: nothing is trimmed.
+        assert_eq!(cache_shares(GB / 2, GB / 4, GB), None);
+        assert_eq!(cache_shares(3 * GB, GB, 0), None);
+        // Over it: each part to its share — a quarter of the total is animations.
+        assert_eq!(cache_shares(3 * GB, GB, 2 * GB), Some((3 * GB / 2, GB / 2)));
+        // No animations: TDLib's files take the whole limit.
+        assert_eq!(cache_shares(3 * GB, 0, 2 * GB), Some((2 * GB, 0)));
+        // Large sizes don't overflow.
+        let (files, frames) = cache_shares(40 * GB, 20 * GB, 10 * GB).unwrap();
+        assert_eq!(files + frames, 10 * GB);
+    }
 }

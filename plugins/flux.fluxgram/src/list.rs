@@ -3,10 +3,14 @@
 //! user's folders with their unread counts, + and the shown folder's ⋯: Rename…, Delete Folder),
 //! a search over the folder shown, the chats as rows of two lines — the picture, the title, the
 //! time, the last message (or the draft), the unread count (dim when muted), pinned and muted
-//! marks — and Add Chat: a popup that searches the people and groups of every account
-//! ([`Request::SearchChats`] each → [`Note::Found`](crate::model::Note::Found)), grouped by
-//! account when there are several. A row opens its chat's tab; its actions put it in a folder
-//! (or take it out of the one shown), hide it, remove it from the list. The unread messages count
+//! marks — and Add Chat: a popup that searches the chats (people, bots, groups, channels) of
+//! every account ([`Request::SearchChats`] each → [`Note::Found`](crate::model::Note::Found)),
+//! grouped by account when there are several; the same popup is Forward's picker (part 5): one
+//! account's chats — Saved Messages, the list's, then what the search finds — and the choice opens
+//! the chat's tab with the messages to forward ([`Go::Forward`]). A row opens its chat's tab; its actions put it in a folder
+//! (or take it out of the one shown), hide it, remove it from the list; its ⋯ (part 5) opens a menu
+//! under it — Mark as Read / Unread, Mute (a choice: an hour, 8 hours, 2 days, for good) or
+//! Unmute, Add to Folder…. The unread messages count
 //! on the window's launchpad icon and put a dot on the chats' tabs (`ui::set_badge`).
 //!
 //! The rows come from the service whole, per account ([`Note::Chats`](crate::model::Note::Chats):
@@ -33,7 +37,7 @@ use flux_plugin_api::system::{self, LocalTime};
 use flux_plugin_api::view::*;
 use flux_plugin_api::{notify, picker, service, timers, tr, trf};
 
-use crate::chat::{CHAT, MORE};
+use crate::chat::{CHAT, Forward, MORE};
 use crate::chats::{Folder, FolderAsk, HiddenAsk, HiddenRow, HiddenTold, folder_name};
 use crate::hidden;
 use crate::model::{AccountView, ChatKey, ChatRow, FoundChat, Request, Snapshot, account_labels};
@@ -68,6 +72,8 @@ const PHRASE_AFTER: Duration = Duration::from_millis(300);
 pub enum Go {
     /// Open the chat's tab.
     Open(ChatKey),
+    /// Open the chat's tab with messages to forward over its field (part 5).
+    Forward(ChatKey, Forward),
     /// Open a hidden chat's tab: it doesn't come back after a restart.
     OpenHidden(ChatKey),
     /// Close the chat's tab, if it is open (hidden while the hidden chats aren't open here).
@@ -78,14 +84,23 @@ pub enum Go {
     MarkHidden(ChatKey, bool),
     /// Start adding an account (the empty window's button).
     AddAccount,
+    /// Mute the chat for this many seconds; none — unmute it (a row's ⋯; part 5).
+    Mute(ChatKey, Option<i64>),
+    /// Stop the chat's bot, asked first (a row's ⋯; part 5).
+    StopBot(ChatKey),
 }
 
-/// The Add Chat popup: a search per account.
+/// The Add Chat popup: a search per account; or the Forward picker (part 5).
 struct Popup {
     /// The picker's id.
     id: u64,
     /// The accounts' searches, in the accounts' order.
     searches: Vec<Searched>,
+    /// The Forward picker's messages: one search, of their account's chats; the choice gets
+    /// them.
+    forward: Option<Forward>,
+    /// The query typed: the Forward picker shows the list's chats that have it.
+    query: String,
 }
 
 /// An account's search of the Add Chat popup.
@@ -180,6 +195,9 @@ pub struct List {
     /// The folders' menu of a chat (its id, the chat); the shown folder's ⋯ (its id, the folder).
     folder_menu: Option<(u64, ChatKey)>,
     folder_actions: Option<(u64, u64)>,
+    /// A row's ⋯ menu on show, and its Mute choice (part 5): the picker, the chat.
+    row_menu: Option<(u64, ChatKey)>,
+    mute_menu: Option<(u64, ChatKey)>,
     /// The search field's text.
     filter: String,
     /// The window is on screen: the popup opens under its Add Chat button.
@@ -213,6 +231,8 @@ impl List {
             delete_asked: None,
             folder_menu: None,
             folder_actions: None,
+            row_menu: None,
+            mute_menu: None,
             filter: String::new(),
             shown: false,
             anchor: None,
@@ -267,7 +287,7 @@ impl List {
         search.chats = chats;
         search.answered = true;
         let loading = popup.searches.iter().any(|search| !search.answered);
-        picker::update(popup.id, popup_items(&popup.searches), loading);
+        picker::update(popup.id, items_of(popup, &self.lists), loading);
     }
 
     /// FluxGram's folders, whole (the service's word).
@@ -334,11 +354,70 @@ impl List {
             })
             .collect();
         items.push(picker::item("new", &tr("New Folder…")).icon("folder-plus"));
-        let mut menu = picker::Picker::menu().items(items);
-        if from_tab {
-            menu = menu.under(&tab_window(key), MORE);
-        }
+        let menu = picker::Picker::menu().items(items);
+        let menu = match from_tab {
+            true => menu.under(&tab_window(key), MORE),
+            false => menu.under(MAIN, &row_anchor(key)),
+        };
         self.folder_menu = Some((menu.open(), key.clone()));
+    }
+
+    /// A row's ⋯ (part 5): its menu under the row — Mark as Read or Unread, Mute… or Unmute, Add
+    /// to Folder… (not a hidden chat's: the folders are plaintext), a bot's Stop Bot or Restart
+    /// Bot.
+    fn row_menu(&mut self, key: &ChatKey) {
+        let hidden = self.is_hidden_row(key);
+        let row = self
+            .lists
+            .get(&key.account)
+            .and_then(|rows| rows.iter().find(|row| row.chat == key.chat))
+            .or_else(|| {
+                self.hidden
+                    .rows
+                    .iter()
+                    .find(|found| found.account == key.account && found.row.chat == key.chat)
+                    .map(|found| &found.row)
+            });
+        let Some(row) = row else {
+            return;
+        };
+        let mut items = vec![
+            match row.unread > 0 {
+                true => picker::item("read", &tr("Mark as Read")).icon("check"),
+                false => picker::item("unread", &tr("Mark as Unread")).icon("icons/unread.svg"),
+            },
+            match row.muted {
+                true => picker::item("unmute", &tr("Unmute")).icon("bell"),
+                false => picker::item("mute", &tr("Mute")).icon("icons/muted.svg"),
+            },
+        ];
+        if !hidden {
+            items.push(picker::item("folder", &tr("Add to Folder…")).icon("folder-plus"));
+        }
+        if row.bot {
+            items.push(match row.blocked {
+                true => picker::item("restart-bot", &tr("Restart Bot")).icon("update"),
+                false => picker::item("stop-bot", &tr("Stop Bot")).icon("close"),
+            });
+        }
+        let id = picker::Picker::menu()
+            .items(items)
+            .under(MAIN, &row_anchor(key))
+            .open();
+        self.row_menu = Some((id, key.clone()));
+    }
+
+    /// Mute's choice under the row (part 5).
+    fn mute_menu(&mut self, key: &ChatKey) {
+        let items: Vec<_> = crate::chat::mute_choices()
+            .into_iter()
+            .map(|(seconds, label)| picker::item(&seconds.to_string(), &tr(label)))
+            .collect();
+        let id = picker::Picker::menu()
+            .items(items)
+            .under(MAIN, &row_anchor(key))
+            .open();
+        self.mute_menu = Some((id, key.clone()));
     }
 
     /// What the service tells of the hidden chats.
@@ -627,17 +706,47 @@ impl List {
         self.popup = Some(Popup {
             id: popup.open(),
             searches,
+            forward: None,
+            query: String::new(),
         });
+        self.search_all("");
+    }
+
+    /// Forward (part 5): the picker of a chat of the messages' account (Telegram forwards only
+    /// within one) — Saved Messages on top, then FluxGram's list, then the account's other chats
+    /// the search finds.
+    pub fn forward(&mut self, forward: Forward) {
+        let popup = picker::Picker::new(&tr("Forward to…"))
+            .live()
+            .loading()
+            .empty_text(&tr("No chats found"));
+        let searches = vec![Searched {
+            account: forward.from.account.clone(),
+            group: None,
+            request: 0,
+            answered: false,
+            chats: Vec::new(),
+        }];
+        let popup = Popup {
+            id: popup.open(),
+            searches,
+            forward: Some(forward),
+            query: String::new(),
+        };
+        // The list's chats at once; the search's join them.
+        picker::update(popup.id, items_of(&popup, &self.lists), true);
+        self.popup = Some(popup);
         self.search_all("");
     }
 
     /// The popup's query changed.
     pub fn picker_query(&mut self, picker: u64, query: &str) {
-        let Some(popup) = self.popup.as_ref().filter(|popup| popup.id == picker) else {
+        let Some(popup) = self.popup.as_mut().filter(|popup| popup.id == picker) else {
             return;
         };
+        popup.query = query.trim().to_string();
         // What it shows stays until the answers: the spinner says they're on their way.
-        picker::update(popup.id, popup_items(&popup.searches), true);
+        picker::update(popup.id, items_of(popup, &self.lists), true);
         self.search_all(query.trim());
     }
 
@@ -660,6 +769,35 @@ impl List {
 
     /// A popup closed: the Add Chat popup's chat, a folders' menu's choice, or none.
     pub fn picker_chosen(&mut self, picker: u64, key: Option<String>) -> Vec<Go> {
+        if let Some((_, chat)) = self.row_menu.take_if(|(id, _)| *id == picker) {
+            match key.as_deref() {
+                Some("read") => ask(Request::MarkRead {
+                    key: chat,
+                    read: true,
+                }),
+                Some("unread") => ask(Request::MarkRead {
+                    key: chat,
+                    read: false,
+                }),
+                Some("mute") => self.mute_menu(&chat),
+                Some("unmute") => return vec![Go::Mute(chat, None)],
+                Some("folder") => self.folder_menu(&chat, false),
+                // A bot's (part 5): Stop asks first, as the tab's ⋯ does.
+                Some("stop-bot") => return vec![Go::StopBot(chat)],
+                Some("restart-bot") => ask(Request::BotStart {
+                    key: chat,
+                    restart: true,
+                }),
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if let Some((_, chat)) = self.mute_menu.take_if(|(id, _)| *id == picker) {
+            return match key.and_then(|seconds| seconds.parse::<i64>().ok()) {
+                Some(seconds) => vec![Go::Mute(chat, Some(seconds))],
+                None => Vec::new(),
+            };
+        }
         if let Some((_, chat)) = self.folder_menu.take_if(|(id, _)| *id == picker) {
             match key.as_deref() {
                 Some("new") => self.ask_name(Naming::New(Some(chat))),
@@ -693,6 +831,9 @@ impl List {
         let Some(key) = key.as_deref().and_then(ChatKey::parse) else {
             return Vec::new();
         };
+        if let Some(forward) = popup.forward {
+            return vec![Go::Forward(key, forward)];
+        }
         let added = popup
             .searches
             .iter()
@@ -773,6 +914,7 @@ impl List {
                     (Some(key), "hide") => self.hide(&key),
                     (Some(key), "unhide") => self.unhide(&key),
                     (Some(key), "folder") => self.folder_menu(&key, false),
+                    (Some(key), "more") => self.row_menu(&key),
                     (Some(key), "unfolder") => {
                         if let Some(id) = self.current_folder().map(|folder| folder.id) {
                             ask(Request::Folders(FolderAsk::Remove { id, key }));
@@ -941,6 +1083,19 @@ impl List {
                 .filter(|(account, row)| in_folder(folder, account, row.chat))
                 .collect(),
         }
+    }
+
+    /// The hidden chats open here (none while the phrase isn't in the search): the profile
+    /// dialog offers Show in List for them (part 5).
+    pub fn hidden_chats(&self) -> Vec<ChatKey> {
+        if self.hidden.unlocked.is_none() {
+            return Vec::new();
+        }
+        self.hidden
+            .rows
+            .iter()
+            .map(|hidden| ChatKey::new(&hidden.account, hidden.row.chat))
+            .collect()
     }
 
     /// The hidden chats' rows of every account in one list, while open here.
@@ -1390,6 +1545,56 @@ fn new_folder_id(taken: impl Fn(u64) -> bool) -> u64 {
     }
 }
 
+/// A popup's items: the Add Chat popup's, or the Forward picker's.
+fn items_of(popup: &Popup, lists: &HashMap<String, Vec<ChatRow>>) -> Vec<picker::Item> {
+    match (&popup.forward, popup.searches.first()) {
+        (Some(_), Some(search)) => forward_items(
+            &search.account,
+            lists.get(&search.account).map_or(&[][..], Vec::as_slice),
+            &search.chats,
+            &popup.query,
+        ),
+        _ => popup_items(&popup.searches),
+    }
+}
+
+/// The Forward picker's items (part 5): Saved Messages, the list's chats that have the query,
+/// then the other chats found — each once.
+fn forward_items(
+    account: &str,
+    rows: &[ChatRow],
+    found: &[FoundChat],
+    query: &str,
+) -> Vec<picker::Item> {
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    let found_item = |chat: &FoundChat| {
+        let item = picker::item(&ChatKey::new(account, chat.chat).tab(), &chat.title)
+            .avatar(chat.avatar.clone());
+        match &chat.detail {
+            Some(detail) => item.detail(detail),
+            None => item,
+        }
+    };
+    for chat in found.iter().filter(|chat| chat.saved) {
+        if seen.insert(chat.chat) {
+            items.push(found_item(chat));
+        }
+    }
+    for row in rows.iter().filter(|row| matches(&row.title, query)) {
+        if seen.insert(row.chat) {
+            let key = ChatKey::new(account, row.chat).tab();
+            items.push(picker::item(&key, &row.title).avatar(row.avatar.clone()));
+        }
+    }
+    for chat in found {
+        if seen.insert(chat.chat) {
+            items.push(found_item(chat));
+        }
+    }
+    items
+}
+
 /// The Add Chat popup's items: each account's chats in turn, under its first name when there
 /// are several.
 fn popup_items(searches: &[Searched]) -> Vec<picker::Item> {
@@ -1486,11 +1691,11 @@ fn tree_row(account: &str, chat: &ChatRow, now: i64, kind: RowKind) -> TreeRow {
     }
 }
 
-/// A row's actions: Add to Folder…, Hide, and Remove from FluxGram — in a folder, Remove from
-/// Folder in its place (taking a chat out of the folder shown is what its last button does
-/// there; and Flux keeps every action's place on a row, so a fourth would leave the title no
-/// room); a hidden chat's — Unhide, Remove (the folders are plaintext: a hidden chat never goes
-/// into one).
+/// A row's actions: ⋯ (its menu: read, mute, Add to Folder…), Hide, and Remove from FluxGram —
+/// in a folder, Remove from Folder in its place (taking a chat out of the folder shown is what its
+/// last button does there; and Flux keeps every action's place on a row, so a fourth would leave
+/// the title no room); a hidden chat's — ⋯, Unhide, Remove (the folders are plaintext: a hidden
+/// chat never goes into one).
 fn row_actions(kind: RowKind) -> Vec<RowAction> {
     let action = |id: &str, icon: &str, tooltip: &str| RowAction {
         id: id.to_string(),
@@ -1499,11 +1704,11 @@ fn row_actions(kind: RowKind) -> Vec<RowAction> {
         tooltip: Some(tr(tooltip)),
         primary: false,
     };
-    let mut actions = Vec::new();
+    // ⋯ first (part 5): read, mute, the folders.
+    let mut actions = vec![action("more", "more", "More")];
     match kind {
         RowKind::Hidden => actions.push(action("unhide", "icons/eye.svg", "Unhide Chat")),
         RowKind::Listed | RowKind::InFolder => {
-            actions.push(action("folder", "folder-plus", "Add to Folder…"));
             actions.push(action("hide", "icons/hidden.svg", "Hide Chat"));
         }
     }
@@ -1513,6 +1718,12 @@ fn row_actions(kind: RowKind) -> Vec<RowAction> {
         action("remove", "close", "Remove from FluxGram")
     });
     actions
+}
+
+/// A picker under a chat's row: the list's row by its key (under the list while the row isn't
+/// drawn).
+fn row_anchor(key: &ChatKey) -> String {
+    format!("{CHATS}/{}", key.tab())
 }
 
 /// A popup's item, named by the chat's tab key: the picture, the title, "@anna" or "5 members",
@@ -1612,6 +1823,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_forward_picker_has_saved_messages_then_the_list_first() {
+        let mut rows = vec![chat_row(101, 1, false), chat_row(102, 2, false)];
+        rows[0].title = "Anna".into();
+        rows[1].title = "Boris".into();
+        let found = |chat: i64, title: &str, saved: bool| FoundChat {
+            chat,
+            title: title.into(),
+            avatar: flux_plugin_api::conversation::AvatarSpec::initials("A", 0),
+            detail: None,
+            added: false,
+            saved,
+        };
+        let search = [
+            found(103, "Clara", false),
+            found(101, "Anna", false),
+            found(7, "Saved Messages", true),
+        ];
+        // Each item's key, as the picker gives it back.
+        let keys = |items: Vec<picker::Item>| -> Vec<String> {
+            items
+                .iter()
+                .map(|item| {
+                    let debug = format!("{item:?}");
+                    let key = debug.split("key: \"").nth(1).unwrap_or_default();
+                    key.split('"').next().unwrap_or_default().to_string()
+                })
+                .collect()
+        };
+        assert_eq!(
+            keys(forward_items("a1", &rows, &search, "")),
+            ["a1:7", "a1:101", "a1:102", "a1:103"]
+        );
+        // The list's chats that have the query; the search's are its own answer.
+        assert_eq!(
+            keys(forward_items("a1", &rows, &search, "an")),
+            ["a1:7", "a1:101", "a1:103"]
+        );
+    }
+
     fn chat_row(chat: i64, date: i64, pinned: bool) -> ChatRow {
         ChatRow {
             chat,
@@ -1625,6 +1876,8 @@ mod tests {
             muted: false,
             pinned,
             draft: None,
+            bot: false,
+            blocked: false,
         }
     }
 

@@ -48,7 +48,7 @@ const AVATAR: i64 = 16;
 /// The members whose pictures download: the first rows.
 const AVATARS: usize = 40;
 /// Muted "forever", as Telegram's apps mute.
-const FOREVER: i64 = 2_147_483_647;
+pub const FOREVER: i64 = 2_147_483_647;
 
 /// The kinds of a chat's media, each a section of the dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -115,6 +115,8 @@ pub enum ProfileAsk {
     },
     /// Mute the chat for good, or unmute it (a profile's button, a chat tab's menu).
     Mute { key: ChatKey, muted: bool },
+    /// Mute the chat for this many seconds (part 5: Mute's choice — an hour, 8 hours, 2 days).
+    MuteFor { key: ChatKey, seconds: i64 },
 }
 
 /// What the service tells the profile dialog: `Note::Profile`, to the window that asked.
@@ -704,6 +706,16 @@ impl Profiles {
                     Asked::Profile(Ask::Mute { key: key.clone() }),
                 );
             }
+            ProfileAsk::MuteFor { key, seconds } => {
+                let mut settings = notification_settings(true);
+                settings["mute_for"] = json!(seconds.clamp(0, FOREVER));
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "setChatNotificationSettings", "chat_id": key.chat,
+                        "notification_settings": settings}),
+                    Asked::Profile(Ask::Mute { key: key.clone() }),
+                );
+            }
         }
     }
 
@@ -1115,6 +1127,9 @@ fn profile(store: &Store, shown: &Shown, at: When, words: &dyn Words) -> Profile
         .unwrap_or_default();
     let (status, online) = if saved {
         (String::new(), false)
+    } else if store.is_channel(chat) {
+        // A channel's subscribers (part 5).
+        (crate::feed::subscribers_line(members, words), false)
     } else if is_group {
         let line = if members == 0 {
             words.tr("group")

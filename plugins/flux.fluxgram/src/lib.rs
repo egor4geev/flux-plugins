@@ -15,6 +15,16 @@
 //! - [`feed`] — the service's open chats: their messages, what the user sends, the media's
 //!   downloads and the stickers' animations;
 //! - [`panel`] — the field's panel: the account's stickers and GIFs, their search, sending them;
+//! - [`pins`] — a chat's pinned messages and the bar over its feed (no host: tested natively);
+//! - [`ads`] — Telegram's advertisements in channels: asked for, seen, clicked, reported (no host:
+//!   tested natively);
+//! - [`bots`] — the bots' buttons under their messages and keyboards over the field (no host:
+//!   tested natively);
+//! - [`suggest`] — the field's suggestions: the members for "@", the bots' commands for "/",
+//!   the mentions of people without a username (no host: tested natively);
+//! - [`links`] — every link's way: Telegram's open in FluxGram, the text's mentions, hashtags
+//!   and commands do what they say, the web's are asked first as the settings say, a spoofed
+//!   address always (no host: tested natively);
 //! - [`hidden`] — the hidden chats' list, sealed with a key derived from the user's phrase;
 //! - [`convert`] — TDLib's messages as Flux shows them (no host: tested natively);
 //! - [`summary`] — a message in one line: the list's last line, a notification, a quote;
@@ -24,19 +34,24 @@
 //!   routing to [`list`] (the window on the left) and [`chat`] (a chat's tab);
 //! - [`config`] — FluxGram's app key with Telegram.
 
+mod ads;
+mod bots;
 mod chat;
 mod chats;
 mod config;
 mod convert;
 mod feed;
 mod hidden;
+mod links;
 mod list;
 mod model;
 mod panel;
+mod pins;
 mod profile;
 mod profile_view;
 mod service;
 mod store;
+mod suggest;
 mod summary;
 mod window;
 

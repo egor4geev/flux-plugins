@@ -135,7 +135,13 @@ pub fn line(store: &Store, message: &Value, words: &dyn Words) -> String {
                 .as_str()
                 .or_else(|| content["poll"]["question"].as_str())
                 .unwrap_or_default();
-            format!("📊 {}", first_line(question))
+            // "📊 Poll: Lunch?" (part 5), a quiz's "📊 Quiz: …".
+            let kind = if content["poll"]["type"]["@type"] == "pollTypeQuiz" {
+                "Quiz: {0}"
+            } else {
+                "Poll: {0}"
+            };
+            format!("📊 {}", words.trf(kind, &[&first_line(question)]))
         }
         "messageGame" => words.tr("Game"),
         "messageInvoice" => words.tr("Invoice"),

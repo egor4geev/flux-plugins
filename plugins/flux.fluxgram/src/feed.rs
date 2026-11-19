@@ -14,10 +14,34 @@
 //! - What the user does: `Visible` marks the messages read (`viewMessages`) and downloads their
 //!   pictures first; `Send` (text, files — pictures as photos, several as an album — the reply),
 //!   `Edit`, `Delete`, `Download`, `JumpTo` (the history around a quote's message, then
-//!   `reveal`), `Draft` ("typing…" to the chat, the draft kept in Telegram).
+//!   `reveal`), `Draft` ("typing…" to the chat, the draft kept in Telegram); part 5: `DeleteMany`
+//!   (selected messages), `Forward` (`forwardMessages` as they are, in the order given, albums
+//!   whole — after the text when `Send` carries them).
 //! - A window's search in a chat ([`SearchAsk`]): `searchChatMessages`, a page of the matches'
 //!   ids (newest first, with Telegram's count) to that window only ([`SearchTold`]); the window
 //!   jumps to them (`JumpTo`) and marks the words itself — the messages here stay as they are.
+//! - The pinned messages (part 5, [`crate::pins`]): asked for when the chat opens, followed by
+//!   `updateMessageIsPinned`; the bar over the feed (`pinned`), a click on it reveals the message
+//!   and moves the bar on. Pin, Unpin, the bar hidden where the user can't unpin (until a newer
+//!   message is pinned; kept in the plugin's storage, except for hidden chats). The chat's menus:
+//!   Mark as Read / Unread, Copy Link, a sticker to the favorites, a GIF to the saved ones.
+//! - The field's suggestions (part 5, [`crate::suggest`]): "@" in a group — the members to
+//!   mention (`searchChatMembers`, the mention filter), "/" — the bots' commands (the bot's or the
+//!   group's full info, kept while the chat is open); the answer to the window that asked only.
+//!   The links to people the field wrote become mentions of them when sent or saved, and Send
+//!   Without Sound sends with `disable_notification`.
+//!
+//! - Bots (part 5, [`crate::bots`]): a callback's answer (`getCallbackQueryAnswer`) to the window
+//!   that pressed; the chat's keyboard over the field — the message TDLib names
+//!   (`reply_markup_message_id`, fetched when it isn't loaded), a forced reply's quote over the
+//!   field; a button's text sent (in a group, answering the keyboard's message), a one-time
+//!   keyboard then gone (`deleteChatReplyMarkup`); the bot's menu of commands (its full info,
+//!   asked as its chat opens) in the header; Start (`sendBotStartMessage`, with the parameter of
+//!   the link that opened the chat), Stop (blocked) and Restart.
+//! - Channels, bots and forums (part 5): a channel's advertisement ([`crate::ads`]) asked for when
+//!   its feed reaches the last post and shown after it, seen once, clicked, reported; joining a
+//!   channel; a forum's topics (`getForumTopics`) for its messages' labels — a reply goes into
+//!   the topic of the message it answers, a message without one into General.
 //!
 //! Media (part 4): what downloads by itself follows the plugin's settings ([`MediaOptions`]:
 //! photos; voice and round messages; GIFs and stickers up to a few MB), the messages on screen
@@ -37,13 +61,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use flux_plugin_api::conversation::{self as conv, Change, Composed, History};
+use flux_plugin_api::conversation::{
+    self as conv, Change, Composed, History, PinnedSpec, Suggestion,
+};
 use flux_plugin_api::system::LocalTime;
-use flux_plugin_api::{log, notify, service, system, timers};
+use flux_plugin_api::{log, notify, service, storage, system, timers};
 use serde_json::{Value, json};
 
 use crate::convert::{self, Context, Converted, MediaOptions};
 use crate::model::{ChatHeader, ChatKey, Note, Request, Words, unix_now};
+use crate::pins::Pins;
 use crate::service::{Asked, Cx, HostWords};
 use crate::store::{ChatKind, Status, Store, Touched, UserKind};
 use crate::summary;
@@ -93,6 +120,9 @@ pub const KEPT: &[&str] = &[
     "updateChatAction",
     // A voice or round message listened to (part 4), here or on another device.
     "updateMessageContentOpened",
+    // The pinned messages and the favorite stickers (part 5).
+    "updateMessageIsPinned",
+    "updateFavoriteStickers",
 ];
 
 /// A page of history.
@@ -121,6 +151,10 @@ const SEARCH_PAGE: u32 = 100;
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// The animations' frame rate the helper renders at, at most.
 const RENDER_FPS: u32 = 30;
+/// The members a "@" suggests at most (part 5).
+const MENTION_PAGE: u32 = 20;
+/// The plugin's storage of the chats whose pinned bar the user hid (part 5).
+const PINS_HIDDEN: &str = "pinned-hidden";
 
 /// What a request of the feed asked: its answer comes to [`Feed::answer`].
 #[derive(Debug)]
@@ -146,6 +180,37 @@ pub enum Ask {
         request: u64,
         from: i64,
     },
+    /// The chat's pinned messages (part 5): `searchChatMessages` with the pinned filter.
+    Pinned { chat: i64 },
+    /// The members a "@" in the field of `window` mentions (part 5), for its `text`.
+    Members {
+        window: u64,
+        chat: i64,
+        text: String,
+    },
+    /// The full info of a chat with a bot, or of a group, for its bots' commands (part 5).
+    Commands { chat: i64 },
+    /// A bot's answer to a button pressed in `window` (part 5).
+    Callback { window: u64, chat: i64 },
+    /// The message whose keyboard the field shows, when it isn't loaded (part 5).
+    Keyboard { chat: i64 },
+    /// A message pinned now that isn't loaded (`getMessage`).
+    PinnedOne { chat: i64 },
+    /// A message's link (`getMessageLink`) for the window that asked.
+    Link { window: u64 },
+    /// A channel's advertisements (part 5, `getChatSponsoredMessages`).
+    Sponsored { chat: i64 },
+    /// An advertisement reported (`reportChatSponsoredMessage`) by `window`.
+    AdReport {
+        window: u64,
+        chat: i64,
+        message: String,
+    },
+    /// A forum's topics (part 5, `getForumTopics`): the store took them; the labels follow.
+    Topics { chat: i64 },
+    /// The account's favorite stickers (`getFavoriteStickers`): sticker messages offer Remove
+    /// from Favorites for them.
+    Favorites,
     /// Anything else: an error is logged, and `told` to the user when it is theirs to know.
     Done {
         what: &'static str,
@@ -163,6 +228,9 @@ pub struct Frames {
     failed: HashSet<String>,
     /// The outputs looked for on disk already.
     checked: HashSet<String>,
+    /// Animations of an earlier session found on disk, used again: the next `fluxgram.cache`
+    /// has the helper touch them, so a trim of the folder takes them last (part 5).
+    touched: Vec<String>,
 }
 
 impl Frames {
@@ -178,8 +246,14 @@ impl Frames {
         let there = std::fs::metadata(output).is_ok_and(|meta| meta.len() > 0);
         if there {
             media.rendered.insert(output.to_string());
+            self.touched.push(output.to_string());
         }
         there
+    }
+
+    /// The animations used again since the last `fluxgram.cache`: the helper touches them.
+    pub fn take_touched(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.touched)
     }
 
     /// Asks the helper to render `input` into `output` once (not while one is on its way, nor
@@ -208,19 +282,22 @@ impl Frames {
         }
     }
 
-    /// The cache was cleared: every animation renders again when it is seen.
+    /// The cache was cleared or trimmed: every animation is looked for again when it is seen
+    /// (one gone renders again).
     pub fn forget(&mut self, media: &mut MediaOptions) {
         media.rendered.clear();
         self.checked.clear();
         self.failed.clear();
+        self.touched.clear();
     }
 }
 
 /// What the field's text is parsed for ([`Ask::Markdown`]).
 #[derive(Debug)]
 pub enum Then {
-    /// Sent with the field's files and reply.
-    Send(Box<Composed>),
+    /// Sent with the field's files and reply; `true` — without sound; then the messages to
+    /// forward (part 5): their chat and ids.
+    Send(Box<Composed>, bool, Option<Box<(ChatKey, Vec<String>)>>),
     /// A message's new text, or its caption (an album's: its captioned item).
     Edit { message: i64 },
 }
@@ -320,6 +397,40 @@ struct Open {
     /// The user's "typing…" last sent, and the draft waiting for its timer.
     typed_at: Option<Instant>,
     draft: Option<(u64, String)>,
+    /// The chat's pinned messages (part 5), the bar the windows have, and whether it may have
+    /// changed (put at the end of the batch).
+    pins: Pins,
+    pinned_bar: Option<PinnedSpec>,
+    pins_dirty: bool,
+    /// The chat's bots' commands for the field's "/" (part 5), once asked; the windows' texts
+    /// waiting for them.
+    commands: Option<Vec<crate::suggest::Command>>,
+    commands_waiting: Vec<(u64, String)>,
+    /// A bot's menu (part 5): its commands, unless its menu is an app — the header's.
+    menu: Vec<(String, String)>,
+    menu_asked: bool,
+    /// The keyboard over the field the windows have (part 5), of which message (none — not told
+    /// yet; 0 — no keyboard); that message when it isn't loaded, and the one asked for.
+    keyboard: Option<conv::ReplyKeyboard>,
+    keyboard_of: Option<i64>,
+    keyboard_raw: Option<Value>,
+    keyboard_asked: i64,
+    /// A channel's advertisement (part 5) and when they were last asked for.
+    ad: Option<Ad>,
+    ad_asked: Option<Instant>,
+}
+
+/// A channel's advertisement in its feed (part 5): TDLib's `sponsoredMessage`, after the last post.
+struct Ad {
+    id: i64,
+    raw: Value,
+    /// The message as the windows have it.
+    shown: Option<flux_plugin_api::conversation::Message>,
+    /// Its files: put again when they download.
+    files: Vec<i64>,
+    /// Seen (`viewMessages` sent), and to be put again at the end of the batch.
+    seen: bool,
+    dirty: bool,
 }
 
 impl Open {
@@ -362,7 +473,29 @@ impl Open {
             can_send: false,
             typed_at: None,
             draft: None,
+            pins: Pins::default(),
+            pinned_bar: None,
+            pins_dirty: false,
+            commands: None,
+            commands_waiting: Vec::new(),
+            menu: Vec::new(),
+            menu_asked: false,
+            keyboard: None,
+            keyboard_of: None,
+            keyboard_raw: None,
+            keyboard_asked: 0,
+            ad: None,
+            ad_asked: None,
         }
+    }
+
+    /// The loaded message `id` with its keyboard (part 5): in the feed, or fetched for it.
+    fn keyboard_message(&self, id: i64) -> Option<&Value> {
+        self.raw.get(&id).or_else(|| {
+            self.keyboard_raw
+                .as_ref()
+                .filter(|raw| raw["id"].as_i64() == Some(id))
+        })
     }
 
     /// Forgets the loaded messages: a jump, a reload (the caller starts a new epoch).
@@ -384,6 +517,11 @@ impl Open {
         self.later.clear();
         self.paging_older = false;
         self.paging_newer = false;
+        // The advertisement goes with the feed (a jump): put again once the last post is reached.
+        if let Some(ad) = self.ad.as_mut() {
+            ad.shown = None;
+            ad.dirty = false;
+        }
     }
 
     /// Keeps a message of the chat, what it answers, the album it is in.
@@ -521,6 +659,7 @@ impl Open {
             .shown
             .values()
             .map(|converted| converted.message.clone())
+            .chain(self.ad.as_ref().and_then(|ad| ad.shown.clone()))
             .collect();
         messages.sort_by_key(|message| message.order);
         let mut changes = vec![conv::clear(), conv::put(messages)];
@@ -535,6 +674,8 @@ impl Open {
             conv::older(self.older),
             conv::newer(self.newer),
             conv::unread_from(self.unread_from.map(|id| id.to_string()).as_deref()),
+            conv::pinned(self.pinned_bar.clone()),
+            conv::reply_keyboard(self.keyboard.clone()),
         ];
         if let Some(draft) = store
             .and_then(|store| store.chats.get(&chat))
@@ -575,12 +716,63 @@ pub struct Feed {
     /// The last load's epoch: each load and jump takes a new one, so a page asked for a chat
     /// closed and opened again, or before a jump, is dropped.
     epochs: u64,
+    /// The start parameters of bots' chats opened by a link (`t.me/<bot>?start=…`, part 5): sent
+    /// with the chat's Start ([`Feed::set_start_parameter`]).
+    start_parameters: HashMap<ChatKey, String>,
+    /// The chats whose pinned bar the user hid (part 5), by `<account>:<chat>`: the newest pinned
+    /// message then — the bar comes back with a newer one. Read from the storage when first
+    /// needed; hidden chats' only here.
+    pins_hidden: Option<HashMap<String, i64>>,
 }
 
 impl Feed {
+    /// Forwards messages of `from` into `key` (part 5): as they are (not copies), in the order
+    /// given, albums whole; within one account only.
+    fn forward(
+        &mut self,
+        cx: &mut Cx,
+        key: &ChatKey,
+        from: &ChatKey,
+        messages: &[String],
+        silent: bool,
+    ) {
+        let ids = self.message_ids(from, messages);
+        if ids.is_empty() || key.account != from.account {
+            return;
+        }
+        cx.td.send(
+            &key.account,
+            json!({"@type": "forwardMessages", "chat_id": key.chat,
+                "from_chat_id": from.chat, "message_ids": ids,
+                "options": {"@type": "messageSendOptions", "disable_notification": silent},
+                "send_copy": false, "remove_caption": false}),
+            Asked::Feed(Ask::Done {
+                what: "forwardMessages",
+                told: Some("Couldn't forward the messages"),
+            }),
+        );
+    }
+
+    /// The TDLib ids of a chat's messages, by the feed's ids, in their order: an album's items
+    /// all (when the chat is open; otherwise the ids as they are).
+    fn message_ids(&self, key: &ChatKey, messages: &[String]) -> Vec<i64> {
+        let open = self.chats.get(key);
+        let mut ids: Vec<i64> = Vec::new();
+        for id in messages.iter().filter_map(|id| id.parse::<i64>().ok()) {
+            let items = open.map_or_else(|| vec![id], |open| open.items_of(id));
+            for item in items {
+                if !ids.contains(&item) {
+                    ids.push(item);
+                }
+            }
+        }
+        ids
+    }
+
     pub fn new() -> Self {
         Feed {
             chats: HashMap::new(),
+            start_parameters: HashMap::new(),
             ready: HashSet::new(),
             asked: HashSet::new(),
             downloading: HashSet::new(),
@@ -593,6 +785,7 @@ impl Feed {
             draft_timers: HashMap::new(),
             quotes: HashMap::new(),
             epochs: 0,
+            pins_hidden: None,
         }
     }
 
@@ -642,6 +835,16 @@ impl Feed {
         }
     }
 
+    /// The animations' folder was trimmed to the cache's limit (part 5): the open chats'
+    /// messages are converted again — an animation gone renders again once it is seen.
+    pub fn animations_trimmed(&mut self) {
+        self.frames.forget(&mut self.media);
+        for open in self.chats.values_mut() {
+            let ids: Vec<i64> = open.shown.keys().copied().collect();
+            open.dirty.extend(ids);
+        }
+    }
+
     /// The cache was cleared (Settings): the files and animations are gone — the open chats'
     /// messages are put again (their pictures download once they are seen).
     pub fn cache_cleared(&mut self) {
@@ -658,6 +861,12 @@ impl Feed {
     /// open in windows are loaded again.
     pub fn account_ready(&mut self, cx: &mut Cx, account: &str) {
         self.ready.insert(account.to_string());
+        // The favorite stickers (part 5): then `updateFavoriteStickers` keeps them.
+        cx.td.send(
+            account,
+            json!({"@type": "getFavoriteStickers"}),
+            Asked::Feed(Ask::Favorites),
+        );
         self.asked.retain(|(asked, _, _)| asked != account);
         self.downloading.retain(|(asked, _)| asked != account);
         self.auto.retain(|(asked, _), _| asked != account);
@@ -700,6 +909,9 @@ impl Feed {
         open.load = Load::First;
         open.header_dirty = true;
         open.typing.clear();
+        open.pins = Pins::default();
+        open.pinned_bar = None;
+        open.pins_dirty = true;
         let chat = key.chat;
         let account = &key.account;
         cx.td.send(
@@ -710,6 +922,44 @@ impl Feed {
                 told: None,
             }),
         );
+        // The pinned messages (part 5): all of them, newest first (a chat has a few).
+        cx.td.send(
+            account,
+            json!({"@type": "searchChatMessages", "chat_id": chat, "topic_id": null, "query": "",
+                "sender_id": null, "from_message_id": 0, "offset": 0, "limit": 100,
+                "filter": {"@type": "searchMessagesFilterPinned"}}),
+            Asked::Feed(Ask::Pinned { chat }),
+        );
+        // A bot's advertisement (part 5): asked for as its chat opens — the bar over it.
+        if cx
+            .stores
+            .get(account)
+            .is_some_and(|store| store.is_bot(chat))
+            && open
+                .ad_asked
+                .is_none_or(|at| at.elapsed() >= crate::ads::KEEP_FOR)
+        {
+            open.ad_asked = Some(Instant::now());
+            cx.td.send(
+                account,
+                json!({"@type": "getChatSponsoredMessages", "chat_id": chat}),
+                Asked::Feed(Ask::Sponsored { chat }),
+            );
+        }
+        // A forum's topics (part 5): the labels of its messages.
+        if cx
+            .stores
+            .get(account)
+            .is_some_and(|store| store.is_forum(chat))
+        {
+            cx.td.send(
+                account,
+                json!({"@type": "getForumTopics", "chat_id": chat, "query": "",
+                    "offset_date": 0, "offset_message_id": 0, "offset_forum_topic_id": 0,
+                    "limit": 100}),
+                Asked::Feed(Ask::Topics { chat }),
+            );
+        }
         // The history starts from the chat's read marks: the chat first, when the store lacks it.
         if cx
             .stores
@@ -729,6 +979,23 @@ impl Feed {
 
     /// An update of the account's client, after the store took it (`touched` — what it changed).
     pub fn update(&mut self, cx: &mut Cx, account: &str, update: &Value, touched: Touched) {
+        // A forum's topic renamed or recolored (part 5): its chat's labels again.
+        if update["@type"] == "updateForumTopicInfo" {
+            let chat = update["info"]["chat_id"].as_i64().unwrap_or_default();
+            if let Some(open) = self.chats.get_mut(&ChatKey::new(account, chat)) {
+                open.dirty.extend(open.raw.keys().copied());
+            }
+        }
+        if update["@type"] == "updateFavoriteStickers" {
+            let files = update["sticker_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+                .collect();
+            self.favorites(cx, account, files);
+            return;
+        }
         match touched {
             Touched::Nothing => {}
             Touched::Chat(chat) => self.chat_touched(cx, account, chat),
@@ -757,6 +1024,12 @@ impl Feed {
                         continue;
                     }
                     open.header_dirty = true;
+                    if open.pins.shown_file() == Some(file) {
+                        open.pins_dirty = true;
+                    }
+                    if let Some(ad) = open.ad.as_mut().filter(|ad| ad.files.contains(&file)) {
+                        ad.dirty = true;
+                    }
                     let Some(messages) = open.files.get(&file) else {
                         continue;
                     };
@@ -795,11 +1068,31 @@ impl Feed {
         let Some(open) = self.chats.get_mut(&key) else {
             return;
         };
+        let message_id = update["message_id"].as_i64().unwrap_or_default();
+        // The pinned messages (part 5) follow whatever the feed's load.
+        if kind == "updateMessageIsPinned" && open.pins.loaded {
+            let pinned = update["is_pinned"] == true;
+            if let Some(message) = open.raw.get_mut(&message_id) {
+                message["is_pinned"] = json!(pinned);
+                open.dirty.insert(message_id);
+            }
+            match (pinned, open.raw.get(&message_id)) {
+                (true, Some(message)) => open.pins.pinned(message.clone()),
+                (true, None) => cx.td.send(
+                    account,
+                    json!({"@type": "getMessage", "chat_id": chat, "message_id": message_id}),
+                    Asked::Feed(Ask::PinnedOne { chat }),
+                ),
+                (false, _) => {
+                    open.pins.unpinned(&[message_id]);
+                }
+            }
+            open.pins_dirty = true;
+        }
         if open.load != Load::Ready {
             // The first fill is on its way: it brings what changed meanwhile.
             return;
         }
-        let message_id = update["message_id"].as_i64().unwrap_or_default();
         match kind {
             "updateNewMessage" => {
                 // After a jump the newest messages aren't loaded: the new one waits for them.
@@ -820,6 +1113,9 @@ impl Feed {
                 if let Some(message) = open.raw.get_mut(&message_id) {
                     message["content"] = update["new_content"].clone();
                     let message = message.clone();
+                    if open.pins.changed(&message) {
+                        open.pins_dirty = true;
+                    }
                     open.take(message);
                 }
             }
@@ -858,6 +1154,9 @@ impl Feed {
                     .flatten()
                     .filter_map(Value::as_i64)
                     .collect();
+                if open.pins.unpinned(&ids) {
+                    open.pins_dirty = true;
+                }
                 open.drop_messages(&ids);
             }
             "updateChatAction" => {
@@ -906,6 +1205,8 @@ impl Feed {
                 continue;
             }
             open.header_dirty = true;
+            // The right to unpin (the bar's ×) may have come with the group.
+            open.pins_dirty = true;
             let Some(found) = store.chats.get(&chat) else {
                 continue;
             };
@@ -985,7 +1286,19 @@ impl Feed {
             Ask::Sent { chat } => {
                 if let Some(error) = error {
                     log::warn(&format!("{account}:{chat}: sendMessage failed: {error}"));
-                    notify::error(&HostWords.tr("Couldn't send the message"), Some(&error));
+                    // A forum whose General is closed (part 5): only a reply goes, into its topic.
+                    let forum = cx
+                        .stores
+                        .get(account)
+                        .is_some_and(|store| store.is_forum(chat));
+                    if forum && error.contains("TOPIC") {
+                        notify::error(
+                            &HostWords.tr("Reply to a message of a topic to write there"),
+                            None,
+                        );
+                    } else {
+                        notify::error(&HostWords.tr("Couldn't send the message"), Some(&error));
+                    }
                     return;
                 }
                 // The pending message (or an album's): shown at once, as `updateNewMessage` would.
@@ -1011,15 +1324,80 @@ impl Feed {
             }
             Ask::Markdown { chat, text, then } => {
                 let key = ChatKey::new(account, chat);
-                // TDLib's text with its entities; the plain text when it couldn't parse it.
-                let formatted = match error {
+                // TDLib's text with its entities; the plain text when it couldn't parse it. The
+                // links to people the field wrote are mentions of them (part 5).
+                let mut formatted = match error {
                     None if answer["@type"] == "formattedText" => answer.clone(),
                     _ => formatted_text(&text),
                 };
+                crate::suggest::mention_names(&mut formatted);
                 match then {
-                    Then::Send(composed) => self.send_formatted(cx, &key, &composed, formatted),
+                    Then::Send(composed, silent, forward) => {
+                        self.send_formatted(cx, &key, &composed, formatted, silent);
+                        if let Some(forward) = forward {
+                            let (from, messages) = *forward;
+                            self.forward(cx, &key, &from, &messages, silent);
+                        }
+                    }
                     Then::Edit { message } => self.edit_formatted(cx, &key, message, formatted),
                 }
+            }
+            // The members a "@" mentions (part 5): the store knows them by now (TDLib tells the
+            // users before the answer).
+            Ask::Members { window, chat, text } => {
+                let key = ChatKey::new(account, chat);
+                let Some(store) = cx.stores.get(account).filter(|_| error.is_none()) else {
+                    return tell_suggestions(window, &key, &text, Vec::new());
+                };
+                let me = store.me;
+                let items = answer["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|member| member["member_id"]["user_id"].as_i64())
+                    .filter(|user| Some(*user) != me)
+                    .filter_map(|user| store.users.get(&user))
+                    .filter(|user| user.kind != UserKind::Deleted)
+                    .map(|user| crate::suggest::member(user, store.user_avatar(user.id)))
+                    .collect();
+                tell_suggestions(window, &key, &text, items);
+            }
+            // The bots' commands (part 5): kept while the chat is open, the waiting texts told.
+            Ask::Commands { chat } => {
+                let key = ChatKey::new(account, chat);
+                let Some(open) = self.chats.get_mut(&key) else {
+                    return;
+                };
+                let store = cx.stores.get(account);
+                let bot_name = |user: i64| {
+                    store
+                        .and_then(|store| store.users.get(&user))
+                        .and_then(|user| user.username.clone())
+                };
+                let commands = match &error {
+                    None => crate::suggest::commands_of(answer, bot_name),
+                    Some(error) => {
+                        log::warn(&format!("{account}:{chat}: the bots' commands: {error}"));
+                        Vec::new()
+                    }
+                };
+                for (window, text) in std::mem::take(&mut open.commands_waiting) {
+                    let items = crate::suggest::command_items(&commands, &text);
+                    tell_suggestions(window, &key, &text, items);
+                }
+                // A bot's menu (part 5): its commands, unless its menu button opens an app.
+                let app_menu = answer["bot_info"]["menu_button"].is_object();
+                let bot = answer["bot_info"].is_object();
+                open.menu = if bot && !app_menu {
+                    commands
+                        .iter()
+                        .map(|command| (command.text(), command.description.clone()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                open.header_dirty = true;
+                open.commands = Some(commands);
             }
             Ask::Search {
                 window,
@@ -1056,6 +1434,175 @@ impl Feed {
                     failed: error.is_some(),
                 };
                 let _ = service::send_json_to(window, &Note::Search(told));
+            }
+            Ask::Pinned { chat } => {
+                let Some(open) = self.chats.get_mut(&ChatKey::new(account, chat)) else {
+                    return;
+                };
+                if let Some(error) = error {
+                    log::warn(&format!("{account}:{chat}: the pinned messages: {error}"));
+                }
+                let messages = answer["messages"].as_array().cloned().unwrap_or_default();
+                open.pins.set(messages);
+                open.pins_dirty = true;
+            }
+            Ask::PinnedOne { chat } => {
+                let Some(open) = self.chats.get_mut(&ChatKey::new(account, chat)) else {
+                    return;
+                };
+                if error.is_none() && answer["is_pinned"] == true {
+                    open.pins.pinned(answer.clone());
+                    open.pins_dirty = true;
+                }
+            }
+            Ask::Favorites => {
+                if error.is_none() {
+                    let files = answer["stickers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|sticker| sticker["sticker"]["id"].as_i64())
+                        .collect();
+                    self.favorites(cx, account, files);
+                }
+            }
+            // A bot's answer to a button (part 5): to the window that pressed it.
+            Ask::Callback { window, chat } => {
+                if let Some(error) = &error {
+                    log::warn(&format!("{account}:{chat}: a bot's button: {error}"));
+                }
+                let bot = cx
+                    .stores
+                    .get(account)
+                    .and_then(|store| store.chats.get(&chat))
+                    .map(|found| found.title.clone())
+                    .unwrap_or_default();
+                let text = |field: &str| answer[field].as_str().unwrap_or_default().to_string();
+                let _ = service::send_json_to(
+                    window,
+                    &Note::BotAnswer {
+                        key: ChatKey::new(account, chat),
+                        bot,
+                        text: text("text"),
+                        alert: answer["show_alert"] == true,
+                        url: text("url"),
+                    },
+                );
+            }
+            // The message whose keyboard the field shows (part 5): put at the batch's end.
+            Ask::Keyboard { chat } => {
+                if let Some(open) = self.chats.get_mut(&ChatKey::new(account, chat))
+                    && error.is_none()
+                {
+                    open.keyboard_raw = Some(answer.clone());
+                }
+            }
+            Ask::Link { window } => match (error, answer["link"].as_str()) {
+                (None, Some(link)) => {
+                    let link = link.to_string();
+                    let _ = service::send_json_to(window, &Note::Copied { link });
+                }
+                (error, _) => {
+                    log::warn(&format!("{account}: getMessageLink failed: {error:?}"));
+                    notify::error(&HostWords.tr("Couldn't copy the link"), error.as_deref());
+                }
+            },
+            Ask::Sponsored { chat } => {
+                let key = ChatKey::new(account, chat);
+                let Some(open) = self.chats.get_mut(&key) else {
+                    return;
+                };
+                if let Some(error) = error {
+                    log::warn(&format!(
+                        "{account}:{chat}: getChatSponsoredMessages: {error}"
+                    ));
+                    return;
+                }
+                // One after the last post, nothing fancier (`messages_between` placing more among
+                // the posts is left out).
+                let first = answer["messages"].as_array().and_then(|ads| ads.first());
+                let Some(raw) = first.cloned() else {
+                    return;
+                };
+                let Some(id) = raw["message_id"].as_i64() else {
+                    return;
+                };
+                if open
+                    .ad
+                    .as_ref()
+                    .is_some_and(|ad| ad.id == id && ad.raw == raw)
+                {
+                    return;
+                }
+                if let Some(old) = open.ad.take().filter(|old| old.id != id) {
+                    open.queue.push(conv::remove([old.id.to_string()]));
+                }
+                // A bot's goes to the bar over the chat; a channel's after the last post.
+                let bot = cx
+                    .stores
+                    .get(account)
+                    .is_some_and(|store| store.is_bot(chat));
+                open.ad = Some(Ad {
+                    id,
+                    raw,
+                    shown: None,
+                    files: Vec::new(),
+                    seen: false,
+                    dirty: !bot,
+                });
+                open.pins_dirty |= bot;
+                tell_ad(&key, open);
+            }
+            Ask::AdReport {
+                window,
+                chat,
+                message,
+            } => {
+                let key = ChatKey::new(account, chat);
+                let words = HostWords;
+                match crate::ads::ReportResult::of(answer) {
+                    crate::ads::ReportResult::Choose { title, options } => {
+                        let _ = service::send_json_to(
+                            window,
+                            &Note::AdReport {
+                                key,
+                                message,
+                                title,
+                                options,
+                            },
+                        );
+                    }
+                    crate::ads::ReportResult::Done => {
+                        notify::info(&words.tr("Thanks! The ad will be checked."));
+                    }
+                    crate::ads::ReportResult::Hidden => {
+                        notify::info(&words.tr("Ads are hidden"));
+                        // Gone from the feed, as from every chat.
+                        if let Some(open) = self.chats.get_mut(&key)
+                            && let Some(ad) = open.ad.take()
+                        {
+                            open.queue.push(conv::remove([ad.id.to_string()]));
+                            tell_ad(&key, open);
+                        }
+                    }
+                    crate::ads::ReportResult::Premium => {
+                        notify::info(&words.tr("Hiding ads needs Telegram Premium"));
+                    }
+                    crate::ads::ReportResult::Failed => {
+                        log::warn(&format!("{account}:{chat}: report: {error:?}"));
+                        notify::error(&words.tr("Couldn't report the ad"), error.as_deref());
+                    }
+                }
+            }
+            Ask::Topics { chat } => {
+                if let Some(error) = error {
+                    log::warn(&format!("{account}:{chat}: getForumTopics: {error}"));
+                    return;
+                }
+                // The store took them: every message's label again.
+                if let Some(open) = self.chats.get_mut(&ChatKey::new(account, chat)) {
+                    open.dirty.extend(open.raw.keys().copied());
+                }
             }
             Ask::Done { what, told } => {
                 if let Some(error) = error {
@@ -1295,7 +1842,18 @@ impl Feed {
                 history(cx, &key, epoch, Page::Newer, newest, -(PAGE as i64));
             }
             Request::Visible { key, first, last } => self.visible(cx, &key, &first, &last),
-            Request::Send { key, composed } => self.send(cx, &key, composed),
+            Request::Send {
+                key,
+                composed,
+                silent,
+                forward,
+            } => {
+                self.answered(cx, &key, composed.reply_to.as_deref());
+                self.send(cx, &key, composed, silent, forward)
+            }
+            Request::Suggest { key, trigger, text } => {
+                self.suggest(cx, window, &key, &trigger, text)
+            }
             Request::Edit { key, message, text } => self.edit(cx, &key, &message, &text),
             Request::Delete { key, message } => {
                 let Some(open) = self.chats.get(&key) else {
@@ -1323,6 +1881,32 @@ impl Feed {
                     }),
                 );
             }
+            // Part 5: selected messages, albums whole.
+            Request::DeleteMany {
+                key,
+                messages,
+                revoke,
+            } => {
+                let ids = self.message_ids(&key, &messages);
+                if ids.is_empty() {
+                    return;
+                }
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "deleteMessages", "chat_id": key.chat, "message_ids": ids,
+                        "revoke": revoke}),
+                    Asked::Feed(Ask::Done {
+                        what: "deleteMessages",
+                        told: Some("Couldn't delete the messages"),
+                    }),
+                );
+            }
+            Request::Forward {
+                key,
+                from,
+                messages,
+                silent,
+            } => self.forward(cx, &key, &from, &messages, silent),
             Request::Download { key, message, part } => {
                 let file = self.chats.get(&key).and_then(|open| {
                     let id = message.parse::<i64>().ok()?;
@@ -1402,6 +1986,292 @@ impl Feed {
                 message,
                 quote,
             } => self.quote(&key, message, quote),
+            Request::PinnedClicked { key, message } => {
+                let Some(open) = self.chats.get_mut(&key) else {
+                    return;
+                };
+                if let Ok(id) = message.parse::<i64>() {
+                    open.pins.clicked(id);
+                    open.pins_dirty = true;
+                }
+                self.request(cx, window, Request::JumpTo { key, message });
+            }
+            Request::Pin {
+                key,
+                message,
+                notify,
+                for_both,
+            } => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "pinChatMessage", "chat_id": key.chat, "message_id": id,
+                        "disable_notification": !notify, "only_for_self": !for_both}),
+                    Asked::Feed(Ask::Done {
+                        what: "pinChatMessage",
+                        told: Some("Couldn't pin the message"),
+                    }),
+                );
+            }
+            Request::Unpin { key, message } => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "unpinChatMessage", "chat_id": key.chat, "message_id": id}),
+                    Asked::Feed(Ask::Done {
+                        what: "unpinChatMessage",
+                        told: Some("Couldn't unpin the message"),
+                    }),
+                );
+            }
+            Request::HidePinned { key, remember, .. } => {
+                let Some(open) = self.chats.get_mut(&key) else {
+                    return;
+                };
+                let Some(newest) = open.pins.newest() else {
+                    return;
+                };
+                open.pins_dirty = true;
+                let hidden = self
+                    .pins_hidden
+                    .get_or_insert_with(|| storage::get(PINS_HIDDEN).unwrap_or_default());
+                hidden.insert(key.tab(), newest);
+                if remember {
+                    let mut kept: HashMap<String, i64> =
+                        storage::get(PINS_HIDDEN).unwrap_or_default();
+                    kept.insert(key.tab(), newest);
+                    storage::set(PINS_HIDDEN, &kept);
+                }
+            }
+            Request::MarkRead { key, read } => mark_read(cx, &key, read),
+            Request::CopyLink { key, message } => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "getMessageLink", "chat_id": key.chat, "message_id": id,
+                        "media_timestamp": 0, "for_album": false, "in_message_thread": false}),
+                    Asked::Feed(Ask::Link { window }),
+                );
+            }
+            Request::KeepMedia { key, message, keep } => {
+                let raw = self.chats.get(&key).and_then(|open| {
+                    let id = message.parse::<i64>().ok()?;
+                    open.raw.get(&id).cloned()
+                });
+                let Some(raw) = raw else {
+                    return;
+                };
+                let content = &raw["content"];
+                let (request, file) = match content["@type"].as_str().unwrap_or_default() {
+                    "messageSticker" if keep => {
+                        ("addFavoriteSticker", &content["sticker"]["sticker"])
+                    }
+                    "messageSticker" => ("removeFavoriteSticker", &content["sticker"]["sticker"]),
+                    "messageAnimation" => ("addSavedAnimation", &content["animation"]["animation"]),
+                    _ => return,
+                };
+                let Some(file) = file["id"].as_i64() else {
+                    return;
+                };
+                let field = match request {
+                    "addSavedAnimation" => "animation",
+                    _ => "sticker",
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": request, field: {"@type": "inputFileId", "id": file}}),
+                    Asked::Feed(Ask::Done {
+                        what: request,
+                        told: Some("Telegram couldn't do that"),
+                    }),
+                );
+            }
+            // A bot's button (part 5): its callback asked, its answer to this window.
+            Request::BotCallback { key, message, data } => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "getCallbackQueryAnswer", "chat_id": key.chat,
+                        "message_id": id,
+                        "payload": {"@type": "callbackQueryPayloadData", "data": data}}),
+                    Asked::Feed(Ask::Callback {
+                        window,
+                        chat: key.chat,
+                    }),
+                );
+            }
+            Request::BotText { key, text } => self.send_button_text(cx, &key, &text),
+            Request::BotStart { key, restart } => {
+                let Some(user) = cx
+                    .stores
+                    .get(&key.account)
+                    .and_then(|store| store.chats.get(&key.chat))
+                    .and_then(|found| match found.kind {
+                        ChatKind::Private { user } => Some(user),
+                        _ => None,
+                    })
+                else {
+                    return;
+                };
+                if restart {
+                    block(cx, &key, user, false);
+                }
+                let parameter = self.start_parameters.remove(&key).unwrap_or_default();
+                if let Some(open) = self.chats.get_mut(&key) {
+                    open.header_dirty = true;
+                }
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "sendBotStartMessage", "bot_user_id": user,
+                        "chat_id": key.chat, "parameter": parameter}),
+                    Asked::Feed(Ask::Done {
+                        what: "sendBotStartMessage",
+                        told: Some("Couldn't start the bot"),
+                    }),
+                );
+            }
+            Request::Block { key, blocked } => {
+                if let Some(user) = cx
+                    .stores
+                    .get(&key.account)
+                    .and_then(|store| store.chats.get(&key.chat))
+                    .and_then(|found| match found.kind {
+                        ChatKind::Private { user } => Some(user),
+                        _ => None,
+                    })
+                {
+                    block(cx, &key, user, blocked);
+                }
+            }
+            // Polls and reactions (part 5): TDLib puts the message again with them.
+            Request::Vote {
+                key,
+                message,
+                options,
+            } => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "setPollAnswer", "chat_id": key.chat, "message_id": id,
+                        "option_ids": options}),
+                    Asked::Feed(Ask::Done {
+                        what: "setPollAnswer",
+                        told: Some("Couldn't vote"),
+                    }),
+                );
+            }
+            Request::StopPoll { key, message } => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "stopPoll", "chat_id": key.chat, "message_id": id}),
+                    Asked::Feed(Ask::Done {
+                        what: "stopPoll",
+                        told: Some("Couldn't stop the poll"),
+                    }),
+                );
+            }
+            Request::React {
+                key,
+                message,
+                emoji,
+            } => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                let chosen = self
+                    .chats
+                    .get(&key)
+                    .and_then(|open| open.raw.get(&id))
+                    .map(convert::chosen_reactions)
+                    .unwrap_or_default();
+                let limit = cx
+                    .stores
+                    .get(&key.account)
+                    .map_or(1, |store| store.reaction_limit(key.chat));
+                let (take_back, put) = convert::toggle_reaction(&chosen, &emoji, limit);
+                for reaction in take_back {
+                    cx.td.send(
+                        &key.account,
+                        json!({"@type": "removeMessageReaction", "chat_id": key.chat,
+                            "message_id": id, "reaction_type": reaction}),
+                        Asked::Feed(Ask::Done {
+                            what: "removeMessageReaction",
+                            told: None,
+                        }),
+                    );
+                }
+                if let Some(reaction) = put {
+                    cx.td.send(
+                        &key.account,
+                        json!({"@type": "addMessageReaction", "chat_id": key.chat,
+                            "message_id": id, "reaction_type": reaction, "is_big": false,
+                            "update_recent_reactions": true}),
+                        Asked::Feed(Ask::Done {
+                            what: "addMessageReaction",
+                            told: Some("Couldn't put the reaction"),
+                        }),
+                    );
+                }
+            }
+            // Part 5: the channel joined — the store's supergroup brings the field.
+            Request::Join { key } => cx.td.send(
+                &key.account,
+                json!({"@type": "joinChat", "chat_id": key.chat}),
+                Asked::Feed(Ask::Done {
+                    what: "joinChat",
+                    told: Some("Couldn't join the channel"),
+                }),
+            ),
+            Request::Ad(crate::ads::AdAsk::Clicked {
+                key,
+                message,
+                media,
+            }) => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "clickChatSponsoredMessage", "chat_id": key.chat,
+                        "message_id": id, "is_media_click": media, "from_fullscreen": false}),
+                    Asked::Feed(Ask::Done {
+                        what: "clickChatSponsoredMessage",
+                        told: None,
+                    }),
+                );
+            }
+            Request::Ad(crate::ads::AdAsk::Report {
+                key,
+                message,
+                option,
+            }) => {
+                let Ok(id) = message.parse::<i64>() else {
+                    return;
+                };
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "reportChatSponsoredMessage", "chat_id": key.chat,
+                        "message_id": id, "option_id": option}),
+                    Asked::Feed(Ask::AdReport {
+                        window,
+                        chat: key.chat,
+                        message,
+                    }),
+                );
+            }
             _ => {}
         }
     }
@@ -1420,6 +2290,16 @@ impl Feed {
                         changes,
                     },
                 );
+                if let Some(ad) = &open.ad {
+                    let ad = crate::ads::AdInfo::of(&ad.raw);
+                    let _ = service::send_json_to(
+                        window,
+                        &Note::Ad {
+                            key: key.clone(),
+                            ad,
+                        },
+                    );
+                }
                 if let Some(header) = &open.header {
                     let _ = service::send_json_to(
                         window,
@@ -1473,11 +2353,69 @@ impl Feed {
         let (Ok(first), Ok(last)) = (first.parse::<i64>(), last.parse::<i64>()) else {
             return;
         };
-        let (first, last) = (first.min(last), first.max(last));
         let Some(open) = self.chats.get_mut(key) else {
             return;
         };
+        // The advertisement (part 5) stands after the last post, whatever its id: seen once
+        // it is on screen; the posts' range ends at the newest one then.
+        let ad = open.ad.as_ref().map(|ad| ad.id);
+        let bot = cx
+            .stores
+            .get(&key.account)
+            .is_some_and(|store| store.is_bot(key.chat));
+        // A bot's is in the bar: on screen with the chat.
+        let ad_on_screen = bot || ad.is_some_and(|ad| ad == first || ad == last);
+        if let Some(ad) = open.ad.as_mut().filter(|ad| ad_on_screen && !ad.seen) {
+            ad.seen = true;
+            cx.td.send(
+                &key.account,
+                json!({"@type": "viewMessages", "chat_id": key.chat, "message_ids": [ad.id],
+                    "source": null, "force_read": true}),
+                Asked::Feed(Ask::Done {
+                    what: "viewMessages",
+                    told: None,
+                }),
+            );
+        }
+        let newest = open.newest().unwrap_or_default();
+        let post = |id: i64| if Some(id) == ad { newest } else { id };
+        let (first, last) = (post(first), post(last));
+        let (first, last) = (first.min(last), first.max(last));
         open.visible = Some((first, last));
+        // The advertisement's picture downloads on (the flush asked for it).
+        let ad_files = open
+            .ad
+            .as_ref()
+            .map(|ad| ad.files.clone())
+            .unwrap_or_default();
+        // A channel's feed at its last post: its advertisement, at most once per `KEEP_FOR`.
+        let bottom = open.newer == History::Complete && last >= newest && newest != 0;
+        let channel = cx
+            .stores
+            .get(&key.account)
+            .is_some_and(|store| store.is_channel(key.chat));
+        if channel
+            && bottom
+            && let Some(ad) = open
+                .ad
+                .as_mut()
+                .filter(|ad| ad.shown.is_none() && !ad.dirty)
+        {
+            ad.dirty = true;
+        }
+        if channel
+            && bottom
+            && open
+                .ad_asked
+                .is_none_or(|at| at.elapsed() >= crate::ads::KEEP_FOR)
+        {
+            open.ad_asked = Some(Instant::now());
+            cx.td.send(
+                &key.account,
+                json!({"@type": "getChatSponsoredMessages", "chat_id": key.chat}),
+                Asked::Feed(Ask::Sponsored { chat: key.chat }),
+            );
+        }
         let open = &*open;
         let Some(store) = cx.stores.get(&key.account) else {
             return;
@@ -1531,7 +2469,11 @@ impl Feed {
             );
         }
         // What left the screen: the downloads the feed started for it stop.
-        let on_screen: HashSet<i64> = wanted.iter().map(|(file, _)| *file).collect();
+        let on_screen: HashSet<i64> = wanted
+            .iter()
+            .map(|(file, _)| *file)
+            .chain(ad_files)
+            .collect();
         self.stop_downloads(cx, key, &on_screen);
         for (file, priority) in wanted {
             if self.cancelled.contains(&(key.account.clone(), file)) {
@@ -1571,21 +2513,32 @@ impl Feed {
     }
 
     /// The field sent: the text, the files (pictures as photos — several as an album — the rest
-    /// as files, the text as the first one's caption), the reply.
-    fn send(&mut self, cx: &mut Cx, key: &ChatKey, composed: Composed) {
+    /// as files, the text as the first one's caption), the reply; `silent` — without sound.
+    fn send(
+        &mut self,
+        cx: &mut Cx,
+        key: &ChatKey,
+        composed: Composed,
+        silent: bool,
+        forward: Option<(ChatKey, Vec<String>)>,
+    ) {
         let files = !composed.files.is_empty();
         let text = composed.text.trim().to_string();
         if text.is_empty() {
-            self.send_formatted(cx, key, &composed, formatted_text(""));
+            self.send_formatted(cx, key, &composed, formatted_text(""), silent);
+            if let Some((from, messages)) = forward {
+                self.forward(cx, key, &from, &messages, silent);
+            }
         } else {
-            // The markup first, as Telegram's apps send it: the rest when TDLib parsed it.
+            // The markup first, as Telegram's apps send it: the rest when TDLib parsed it — the
+            // messages to forward after the text (part 5).
             cx.td.send(
                 &key.account,
                 json!({"@type": "parseMarkdown", "text": formatted_text(&text)}),
                 Asked::Feed(Ask::Markdown {
                     chat: key.chat,
                     text,
-                    then: Then::Send(Box::new(composed)),
+                    then: Then::Send(Box::new(composed), silent, forward.map(Box::new)),
                 }),
             );
         }
@@ -1640,6 +2593,99 @@ impl Feed {
             })
     }
 
+    /// The forum topic a message sent now goes into (part 5): that of the message it answers;
+    /// null — General (or not a forum).
+    fn topic(&self, cx: &Cx, key: &ChatKey, reply_to: Option<&str>) -> Value {
+        let forum = cx
+            .stores
+            .get(&key.account)
+            .is_some_and(|store| store.is_forum(key.chat));
+        let topic = reply_to
+            .and_then(|id| id.parse::<i64>().ok())
+            .and_then(|id| self.chats.get(key)?.raw.get(&id))
+            .and_then(convert::topic_of);
+        match topic {
+            Some(topic) if forum => json!({"@type": "messageTopicForum", "forum_topic_id": topic}),
+            _ => Value::Null,
+        }
+    }
+
+    /// A button of the bot's keyboard over the field, or a command of its menu (part 5): the text
+    /// sent as it is — in a group answering the keyboard's message, as Telegram's apps do; a
+    /// one-time keyboard goes then.
+    fn send_button_text(&mut self, cx: &mut Cx, key: &ChatKey, text: &str) {
+        let markup = cx
+            .stores
+            .get(&key.account)
+            .and_then(|store| store.chats.get(&key.chat))
+            .map_or(0, |found| found.reply_markup);
+        let private = cx
+            .stores
+            .get(&key.account)
+            .and_then(|store| store.chats.get(&key.chat))
+            .is_some_and(|found| matches!(found.kind, ChatKind::Private { .. }));
+        let once = self
+            .chats
+            .get(key)
+            .and_then(|open| open.keyboard_message(markup))
+            .is_some_and(|raw| crate::bots::used_once(&raw["reply_markup"]));
+        let reply = (markup != 0 && !private).then(|| markup.to_string());
+        let content = json!({"@type": "inputMessageText",
+            "text": {"@type": "formattedText", "text": text, "entities": []},
+            "link_preview_options": null, "clear_draft": false});
+        self.send_content(cx, key, content, reply.as_deref());
+        if markup != 0 && once {
+            cx.td.send(
+                &key.account,
+                json!({"@type": "deleteChatReplyMarkup", "chat_id": key.chat,
+                    "message_id": markup}),
+                Asked::Feed(Ask::Done {
+                    what: "deleteChatReplyMarkup",
+                    told: None,
+                }),
+            );
+        }
+    }
+
+    /// A message sent in reply to `reply_to` (part 5): a bot's ask for a reply to it goes, as
+    /// TDLib asks (`deleteChatReplyMarkup`).
+    fn answered(&mut self, cx: &mut Cx, key: &ChatKey, reply_to: Option<&str>) {
+        let Some(id) = reply_to.and_then(|id| id.parse::<i64>().ok()) else {
+            return;
+        };
+        let markup = cx
+            .stores
+            .get(&key.account)
+            .and_then(|store| store.chats.get(&key.chat))
+            .map_or(0, |found| found.reply_markup);
+        let forced = self
+            .chats
+            .get(key)
+            .and_then(|open| open.keyboard_message(markup))
+            .is_some_and(|raw| raw["reply_markup"]["@type"] == "replyMarkupForceReply");
+        if markup == id && forced {
+            cx.td.send(
+                &key.account,
+                json!({"@type": "deleteChatReplyMarkup", "chat_id": key.chat,
+                    "message_id": markup}),
+                Asked::Feed(Ask::Done {
+                    what: "deleteChatReplyMarkup",
+                    told: None,
+                }),
+            );
+        }
+    }
+
+    /// The start parameter of a bot's chat opened by a link (`t.me/<bot>?start=…`, part 5): its
+    /// Start sends it.
+    pub fn set_start_parameter(&mut self, key: &ChatKey, parameter: &str) {
+        self.start_parameters
+            .insert(key.clone(), parameter.to_string());
+        if let Some(open) = self.chats.get_mut(key) {
+            open.header_dirty = true;
+        }
+    }
+
     /// A sticker or a GIF of the field's panel (part 4): sent as it is, answering the quote over
     /// the field.
     pub fn send_content(
@@ -1649,10 +2695,11 @@ impl Feed {
         content: Value,
         reply_to: Option<&str>,
     ) {
+        let topic = self.topic(cx, key, reply_to);
         let reply = self.reply_of(key, reply_to);
         cx.td.send(
             &key.account,
-            json!({"@type": "sendMessage", "chat_id": key.chat, "message_thread_id": 0,
+            json!({"@type": "sendMessage", "chat_id": key.chat, "topic_id": topic,
                 "reply_to": reply, "options": null, "reply_markup": null,
                 "input_message_content": content}),
             Asked::Feed(Ask::Sent { chat: key.chat }),
@@ -1669,20 +2716,34 @@ impl Feed {
         result: &str,
         reply_to: Option<&str>,
     ) {
+        let topic = self.topic(cx, key, reply_to);
         let reply = self.reply_of(key, reply_to);
         cx.td.send(
             &key.account,
             json!({"@type": "sendInlineQueryResultMessage", "chat_id": key.chat,
-                "message_thread_id": 0, "reply_to": reply, "options": null, "query_id": query,
+                "topic_id": topic, "reply_to": reply, "options": null, "query_id": query,
                 "result_id": result, "hide_via_bot": true}),
             Asked::Feed(Ask::Sent { chat: key.chat }),
         );
     }
 
     /// The field's text parsed (`text`: TDLib's `formattedText`, empty when there is none) goes:
-    /// as a message, or as the caption of the first file.
-    fn send_formatted(&mut self, cx: &mut Cx, key: &ChatKey, composed: &Composed, text: Value) {
+    /// as a message, or as the caption of the first file; `silent` — without a notification.
+    fn send_formatted(
+        &mut self,
+        cx: &mut Cx,
+        key: &ChatKey,
+        composed: &Composed,
+        text: Value,
+        silent: bool,
+    ) {
+        let topic = self.topic(cx, key, composed.reply_to.as_deref());
         let reply_to = self.reply_of(key, composed.reply_to.as_deref());
+        let options = if silent {
+            json!({"@type": "messageSendOptions", "disable_notification": true})
+        } else {
+            Value::Null
+        };
         let mut contents: Vec<(bool, Value)> = Vec::new();
         let has_text = text["text"].as_str().is_some_and(|text| !text.is_empty());
         let mut caption = has_text.then_some(text);
@@ -1731,18 +2792,92 @@ impl Feed {
         for batch in batches {
             let reply = reply_to.take();
             let request = if batch.len() == 1 {
-                json!({"@type": "sendMessage", "chat_id": key.chat, "message_thread_id": 0,
-                    "reply_to": reply, "options": null, "reply_markup": null,
+                json!({"@type": "sendMessage", "chat_id": key.chat, "topic_id": topic,
+                    "reply_to": reply, "options": options, "reply_markup": null,
                     "input_message_content": batch[0]})
             } else {
-                json!({"@type": "sendMessageAlbum", "chat_id": key.chat, "message_thread_id": 0,
-                    "reply_to": reply, "options": null, "input_message_contents": batch})
+                json!({"@type": "sendMessageAlbum", "chat_id": key.chat, "topic_id": topic,
+                    "reply_to": reply, "options": options, "input_message_contents": batch})
             };
             cx.td.send(
                 &key.account,
                 request,
                 Asked::Feed(Ask::Sent { chat: key.chat }),
             );
+        }
+    }
+
+    /// The field's word asks (part 5): "@" — the members to mention, in a group (a one-to-one
+    /// chat has nobody to suggest); "/" — the bots' commands, kept while the chat is open. The
+    /// answer goes to `window` only, for `text`.
+    fn suggest(&mut self, cx: &mut Cx, window: u64, key: &ChatKey, trigger: &str, text: String) {
+        let Some(store) = cx.stores.get(&key.account) else {
+            return;
+        };
+        let kind = store.chats.get(&key.chat).map(|chat| chat.kind);
+        let group = matches!(
+            kind,
+            Some(ChatKind::BasicGroup { .. } | ChatKind::Supergroup { channel: false, .. })
+        );
+        match trigger {
+            "@" if group => cx.td.send(
+                &key.account,
+                json!({"@type": "searchChatMembers", "chat_id": key.chat, "query": text,
+                    "limit": MENTION_PAGE,
+                    "filter": {"@type": "chatMembersFilterMention", "message_thread_id": 0}}),
+                Asked::Feed(Ask::Members {
+                    window,
+                    chat: key.chat,
+                    text,
+                }),
+            ),
+            "/" => {
+                let Some(open) = self.chats.get_mut(key) else {
+                    return;
+                };
+                if let Some(commands) = &open.commands {
+                    let items = crate::suggest::command_items(commands, &text);
+                    tell_suggestions(window, key, &text, items);
+                    return;
+                }
+                let asked = !open.commands_waiting.is_empty();
+                open.commands_waiting
+                    .retain(|(waiting, _)| *waiting != window);
+                open.commands_waiting.push((window, text));
+                let request = match kind {
+                    Some(ChatKind::Private { user })
+                        if store
+                            .users
+                            .get(&user)
+                            .is_some_and(|user| user.kind == UserKind::Bot) =>
+                    {
+                        json!({"@type": "getUserFullInfo", "user_id": user})
+                    }
+                    Some(ChatKind::BasicGroup { group }) => {
+                        json!({"@type": "getBasicGroupFullInfo", "basic_group_id": group})
+                    }
+                    Some(ChatKind::Supergroup {
+                        group,
+                        channel: false,
+                    }) => json!({"@type": "getSupergroupFullInfo", "supergroup_id": group}),
+                    // Nobody's commands: an empty list, kept.
+                    _ => {
+                        open.commands = Some(Vec::new());
+                        for (window, text) in std::mem::take(&mut open.commands_waiting) {
+                            tell_suggestions(window, key, &text, Vec::new());
+                        }
+                        return;
+                    }
+                };
+                if !asked {
+                    cx.td.send(
+                        &key.account,
+                        request,
+                        Asked::Feed(Ask::Commands { chat: key.chat }),
+                    );
+                }
+            }
+            _ => tell_suggestions(window, key, &text, Vec::new()),
         }
     }
 
@@ -1892,6 +3027,30 @@ impl Feed {
         }
     }
 
+    /// The account's favorite stickers changed (part 5): its open chats' sticker messages are
+    /// converted again (Add to Favorites or Remove).
+    fn favorites(&mut self, cx: &mut Cx, account: &str, files: HashSet<i64>) {
+        let Some(store) = cx.stores.get_mut(account) else {
+            return;
+        };
+        if store.favorite_stickers == files {
+            return;
+        }
+        store.favorite_stickers = files;
+        for (key, open) in self.chats.iter_mut() {
+            if key.account != account {
+                continue;
+            }
+            let stickers: Vec<i64> = open
+                .raw
+                .iter()
+                .filter(|(_, message)| message["content"]["@type"] == "messageSticker")
+                .map(|(id, _)| *id)
+                .collect();
+            open.dirty.extend(stickers);
+        }
+    }
+
     /// The end of a batch: the feeds' and headers' changes go to the windows that show them.
     pub fn flush(&mut self, cx: &mut Cx) {
         let now = unix_now() as i64;
@@ -1900,6 +3059,8 @@ impl Feed {
             chats,
             media,
             frames,
+            pins_hidden,
+            start_parameters,
             ..
         } = self;
         for (key, open) in chats.iter_mut() {
@@ -1907,6 +3068,136 @@ impl Feed {
                 continue;
             }
             let mut changes = std::mem::take(&mut open.queue);
+            // A bot's menu (part 5): its full info once its chat is known — the header's commands.
+            let bot = cx.stores.get(&key.account).and_then(|store| {
+                match store.chats.get(&key.chat)?.kind {
+                    ChatKind::Private { user } => store
+                        .users
+                        .get(&user)
+                        .filter(|found| found.kind == UserKind::Bot)
+                        .map(|_| user),
+                    _ => None,
+                }
+            });
+            if let Some(user) = bot
+                && open.commands.is_none()
+                && open.commands_waiting.is_empty()
+                && !std::mem::replace(&mut open.menu_asked, true)
+            {
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "getUserFullInfo", "user_id": user}),
+                    Asked::Feed(Ask::Commands { chat: key.chat }),
+                );
+            }
+            // A bot's advertisement (part 5): asked for here when the chat opened before the
+            // store knew it was a bot's (`load` couldn't tell).
+            if bot.is_some() && open.ad_asked.is_none() {
+                open.ad_asked = Some(Instant::now());
+                cx.td.send(
+                    &key.account,
+                    json!({"@type": "getChatSponsoredMessages", "chat_id": key.chat}),
+                    Asked::Feed(Ask::Sponsored { chat: key.chat }),
+                );
+            }
+            // The keyboard over the field (part 5), when TDLib names another message; fetched
+            // when it isn't loaded; a forced reply's quote over the field.
+            let markup = cx
+                .stores
+                .get(&key.account)
+                .and_then(|store| store.chats.get(&key.chat))
+                .map_or(0, |found| found.reply_markup);
+            if open.keyboard_of != Some(markup) {
+                match open.keyboard_message(markup) {
+                    _ if markup == 0 => {
+                        open.keyboard_of = Some(0);
+                        if open.keyboard.take().is_some() {
+                            changes.push(conv::reply_keyboard(None));
+                        }
+                    }
+                    Some(raw) => {
+                        let keyboard = crate::bots::reply_keyboard(&raw["reply_markup"]);
+                        let force = raw["reply_markup"]["@type"] == "replyMarkupForceReply";
+                        open.keyboard_of = Some(markup);
+                        if keyboard != open.keyboard {
+                            changes.push(conv::reply_keyboard(keyboard.clone()));
+                            open.keyboard = keyboard;
+                        }
+                        for window in open.windows.iter().filter(|_| force) {
+                            let _ = service::send_json_to(
+                                *window,
+                                &Note::ForceReply {
+                                    key: key.clone(),
+                                    message: markup.to_string(),
+                                },
+                            );
+                        }
+                    }
+                    None if open.keyboard_asked != markup => {
+                        open.keyboard_asked = markup;
+                        cx.td.send(
+                            &key.account,
+                            json!({"@type": "getMessage", "chat_id": key.chat,
+                                "message_id": markup}),
+                            Asked::Feed(Ask::Keyboard { chat: key.chat }),
+                        );
+                    }
+                    None => {}
+                }
+            }
+            // The pinned message's bar (part 5), when it changed; its picture downloads.
+            if std::mem::take(&mut open.pins_dirty)
+                && let Some(store) = cx.stores.get(&key.account)
+            {
+                let hidden = match open.pins.newest() {
+                    Some(_) => pins_hidden
+                        .get_or_insert_with(|| storage::get(PINS_HIDDEN).unwrap_or_default())
+                        .get(&key.tab())
+                        .copied(),
+                    None => None,
+                };
+                // A bot's advertisement (part 5) takes the bar.
+                let bar = match open.ad.as_ref().filter(|_| store.is_bot(key.chat)) {
+                    Some(ad) => crate::ads::bar(&ad.raw, &HostWords),
+                    None => open
+                        .pins
+                        .bar(store, &HostWords, store.can_pin(key.chat), hidden),
+                };
+                if bar != open.pinned_bar {
+                    changes.push(conv::pinned(bar.clone()));
+                    open.pinned_bar = bar;
+                }
+                if let Some(file) = open.pins.wanted_file(store) {
+                    open.wanted_files.push((file, IN_SIGHT));
+                }
+            }
+            // The advertisement (part 5): put when it came, and again when its picture did.
+            if let Some(ad) = open.ad.as_mut().filter(|ad| ad.dirty)
+                && let Some(store) = cx.stores.get(&key.account)
+            {
+                ad.dirty = false;
+                let context = Context {
+                    store,
+                    words: &HostWords,
+                    now: unix_now() as i64,
+                    replied: None,
+                    media,
+                };
+                if let Some(converted) = convert::sponsored(&context, &ad.raw) {
+                    ad.files = converted.files.clone();
+                    let missing = converted
+                        .auto
+                        .iter()
+                        .chain(&converted.full)
+                        .filter(|file| store.file_path(**file).is_none())
+                        .map(|file| (*file, IN_SIGHT));
+                    open.wanted_files.extend(missing);
+                    if ad.shown.as_ref() != Some(&converted.message) {
+                        changes.push(conv::put(vec![converted.message.clone()]));
+                        ad.shown = Some(converted.message);
+                    }
+                }
+            }
             // An animation rendered in an earlier session is found on disk: its message is
             // converted again at once, with it.
             for _ in 0..2 {
@@ -1953,7 +3244,14 @@ impl Feed {
                 .iter()
                 .map(|(who, (action, _))| (*who, action.as_str()))
                 .collect();
-            let header = header(store, key.chat, &typing, now, offset, &HostWords);
+            let mut header = header(store, key.chat, &typing, now, offset, &HostWords);
+            // A bot's menu (part 5); a chat with messages loaded isn't empty.
+            header.commands = open.menu.clone();
+            header.empty = header.empty && open.raw.is_empty();
+            // A bot opened by a start link (part 5): Start sends its parameter, history or not.
+            if header.bot && start_parameters.contains_key(key) {
+                header.empty = true;
+            }
             if open.header.as_ref() == Some(&header) {
                 continue;
             }
@@ -2033,6 +3331,63 @@ impl Feed {
                 }
             }
         }
+    }
+}
+
+/// Marks a chat as read — every message (`viewMessages` of the last one, forced), its mentions
+/// and reactions, Telegram's "marked as unread" gone — or as unread (part 5).
+fn mark_read(cx: &mut Cx, key: &ChatKey, read: bool) {
+    let account = &key.account;
+    let chat = key.chat;
+    let Some(found) = cx
+        .stores
+        .get(account)
+        .and_then(|store| store.chats.get(&chat))
+    else {
+        return;
+    };
+    let marked = found.marked_unread;
+    let last = found
+        .last_message
+        .as_ref()
+        .and_then(|message| message["id"].as_i64());
+    let done = |what| {
+        Asked::Feed(Ask::Done {
+            what,
+            told: Some("Telegram couldn't do that"),
+        })
+    };
+    if !read {
+        cx.td.send(
+            account,
+            json!({"@type": "toggleChatIsMarkedAsUnread", "chat_id": chat,
+                "is_marked_as_unread": true}),
+            done("toggleChatIsMarkedAsUnread"),
+        );
+        return;
+    }
+    if let Some(last) = last {
+        cx.td.send(
+            account,
+            json!({"@type": "viewMessages", "chat_id": chat, "message_ids": [last],
+                "source": null, "force_read": true}),
+            done("viewMessages"),
+        );
+    }
+    for request in ["readAllChatMentions", "readAllChatReactions"] {
+        cx.td.send(
+            account,
+            json!({"@type": request, "chat_id": chat}),
+            done(request),
+        );
+    }
+    if marked {
+        cx.td.send(
+            account,
+            json!({"@type": "toggleChatIsMarkedAsUnread", "chat_id": chat,
+                "is_marked_as_unread": false}),
+            done("toggleChatIsMarkedAsUnread"),
+        );
     }
 }
 
@@ -2362,6 +3717,34 @@ fn save_draft(cx: &mut Cx, key: &ChatKey, text: &str) {
     );
 }
 
+/// The field's suggestions for `text` (part 5): to the window that asked only.
+fn tell_suggestions(window: u64, key: &ChatKey, text: &str, items: Vec<Suggestion>) {
+    let _ = service::send_json_to(
+        window,
+        &Note::Feed {
+            key: key.clone(),
+            changes: vec![conv::suggestions(text, items)],
+        },
+    );
+}
+
+/// The chat's advertisement to its windows (part 5): what their clicks and About the Ad need.
+fn tell_ad(key: &ChatKey, open: &Open) {
+    let ad = open
+        .ad
+        .as_ref()
+        .and_then(|ad| crate::ads::AdInfo::of(&ad.raw));
+    for window in &open.windows {
+        let _ = service::send_json_to(
+            *window,
+            &Note::Ad {
+                key: key.clone(),
+                ad: ad.clone(),
+            },
+        );
+    }
+}
+
 /// Plain text as TDLib's `formattedText`: TDLib finds the links itself.
 fn formatted_text(text: &str) -> Value {
     json!({"@type": "formattedText", "text": text, "entities": []})
@@ -2404,11 +3787,57 @@ pub fn header(
         typing: typing_line(store, chat, typing, words),
         can_send: store.can_send(chat),
         muted: store.muted(chat),
+        unread: found.is_some_and(|found| found.unread_count > 0 || found.marked_unread),
+        saved,
+        channel: store.is_channel(chat),
+        joined: store.joined(chat),
+        bot: store.is_bot(chat),
+        blocked: found.is_some_and(|found| found.blocked),
+        empty: found.is_some_and(|found| found.last_message.is_none()),
+        commands: Vec::new(),
+        reactions: store.reactions(chat),
     }
 }
 
+/// Blocks the chat's person or bot, or unblocks it (part 5): a stopped bot.
+fn block(cx: &mut Cx, key: &ChatKey, user: i64, blocked: bool) {
+    let list = if blocked {
+        json!({"@type": "blockListMain"})
+    } else {
+        Value::Null
+    };
+    cx.td.send(
+        &key.account,
+        json!({"@type": "setMessageSenderBlockList",
+            "sender_id": {"@type": "messageSenderUser", "user_id": user}, "block_list": list}),
+        Asked::Feed(Ask::Done {
+            what: "setMessageSenderBlockList",
+            told: Some("Telegram couldn't do that"),
+        }),
+    );
+}
+
+/// A channel's line (part 5): "12 345 subscribers", the digits grouped as Telegram writes them;
+/// "channel" while the count is unknown.
+pub fn subscribers_line(subscribers: u32, words: &dyn Words) -> String {
+    if subscribers == 0 {
+        return words.tr("channel");
+    }
+    let digits = subscribers.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push('\u{a0}');
+        }
+        grouped.push(digit);
+    }
+    words
+        .count(u64::from(subscribers), "{0} subscriber", "{0} subscribers")
+        .replace(&digits, &grouped)
+}
+
 /// The line under a chat's title: a person's "online" / "last seen…" (and whether it is online),
-/// a group's members.
+/// a group's members, a channel's subscribers.
 pub fn status_line(
     store: &Store,
     chat: i64,
@@ -2421,6 +3850,10 @@ pub fn status_line(
     };
     let user = match found.kind {
         ChatKind::Private { user } | ChatKind::Secret { user } => user,
+        ChatKind::Supergroup { channel: true, .. } => {
+            let subscribers = store.group(chat).map_or(0, |group| group.member_count);
+            return (subscribers_line(subscribers, words), false);
+        }
         ChatKind::BasicGroup { .. } | ChatKind::Supergroup { .. } => {
             let members = store.group(chat).map_or(0, |group| group.member_count);
             let line = if members == 0 {

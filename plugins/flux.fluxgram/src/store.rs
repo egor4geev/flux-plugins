@@ -3,6 +3,10 @@
 //! line of the account). The list (`chats.rs`) and the feed (`feed.rs`) read it; neither keeps a
 //! copy. Messages aren't here: the feed keeps those of the open chats.
 //!
+//! Part 5: channels and bots are listed like people and groups; a forum's topics (names and
+//! colors) are kept for the labels of its messages; the reactions each chat allows, and
+//! Telegram's active ones for a chat that allows all ([`Store::reactions`]).
+//!
 //! Needs no host, so it is tested natively. Only the chats in a list or open pass the helper
 //! (`fluxgram.chats`), so the store holds those — plus whatever the Add Chat popup's answers
 //! brought (`getChat`), and every user TDLib mentions (`updateUser`: names of authors).
@@ -13,6 +17,12 @@ use flux_plugin_api::conversation::AvatarSpec;
 use serde_json::Value;
 
 use crate::model::{downloaded, initials};
+
+/// The reactions of a chat that allows all of Telegram's, until `updateActiveEmojiReactions`
+/// says which they are (part 5): the first of Telegram's own list.
+pub const FALLBACK_REACTIONS: &[&str] = &[
+    "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "😢", "🎉", "🙏",
+];
 
 /// Saved Messages' picture: a white bookmark on Telegram's blue, as its apps draw it.
 const SAVED_PNG: &[u8] = include_bytes!("../icons/saved.png");
@@ -52,6 +62,8 @@ pub struct User {
     pub kind: UserKind,
     pub status: Status,
     pub is_contact: bool,
+    /// Telegram Premium (part 5): three reactions on a message, not one.
+    pub premium: bool,
 }
 
 impl User {
@@ -104,7 +116,7 @@ pub enum ChatKind {
     BasicGroup {
         group: i64,
     },
-    /// A supergroup, or a channel (`channel`): FluxGram shows no channels.
+    /// A supergroup, or a channel (`channel`).
     Supergroup {
         group: i64,
         channel: bool,
@@ -140,8 +152,21 @@ pub struct Chat {
     pub default_mute: bool,
     /// The user's unsent text.
     pub draft: Option<String>,
-    /// The chat's permissions let members send text.
+    /// The chat's permissions let members send text, and pin messages (part 5).
     pub can_send_basic: bool,
+    pub can_pin_basic: bool,
+    /// The message whose keyboard the field shows (part 5, `reply_markup_message_id`: TDLib
+    /// applies Telegram's rules); 0 — none.
+    pub reply_markup: i64,
+    /// The user blocked the chat's person or bot (part 5, `block_list`: a stopped bot).
+    pub blocked: bool,
+    /// Its messages can't be forwarded or saved (part 5, `has_protected_content`).
+    pub protected: bool,
+    /// The reactions it allows (part 5, `available_reactions`): none — all of Telegram's active
+    /// ones (`chatAvailableReactionsAll`); some — these emoji (empty: no reactions).
+    pub reactions: Option<Vec<String>>,
+    /// How many different reactions a message may carry (`max_reaction_count`); 0 — unknown.
+    pub max_reactions: u32,
 }
 
 /// A basic group or a supergroup: the members and the user's place among them.
@@ -154,8 +179,27 @@ pub struct Group {
     pub status: String,
     /// A restricted member's own permission to send text (`chatMemberStatusRestricted`).
     pub restricted_can_send: bool,
+    /// The user's own right to pin messages (part 5): an administrator's (`can_pin_messages`, a
+    /// channel's `can_edit_messages`), a restricted member's permission.
+    pub own_can_pin: bool,
     pub is_forum: bool,
     pub username: Option<String>,
+    /// A channel's posts carry their authors' signatures (part 5).
+    pub sign_messages: bool,
+    /// The user may post in the channel (part 5): an administrator's `can_post_messages`.
+    pub own_can_post: bool,
+}
+
+/// A forum's topic (part 5): its label over the messages of a group whose topics show as one
+/// feed.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Topic {
+    pub name: String,
+    /// The icon's color as one of the avatar colors (0–6).
+    pub color: u8,
+    pub general: bool,
+    /// Closed (or the General topic hidden): only its creator and admins write there.
+    pub closed: bool,
 }
 
 /// A file TDLib knows: where it is on disk once downloaded, and how far a download or an upload
@@ -212,11 +256,21 @@ pub struct Store {
     pub basic_groups: HashMap<i64, Group>,
     pub supergroups: HashMap<i64, Group>,
     pub files: HashMap<i64, File>,
-    /// Private chats and groups are muted by default (Settings → Notifications in Telegram).
+    /// Private chats, groups and channels are muted by default (Settings → Notifications in
+    /// Telegram).
     pub private_muted: bool,
     pub groups_muted: bool,
+    pub channels_muted: bool,
+    /// The forums' topics (part 5), by the chat and the topic's id.
+    pub topics: HashMap<(i64, i64), Topic>,
+    /// The favorite stickers' files (part 5): a sticker message offers Add to Favorites or
+    /// Remove from Favorites by them.
+    pub favorite_stickers: std::collections::HashSet<i64>,
     /// Saved Messages' bookmark, instead of the user's initials.
     pub saved_icon: SavedIcon,
+    /// The emoji reactions Telegram has now (part 5, `updateActiveEmojiReactions`): those of a
+    /// chat that allows all.
+    pub active_reactions: Vec<String>,
 }
 
 impl Store {
@@ -246,6 +300,28 @@ impl Store {
             "updateSupergroup" => self.put_group(&value["supergroup"], true),
             "file" => self.put_file(value),
             "updateFile" => self.put_file(&value["file"]),
+            "forumTopicInfo" => self.put_topic(value),
+            "updateForumTopicInfo" => self.put_topic(&value["info"]),
+            "forumTopics" => {
+                let mut touched = Touched::Nothing;
+                for topic in value["topics"].as_array().into_iter().flatten() {
+                    if let Touched::Chat(chat) = self.put_topic(&topic["info"]) {
+                        touched = Touched::Chat(chat);
+                    }
+                }
+                touched
+            }
+            // Telegram's reactions (part 5): every chat that allows all of them changes.
+            "updateActiveEmojiReactions" => {
+                self.active_reactions = value["emojis"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                Touched::Scope
+            }
             "updateScopeNotificationSettings" => {
                 let muted = value["notification_settings"]["mute_for"]
                     .as_i64()
@@ -254,6 +330,7 @@ impl Store {
                 match value["scope"]["@type"].as_str().unwrap_or_default() {
                     "notificationSettingsScopePrivateChats" => self.private_muted = muted,
                     "notificationSettingsScopeGroupChats" => self.groups_muted = muted,
+                    "notificationSettingsScopeChannelChats" => self.channels_muted = muted,
                     _ => return Touched::Nothing,
                 }
                 Touched::Scope
@@ -268,8 +345,12 @@ impl Store {
                     "updateChatAccentColors" => {
                         chat.color = color(&value["accent_color_id"], chat_id)
                     }
+                    "updateChatHasProtectedContent" => {
+                        chat.protected = value["has_protected_content"] == true
+                    }
                     "updateChatPermissions" => {
-                        chat.can_send_basic = can_send(&value["permissions"])
+                        chat.can_send_basic = can_send(&value["permissions"]);
+                        chat.can_pin_basic = value["permissions"]["can_pin_messages"] == true;
                     }
                     "updateChatLastMessage" => {
                         chat.last_message = message_of(&value["last_message"]);
@@ -299,6 +380,18 @@ impl Store {
                     "updateChatDraftMessage" => {
                         chat.draft = draft_of(&value["draft_message"]);
                         apply_positions(chat, &value["positions"]);
+                    }
+                    // A bot's keyboard over the field; a bot stopped or restarted (part 5).
+                    "updateChatReplyMarkup" => {
+                        chat.reply_markup = value["reply_markup_message_id"]
+                            .as_i64()
+                            .unwrap_or_default()
+                    }
+                    "updateChatBlockList" => {
+                        chat.blocked = value["block_list"]["@type"] == "blockListMain"
+                    }
+                    "updateChatAvailableReactions" => {
+                        apply_reactions(chat, &value["available_reactions"])
                     }
                     _ => return Touched::Nothing,
                 }
@@ -331,6 +424,7 @@ impl Store {
             kind,
             status: parse_status(&user["status"]),
             is_contact: user["is_contact"] == true,
+            premium: user["is_premium"] == true,
         };
         if self.users.get(&id) == Some(&new) {
             return Touched::Nothing;
@@ -378,10 +472,15 @@ impl Store {
                 .unwrap_or_default(),
             draft: draft_of(&chat["draft_message"]),
             can_send_basic: can_send(&chat["permissions"]),
+            can_pin_basic: chat["permissions"]["can_pin_messages"] == true,
+            reply_markup: chat["reply_markup_message_id"].as_i64().unwrap_or_default(),
+            blocked: chat["block_list"]["@type"] == "blockListMain",
+            protected: chat["has_protected_content"] == true,
             ..Chat::default()
         };
         apply_notifications(&mut new, &chat["notification_settings"]);
         apply_positions(&mut new, &chat["positions"]);
+        apply_reactions(&mut new, &chat["available_reactions"]);
         if self.chats.get(&id) == Some(&new) {
             return Touched::Nothing;
         }
@@ -400,12 +499,17 @@ impl Store {
             status: status["@type"].as_str().unwrap_or_default().to_string(),
             restricted_can_send: status["@type"] == "chatMemberStatusRestricted"
                 && can_send(&status["permissions"]),
+            own_can_pin: status["rights"]["can_pin_messages"] == true
+                || status["rights"]["can_edit_messages"] == true
+                || status["permissions"]["can_pin_messages"] == true,
             is_forum: group["is_forum"] == true,
             username: group["usernames"]["active_usernames"]
                 .as_array()
                 .and_then(|names| names.first())
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            sign_messages: group["sign_messages"] == true,
+            own_can_post: status["rights"]["can_post_messages"] == true,
         };
         let (groups, chat) = if supergroup {
             (&mut self.supergroups, -1_000_000_000_000 - id)
@@ -416,6 +520,25 @@ impl Store {
             return Touched::Nothing;
         }
         groups.insert(id, new);
+        Touched::Chat(chat)
+    }
+
+    /// A forum topic's `forumTopicInfo`: its name and its icon's color.
+    fn put_topic(&mut self, info: &Value) -> Touched {
+        let (Some(chat), Some(id)) = (info["chat_id"].as_i64(), info["forum_topic_id"].as_i64())
+        else {
+            return Touched::Nothing;
+        };
+        let new = Topic {
+            name: text(info, "name"),
+            color: topic_color(info["icon"]["color"].as_i64().unwrap_or_default()),
+            general: info["is_general"] == true,
+            closed: info["is_closed"] == true || info["is_hidden"] == true,
+        };
+        if self.topics.get(&(chat, id)) == Some(&new) {
+            return Touched::Nothing;
+        }
+        self.topics.insert((chat, id), new);
         Touched::Chat(chat)
     }
 
@@ -448,21 +571,62 @@ impl Store {
 
     // --- What the list and the feed read ---
 
-    /// A chat FluxGram shows: one with a person (not a bot), a group; no channels, no secret
+    /// A chat FluxGram shows: one with a person or a bot, a group, a channel (part 5); no secret
     /// chats (they live on one device).
     pub fn listed(&self, chat: i64) -> bool {
         let Some(chat) = self.chats.get(&chat) else {
             return false;
         };
         match chat.kind {
-            ChatKind::Private { user } => self
-                .users
-                .get(&user)
-                .is_none_or(|user| user.kind != UserKind::Bot),
-            ChatKind::BasicGroup { .. } => true,
-            ChatKind::Supergroup { channel, .. } => !channel,
+            ChatKind::Private { .. }
+            | ChatKind::BasicGroup { .. }
+            | ChatKind::Supergroup { .. } => true,
             ChatKind::Secret { .. } | ChatKind::Unknown => false,
         }
+    }
+
+    /// A channel (part 5): posts without authors, subscribers rather than members.
+    pub fn is_channel(&self, chat: i64) -> bool {
+        self.chats
+            .get(&chat)
+            .is_some_and(|chat| matches!(chat.kind, ChatKind::Supergroup { channel: true, .. }))
+    }
+
+    /// A chat with a bot (part 5).
+    pub fn is_bot(&self, chat: i64) -> bool {
+        match self.chats.get(&chat).map(|chat| chat.kind) {
+            Some(ChatKind::Private { user }) => self
+                .users
+                .get(&user)
+                .is_some_and(|user| user.kind == UserKind::Bot),
+            _ => false,
+        }
+    }
+
+    /// The user is in the chat (part 5): not a group or a channel they left or were banned from
+    /// (or never joined — a public channel opened by its name).
+    pub fn joined(&self, chat: i64) -> bool {
+        match self.chats.get(&chat).map(|chat| chat.kind) {
+            Some(ChatKind::BasicGroup { .. } | ChatKind::Supergroup { .. }) => {
+                self.group(chat).is_none_or(|group| {
+                    !matches!(
+                        group.status.as_str(),
+                        "chatMemberStatusLeft" | "chatMemberStatusBanned"
+                    )
+                })
+            }
+            _ => true,
+        }
+    }
+
+    /// A group whose topics show as one feed (part 5).
+    pub fn is_forum(&self, chat: i64) -> bool {
+        self.group(chat).is_some_and(|group| group.is_forum)
+    }
+
+    /// The chat's messages can't be forwarded (part 5): its content is protected.
+    pub fn is_protected(&self, chat: i64) -> bool {
+        self.chats.get(&chat).is_some_and(|chat| chat.protected)
     }
 
     /// The chat with the user themself: Saved Messages.
@@ -482,6 +646,7 @@ impl Store {
         }
         match chat.kind {
             ChatKind::Private { .. } | ChatKind::Secret { .. } => self.private_muted,
+            ChatKind::Supergroup { channel: true, .. } => self.channels_muted,
             _ => self.groups_muted,
         }
     }
@@ -506,6 +671,16 @@ impl Store {
                 .users
                 .get(&user)
                 .is_none_or(|user| user.kind != UserKind::Deleted),
+            // A channel (part 5): its creator, and administrators who may post.
+            ChatKind::Supergroup { channel: true, .. } => {
+                match self.group(chat).map(|group| group.status.as_str()) {
+                    Some("chatMemberStatusCreator") => true,
+                    Some("chatMemberStatusAdministrator") => {
+                        self.group(chat).is_some_and(|group| group.own_can_post)
+                    }
+                    _ => false,
+                }
+            }
             ChatKind::BasicGroup { .. } | ChatKind::Supergroup { .. } => {
                 match self.group(chat).map(|group| group.status.as_str()) {
                     Some("chatMemberStatusCreator" | "chatMemberStatusAdministrator") => true,
@@ -517,6 +692,66 @@ impl Store {
                 }
             }
             _ => false,
+        }
+    }
+
+    /// The user may pin and unpin the chat's messages (part 5): anyone in a person's chat; in a
+    /// group its creator, an administrator with the right, a member when the chat's permissions
+    /// let members (a restricted one by their own).
+    pub fn can_pin(&self, chat: i64) -> bool {
+        let Some(found) = self.chats.get(&chat) else {
+            return false;
+        };
+        match found.kind {
+            ChatKind::Private { .. } => true,
+            ChatKind::BasicGroup { .. } | ChatKind::Supergroup { .. } => {
+                let Some(group) = self.group(chat) else {
+                    return false;
+                };
+                match group.status.as_str() {
+                    "chatMemberStatusCreator" => true,
+                    "chatMemberStatusAdministrator" | "chatMemberStatusRestricted" => {
+                        group.own_can_pin
+                    }
+                    "chatMemberStatusMember" => found.can_pin_basic,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// The reactions the user may put in the chat (part 5), in order: its own list, or
+    /// Telegram's active ones when it allows all ([`FALLBACK_REACTIONS`] until they come). None
+    /// in Saved Messages (Telegram's tags there are for Premium) or a channel the user isn't in.
+    pub fn reactions(&self, chat: i64) -> Vec<String> {
+        let Some(found) = self.chats.get(&chat) else {
+            return Vec::new();
+        };
+        if self.is_saved_messages(chat) || (self.is_channel(chat) && !self.joined(chat)) {
+            return Vec::new();
+        }
+        match &found.reactions {
+            Some(some) => some.clone(),
+            None if self.active_reactions.is_empty() => FALLBACK_REACTIONS
+                .iter()
+                .map(|emoji| emoji.to_string())
+                .collect(),
+            None => self.active_reactions.clone(),
+        }
+    }
+
+    /// How many reactions of the user's own a message may carry (part 5): one, three with
+    /// Telegram Premium (Telegram's defaults), never more than the chat lets a message carry.
+    pub fn reaction_limit(&self, chat: i64) -> usize {
+        let premium = self
+            .me
+            .and_then(|me| self.users.get(&me))
+            .is_some_and(|me| me.premium);
+        let own = if premium { 3 } else { 1 };
+        match self.chats.get(&chat).map(|found| found.max_reactions) {
+            Some(max) if max > 0 => own.min(max as usize),
+            _ => own,
         }
     }
 
@@ -641,9 +876,52 @@ fn parse_status(status: &Value) -> Status {
     }
 }
 
+/// A forum topic's icon color (RGB; Telegram offers six) as the nearest avatar color: red 0,
+/// orange 1, violet 2, green 3, cyan 4, blue 5, pink 6.
+pub fn topic_color(rgb: i64) -> u8 {
+    match rgb {
+        0x6FB9F0 => 5,
+        0xFFD67E => 1,
+        0xCB86DB => 2,
+        0x8EEE98 => 3,
+        0xFF93B2 => 6,
+        0xFB6F5F => 0,
+        _ => {
+            let (r, g, b) = ((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+            match (r, g, b) {
+                _ if r > 200 && g < 140 && b < 140 => 0,
+                _ if r > 200 && g > 150 && b < 150 => 1,
+                _ if g > r && g > b => 3,
+                _ if r > 150 && b > 150 && g < 150 => 2,
+                _ if b > r && g > 150 => 4,
+                _ => 5,
+            }
+        }
+    }
+}
+
 /// `chatPermissions` let members send text.
 fn can_send(permissions: &Value) -> bool {
     permissions["can_send_basic_messages"] == true
+}
+
+/// A chat's `available_reactions` (part 5): all of Telegram's, or some (custom emoji and the paid
+/// one left out — they are only shown).
+fn apply_reactions(chat: &mut Chat, available: &Value) {
+    chat.max_reactions = available["max_reaction_count"].as_u64().unwrap_or_default() as u32;
+    chat.reactions = match available["@type"].as_str().unwrap_or_default() {
+        "chatAvailableReactionsSome" => Some(
+            available["reactions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|reaction| reaction["@type"] == "reactionTypeEmoji")
+                .filter_map(|reaction| reaction["emoji"].as_str())
+                .map(str::to_string)
+                .collect(),
+        ),
+        _ => None,
+    };
 }
 
 fn apply_notifications(chat: &mut Chat, settings: &Value) {
@@ -716,6 +994,44 @@ mod tests {
     }
 
     #[test]
+    fn lists_the_reactions_a_chat_allows_and_the_users_limit() {
+        let chat = -1000000001001i64;
+        let mut store = Store {
+            me: Some(777),
+            ..Store::default()
+        };
+        store.apply(&group_chat());
+        // All of Telegram's: the fallback until the active ones come, then those.
+        assert_eq!(store.reactions(chat).len(), FALLBACK_REACTIONS.len());
+        assert_eq!(
+            store.apply(&json!({"@type": "updateActiveEmojiReactions", "emojis": ["👍", "🔥"]})),
+            Touched::Scope
+        );
+        assert_eq!(store.reactions(chat), ["👍", "🔥"]);
+        // Some: those (a custom one left out); none — empty.
+        store.apply(
+            &json!({"@type": "updateChatAvailableReactions", "chat_id": chat,
+            "available_reactions": {"@type": "chatAvailableReactionsSome", "reactions": [
+                {"@type": "reactionTypeEmoji", "emoji": "🎉"},
+                {"@type": "reactionTypeCustomEmoji", "custom_emoji_id": "5"}],
+                "max_reaction_count": 2}}),
+        );
+        assert_eq!(store.reactions(chat), ["🎉"]);
+        store.apply(
+            &json!({"@type": "updateChatAvailableReactions", "chat_id": chat,
+            "available_reactions": {"@type": "chatAvailableReactionsSome", "reactions": [],
+                "max_reaction_count": 11}}),
+        );
+        assert!(store.reactions(chat).is_empty());
+        // One of the user's own; three with Premium — never more than the chat lets.
+        assert_eq!(store.reaction_limit(chat), 1);
+        store.apply(&json!({"@type": "user", "id": 777, "first_name": "Me", "is_premium": true}));
+        assert_eq!(store.reaction_limit(chat), 3);
+        store.chats.get_mut(&chat).unwrap().max_reactions = 2;
+        assert_eq!(store.reaction_limit(chat), 2);
+    }
+
+    #[test]
     fn keeps_a_chat_and_its_updates() {
         let mut store = Store::default();
         assert_eq!(store.apply(&group_chat()), Touched::Chat(-1000000001001i64));
@@ -752,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn hides_channels_bots_and_secret_chats() {
+    fn lists_channels_and_bots_but_no_secret_chats() {
         let mut store = Store::default();
         store.apply(&json!({"@type": "chat", "id": -1002,
             "type": {"@type": "chatTypeSupergroup", "supergroup_id": 2, "is_channel": true}}));
@@ -764,10 +1080,41 @@ mod tests {
             "type": {"@type": "chatTypeSecret", "secret_chat_id": 1, "user_id": 101}}));
         store.apply(&json!({"@type": "chat", "id": 101,
             "type": {"@type": "chatTypePrivate", "user_id": 101}}));
-        assert!(!store.listed(-1002));
-        assert!(!store.listed(105));
+        assert!(store.listed(-1002));
+        assert!(store.listed(105));
         assert!(!store.listed(-2000000000001));
         assert!(store.listed(101));
+        assert!(store.is_channel(-1002) && !store.is_channel(101));
+        assert!(store.is_bot(105) && !store.is_bot(101));
+    }
+
+    #[test]
+    fn keeps_a_forums_topics() {
+        let mut store = Store::default();
+        let touched = store.apply(
+            &json!({"@type": "forumTopics", "total_count": 2, "topics": [
+            {"@type": "forumTopic", "info": {"@type": "forumTopicInfo", "chat_id": -1006,
+                "forum_topic_id": 1, "name": "General", "is_general": true,
+                "icon": {"@type": "forumTopicIcon", "color": 0x6FB9F0}}},
+            {"@type": "forumTopic", "info": {"@type": "forumTopicInfo", "chat_id": -1006,
+                "forum_topic_id": 7, "name": "Design", "is_closed": true,
+                "icon": {"@type": "forumTopicIcon", "color": 0xFF93B2}}}]}),
+        );
+        assert_eq!(touched, Touched::Chat(-1006));
+        assert_eq!(store.topics[&(-1006, 1)].color, 5);
+        assert!(store.topics[&(-1006, 1)].general);
+        assert_eq!(store.topics[&(-1006, 7)].name, "Design");
+        assert_eq!(store.topics[&(-1006, 7)].color, 6);
+        assert!(store.topics[&(-1006, 7)].closed);
+        // A renamed topic.
+        store.apply(
+            &json!({"@type": "updateForumTopicInfo", "info": {"@type": "forumTopicInfo",
+            "chat_id": -1006, "forum_topic_id": 7, "name": "UI",
+            "icon": {"@type": "forumTopicIcon", "color": 0x8EEE98}}}),
+        );
+        assert_eq!(store.topics[&(-1006, 7)].name, "UI");
+        assert_eq!(topic_color(0x8EEE98), 3);
+        assert_eq!(topic_color(0xF0F040), 1);
     }
 
     #[test]

@@ -34,6 +34,8 @@ def text_of(message: dict) -> str:
 
 def matches(message: dict, query: str, kind: str) -> bool:
     content = message.get("content") or {}
+    if kind == "searchMessagesFilterPinned":
+        return bool(message.get("is_pinned"))
     kinds = FILTERS.get(kind)
     if kinds is not None and content.get("@type") not in kinds:
         return False

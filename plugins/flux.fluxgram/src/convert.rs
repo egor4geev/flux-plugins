@@ -12,13 +12,21 @@
 //! itself and what downloads by itself are the plugin's settings ([`MediaOptions`]).
 //!
 //! Needs no host — the words come through [`Words`], the names and files from the [`Store`] — so
-//! it is tested natively on TDLib's JSON. A message in one line (a quote's text) is
+//! it is tested natively on TDLib's JSON. Part 5: a channel's posts go without an author (the
+//! channel is) — the signature, when the channel signs them, dim at the foot — with their views; a
+//! forum's messages carry their topic's label; an advertisement ([`sponsored`]) is a message with
+//! the sponsor over its text, its label at the foot and its button under it. A bot's message has
+//! its buttons under it ([`crate::bots`]), one sent through an inline bot "via @bot" after its
+//! author's name. A poll ([`poll`]) is Flux's poll part: the question and the options with their
+//! entities, the shares once the user voted or it closed, a quiz's answer and explanation.
+//!
+//! A message in one line (a quote's text) is
 //! [`crate::summary::line`]. A chat's search marks its words in the converted messages
 //! ([`highlighted`]: in the window that searches, not here).
 
 use base64::Engine;
 use flux_plugin_api::conversation::{
-    self as conv, Delivery, ImageShape, ImageSpec, Message, MessageQuote, Part, RichSpan,
+    self as conv, Delivery, ImageShape, ImageSpec, Message, MessageQuote, Part, PollSpec, RichSpan,
     VideoKind, rich,
 };
 use serde_json::Value;
@@ -48,6 +56,29 @@ pub const EDIT: &str = "edit";
 pub const DELETE: &str = "delete";
 /// Delete, only for the user (Telegram can't delete it for the others).
 pub const DELETE_FOR_ME: &str = "delete-for-me";
+/// Pin and Unpin (part 5), where the user may ([`Store::can_pin`]).
+pub const PIN: &str = "pin";
+pub const UNPIN: &str = "unpin";
+/// Copy Link (part 5): a supergroup's or a channel's message — Telegram makes links only there.
+pub const COPY_LINK: &str = "copy-link";
+/// Forward the message (part 5): where Telegram lets it go — not a protected chat's.
+pub const FORWARD: &str = "forward";
+/// A sticker message: its sticker to the favorites (or out of them); a GIF message: its GIF to
+/// the saved ones (part 5).
+pub const FAVE_STICKER: &str = "fave-sticker";
+pub const UNFAVE_STICKER: &str = "unfave-sticker";
+pub const SAVE_GIF: &str = "save-gif";
+/// A poll's (part 5): take the vote back (not in a quiz: it is answered once), stop it (its
+/// author, a channel's admin).
+pub const RETRACT_VOTE: &str = "retract-vote";
+pub const STOP_POLL: &str = "stop-poll";
+/// An advertisement's actions (part 5): About the Ad (the sponsor and its info), Report.
+pub const ABOUT_AD: &str = "about-ad";
+pub const REPORT_AD: &str = "report-ad";
+/// An advertisement's button (`keyboard-pressed`).
+pub const AD_BUTTON: &str = "open";
+/// Where an advertisement stands: after every post.
+pub const AD_ORDER: u64 = u64::MAX / 2;
 
 /// What a conversion needs besides the message.
 pub struct Context<'a> {
@@ -175,10 +206,28 @@ pub fn convert(cx: &Context, value: &Value) -> Option<Converted> {
         return Some(out);
     }
     let outgoing = value["is_outgoing"] == true;
-    if outgoing {
+    let channel = cx.store.is_channel(chat);
+    if channel {
+        // A channel's post (part 5): on the left, the channel its author — named only by the
+        // signature, when the channel signs its posts; how many have seen it.
+        let signature = value["author_signature"].as_str().unwrap_or_default();
+        if !signature.is_empty() {
+            out.message = out.message.author(signature, 0, None);
+        }
+        if let Some(views) = value["interaction_info"]["view_count"].as_u64() {
+            out.message = out.message.views(views.min(u64::from(u32::MAX)) as u32);
+        }
+    } else if outgoing {
         out.message = out.message.outgoing(delivery(cx.store, value, chat, id));
     } else if is_group(cx.store, chat) {
         author(cx, value, &mut out);
+    }
+    // A forum's message (part 5): its topic's label; the General topic's when it names none.
+    if cx.store.is_forum(chat) {
+        let topic = topic_of(value).unwrap_or(GENERAL_TOPIC);
+        if let Some(found) = cx.store.topics.get(&(chat, topic)) {
+            out.message = out.message.topic(&found.name, found.color);
+        }
     }
     if value["edit_date"].as_i64().unwrap_or_default() > 0 {
         out.message = out.message.edited();
@@ -187,8 +236,111 @@ pub fn convert(cx: &Context, value: &Value) -> Option<Converted> {
     reply(cx, value, chat, &mut out);
     parts(cx, content, &mut out);
     reactions(value, &mut out);
+    bot_parts(cx, value, &mut out);
     out.message = out.message.actions(actions(cx, value, chat, outgoing));
     Some(out)
+}
+
+/// A bot's part of a message (part 5): "via @bot" after its author's name (a message sent
+/// through an inline bot), the buttons under it ([`crate::bots::inline_keyboard`]; a
+/// switch-inline button names the bot that sent it).
+fn bot_parts(cx: &Context, value: &Value, out: &mut Converted) {
+    let username = |id: i64| {
+        cx.store
+            .users
+            .get(&id)
+            .filter(|user| user.kind == crate::store::UserKind::Bot)
+            .and_then(|user| user.username.clone())
+    };
+    let via = value["via_bot_user_id"]
+        .as_i64()
+        .filter(|id| *id != 0)
+        .and_then(username);
+    if let (Some(via), Some(author)) = (&via, out.message.author.as_mut()) {
+        author.name = format!(
+            "{} {}",
+            author.name,
+            cx.words.tr("via @{0}").replace("{0}", via)
+        );
+    }
+    let sender = value["sender_id"]["user_id"].as_i64().and_then(username);
+    for row in crate::bots::inline_keyboard(&value["reply_markup"], via.or(sender).as_deref()) {
+        out.message = out.message.clone().keyboard_row(row);
+    }
+}
+
+/// The General topic of a forum: TDLib's id for it.
+pub const GENERAL_TOPIC: i64 = 1;
+
+/// The forum topic a message is in (`topic_id`: `messageTopicForum`).
+pub fn topic_of(value: &Value) -> Option<i64> {
+    let topic = &value["topic_id"];
+    (topic["@type"] == "messageTopicForum")
+        .then(|| topic["forum_topic_id"].as_i64())
+        .flatten()
+}
+
+// --- Advertisements (part 5) ---
+
+/// A channel's `sponsoredMessage` as the message after the last post: the sponsor (its `title`)
+/// over the text in the ad's color, its content (text, photo, video, GIF), `label` ("Ad", or
+/// "Recommended" as Telegram asks for `is_recommended`) at the foot, its button under it; its
+/// actions: About the Ad, and Report where it `can_be_reported`.
+pub fn sponsored(cx: &Context, ad: &Value) -> Option<Converted> {
+    let id = ad["message_id"].as_i64()?;
+    let mut out = Converted::new(id, cx.now);
+    out.message.order = AD_ORDER;
+    let label = if ad["is_recommended"] == true {
+        cx.words.tr("Recommended")
+    } else {
+        cx.words.tr("Ad")
+    };
+    let color = match ad["accent_color_id"].as_i64() {
+        Some(accent) if (0..7).contains(&accent) => accent as u8,
+        _ => 5,
+    };
+    let title = ad["title"].as_str().unwrap_or_default();
+    let avatar = sponsor_photo(cx.store, &ad["sponsor"]["photo"], title, color, &mut out);
+    out.message = out.message.author(title, color, avatar).sponsored(&label);
+    parts(cx, &ad["content"], &mut out);
+    let button = ad["button_text"].as_str().unwrap_or_default();
+    if !button.is_empty() {
+        out.message = out.message.keyboard_row(vec![conv::keyboard_button(
+            AD_BUTTON,
+            button,
+            conv::KeyboardKind::Link,
+        )]);
+    }
+    let mut actions = vec![ABOUT_AD];
+    if ad["can_be_reported"] == true {
+        actions.push(REPORT_AD);
+    }
+    out.message = out.message.actions(actions);
+    Some(out)
+}
+
+/// The sponsor's photo (`advertisementSponsor.photo`, its smallest size) as the ad's avatar, as
+/// Telegram asks ("like for messages sent in groups"); the initials until it downloads. None — no
+/// photo to show.
+fn sponsor_photo(
+    store: &Store,
+    photo: &Value,
+    title: &str,
+    color: u8,
+    out: &mut Converted,
+) -> Option<conv::AvatarSpec> {
+    let file = &photo["sizes"].as_array()?.first()?["photo"];
+    let id = file["id"].as_i64()?;
+    let path = file_path(store, file);
+    out.files.push(id);
+    if path.is_none() {
+        out.auto.push(id);
+    }
+    Some(conv::AvatarSpec {
+        image: path,
+        initials: crate::model::initials(title),
+        color,
+    })
 }
 
 // --- Albums ---
@@ -286,6 +438,12 @@ pub fn album(cx: &Context, items: &[&Value]) -> Option<Converted> {
     let mut offered = Vec::new();
     if each[0].contains(&REPLY) {
         offered.push(REPLY);
+    }
+    // Pinned, and linked to, by its first item, as Telegram's apps do (part 5).
+    for action in [PIN, UNPIN, COPY_LINK] {
+        if each[0].contains(&action) {
+            offered.push(action);
+        }
     }
     if actions(cx, captioned, chat, outgoing).contains(&EDIT) {
         offered.push(EDIT);
@@ -668,6 +826,7 @@ fn parts(cx: &Context, content: &Value, out: &mut Converted) {
                 .map_or_else(|| cx.words.tr("File"), str::to_string);
             file_part(store, &document["document"], &name, out);
         }),
+        "messagePoll" => push(out, conv::poll(poll(cx.words, &content["poll"])), None),
         "messageSticker" => {
             if !sticker(cx, &content["sticker"], out) {
                 let emoji = content["sticker"]["emoji"].as_str().unwrap_or_default();
@@ -676,11 +835,10 @@ fn parts(cx: &Context, content: &Value, out: &mut Converted) {
             }
         }
         _ => {
-            // A poll, a location, a contact, a game, a story…: a line of what it is.
+            // A location, a contact, a game, a story…: a line of what it is.
             let line = content_line(cx, content);
             let icon = match content["@type"].as_str().unwrap_or_default() {
                 "messageLocation" | "messageVenue" => "icons/location.svg",
-                "messagePoll" => "checklist",
                 "messageContact" => "icons/phone.svg",
                 "messageCall" => "icons/phone.svg",
                 "messageStory" => "history",
@@ -1052,6 +1210,127 @@ fn reactions(value: &Value, out: &mut Converted) {
     }
 }
 
+// --- Polls and reactions (part 5) ---
+
+/// A poll (`poll`) as Flux shows it: the question and the options with their entities; the dim
+/// line of its kind (anonymous or public, a quiz, final once closed); the shares once the user
+/// voted or it closed — the user's choice marked, a quiz's right answer marked and its
+/// explanation behind 💡; how many voted under the options.
+pub fn poll(words: &dyn Words, poll: &Value) -> PollSpec {
+    let quiz = poll["type"]["@type"] == "pollTypeQuiz";
+    let closed = poll["is_closed"] == true;
+    let answered = closed || chosen_options(poll).next().is_some();
+    let anonymous = poll["is_anonymous"] == true;
+    let kind = match (closed, quiz, anonymous) {
+        (true, ..) => "Final results",
+        (false, true, true) => "Anonymous quiz",
+        (false, true, false) => "Quiz",
+        (false, false, true) => "Anonymous poll",
+        (false, false, false) => "Public poll",
+    };
+    // A quiz's answer: -1 while the user hasn't answered.
+    let correct = poll["type"]["correct_option_id"].as_i64().unwrap_or(-1);
+    let options = poll["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, option)| {
+            let percent = option["vote_percentage"]
+                .as_u64()
+                .unwrap_or_default()
+                .min(100);
+            let mut shown = conv::poll_option(poll_text(&option["text"]), percent as u8);
+            if option["is_chosen"] == true {
+                shown = shown.chosen();
+            }
+            if quiz && answered && correct == index as i64 {
+                shown = shown.correct();
+            }
+            shown
+        })
+        .collect();
+    let voters = poll["total_voter_count"].as_u64().unwrap_or_default();
+    let footer = match (voters, quiz) {
+        (0, false) => words.tr("No votes yet"),
+        (0, true) => words.tr("No answers yet"),
+        (n, false) => words.count(n, "{0} vote", "{0} votes"),
+        (n, true) => words.count(n, "{0} answer", "{0} answers"),
+    };
+    let mut spec = conv::poll_spec(
+        poll_text(&poll["question"]),
+        &words.tr(kind),
+        options,
+        &footer,
+    );
+    spec.answered = answered;
+    spec.closed = closed;
+    spec.multiple = poll["type"]["allow_multiple_answers"] == true;
+    let explanation = poll_text(&poll["type"]["explanation"]);
+    if quiz && answered && !explanation.is_empty() {
+        spec = spec.explanation(explanation);
+    }
+    spec
+}
+
+/// The options the user chose in a poll.
+fn chosen_options(poll: &Value) -> impl Iterator<Item = &Value> {
+    poll["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|option| option["is_chosen"] == true)
+}
+
+/// A poll's `formattedText` (a question, an option, an explanation) as spans; older TDLib sent
+/// a plain string.
+fn poll_text(text: &Value) -> Vec<RichSpan> {
+    if let Some(plain) = text.as_str() {
+        return if plain.is_empty() {
+            Vec::new()
+        } else {
+            vec![rich(plain)]
+        };
+    }
+    formatted(text)
+        .into_iter()
+        .flat_map(|part| match part {
+            Part::Text(spans) | Part::Quote(spans) => spans,
+            Part::Code(code) => vec![rich(&code.text).code()],
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// The user's own reactions on a message (`interaction_info.reactions`, the reactions' types in
+/// TDLib's order) — the paid one left out: it isn't one of the user's to take back.
+pub fn chosen_reactions(value: &Value) -> Vec<Value> {
+    let reactions = &value["interaction_info"]["reactions"];
+    reactions["reactions"]
+        .as_array()
+        .or_else(|| reactions.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|reaction| {
+            reaction["is_chosen"] == true && reaction["type"]["@type"] != "reactionTypePaid"
+        })
+        .map(|reaction| reaction["type"].clone())
+        .collect()
+}
+
+/// What toggling the reaction `emoji` does, the user's own being `chosen` (part 5): (the
+/// reactions to take back, the one to put). One of the user's is taken back; another is put —
+/// and when the user's are at the `limit`, the first of them go first, as the official apps
+/// replace an ordinary user's reaction.
+pub fn toggle_reaction(chosen: &[Value], emoji: &str, limit: usize) -> (Vec<Value>, Option<Value>) {
+    if let Some(own) = chosen.iter().find(|reaction| reaction["emoji"] == emoji) {
+        return (vec![own.clone()], None);
+    }
+    let over = (chosen.len() + 1).saturating_sub(limit.max(1));
+    let put = serde_json::json!({"@type": "reactionTypeEmoji", "emoji": emoji});
+    (chosen[..over.min(chosen.len())].to_vec(), Some(put))
+}
+
 /// The actions the message offers: Reply where the user may write; Edit and Delete on the
 /// user's own messages, as far as Telegram allows — TDLib 1.8.61 dropped `can_be_edited` and
 /// `can_be_deleted_*` from messages (they moved to `getMessageProperties`), so when they're
@@ -1062,6 +1341,65 @@ fn actions(cx: &Context, value: &Value, chat: i64, outgoing: bool) -> Vec<&'stat
     let sent = !value["sending_state"].is_object();
     if sent && cx.store.can_send(chat) {
         actions.push(REPLY);
+    }
+    // Part 5: pin, the link, the sticker or the GIF to keep — of sent messages, not the chat's
+    // own lines.
+    let kind = value["content"]["@type"].as_str().unwrap_or_default();
+    if sent && !is_service(kind) {
+        if cx.store.can_pin(chat) {
+            actions.push(if value["is_pinned"] == true {
+                UNPIN
+            } else {
+                PIN
+            });
+        }
+        let supergroup = cx
+            .store
+            .chats
+            .get(&chat)
+            .is_some_and(|found| matches!(found.kind, ChatKind::Supergroup { .. }));
+        if supergroup {
+            actions.push(COPY_LINK);
+        }
+        // `can_be_forwarded` moved to `getMessageProperties` with `can_be_edited`: when it's
+        // missing, the chat's protection decides.
+        let forwardable = value["can_be_forwarded"]
+            .as_bool()
+            .unwrap_or_else(|| !cx.store.is_protected(chat));
+        if forwardable && value["content"]["@type"] != "messageSponsored" {
+            actions.push(FORWARD);
+        }
+        match kind {
+            "messageSticker" => {
+                let file = value["content"]["sticker"]["sticker"]["id"].as_i64();
+                let favorite = file.is_some_and(|file| cx.store.favorite_stickers.contains(&file));
+                actions.push(if favorite {
+                    UNFAVE_STICKER
+                } else {
+                    FAVE_STICKER
+                });
+            }
+            "messageAnimation" => actions.push(SAVE_GIF),
+            // A poll (part 5): Retract Vote while it is open and the user voted (a quiz is
+            // answered once); Stop Poll for its author, or a channel's admin who posts.
+            "messagePoll" => {
+                let poll = &value["content"]["poll"];
+                if poll["is_closed"] != true {
+                    let quiz = poll["type"]["@type"] == "pollTypeQuiz";
+                    if !quiz && chosen_options(poll).next().is_some() {
+                        actions.push(RETRACT_VOTE);
+                    }
+                    let admin = cx.store.is_channel(chat)
+                        && cx.store.group(chat).is_some_and(|group| {
+                            group.own_can_post || group.status == "chatMemberStatusCreator"
+                        });
+                    if outgoing || admin {
+                        actions.push(STOP_POLL);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     if !outgoing {
         return actions;
@@ -1156,8 +1494,19 @@ pub fn formatted(formatted: &Value) -> Vec<Part> {
             },
             "textEntityTypeEmailAddress" => Style::Link(format!("mailto:{piece}")),
             "textEntityTypeMention" => {
-                Style::Link(format!("https://t.me/{}", piece.trim_start_matches('@')))
+                Style::Link(format!("{MENTION_LINK}{}", piece.trim_start_matches('@')))
             }
+            // Part 5: the chat's search with it; a card's number copied (`links.rs`).
+            "textEntityTypeHashtag" | "textEntityTypeCashtag" => {
+                Style::Link(format!("{TAG_LINK}{piece}"))
+            }
+            "textEntityTypeBankCardNumber" => Style::Link(format!(
+                "{CARD_LINK}{}",
+                piece
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect::<String>()
+            )),
             "textEntityTypeMentionName" => Style::Link(format!(
                 "{USER_LINK}{}",
                 kind["user_id"].as_i64().unwrap_or_default()
@@ -1186,7 +1535,7 @@ pub fn formatted(formatted: &Value) -> Vec<Part> {
                 blocks.push((start, end, Block::Quote));
                 continue;
             }
-            // Hashtags, cashtags, custom emoji (their emoji is the text), card numbers: as text.
+            // Custom emoji (their emoji is the text): as text.
             _ => continue,
         };
         styles.push((start, end, style));
@@ -1339,9 +1688,11 @@ fn markdown_spans(spans: &[RichSpan]) -> String {
 /// a bot's command — the text is enough.
 fn found_by_tdlib(text: &str, link: &str) -> bool {
     link.starts_with(COMMAND_LINK)
+        || link.starts_with(TAG_LINK)
+        || link.starts_with(CARD_LINK)
         || link == text
         || link == format!("https://{text}")
-        || link == format!("https://t.me/{}", text.trim_start_matches('@'))
+        || link == format!("{MENTION_LINK}{}", text.trim_start_matches('@'))
         || link == format!("mailto:{text}")
         || link.strip_prefix("tel:").is_some_and(|number| {
             number
@@ -1352,10 +1703,17 @@ fn found_by_tdlib(text: &str, link: &str) -> bool {
         })
 }
 
-/// A mention of a user without a username: the plugin's link, the person's chat on a click.
+/// The plugin's links of the text's entities (`links.rs` follows them): a mention of a user
+/// without a username — their profile on a click;
 pub const USER_LINK: &str = "fluxgram:user/";
-/// A bot's command: the plugin's link, the command into the field on a click.
+/// a bot's command as written ("/start@bot") — sent;
 pub const COMMAND_LINK: &str = "fluxgram:command/";
+/// a @username (without the "@") — a person's profile, another chat's tab (part 5);
+pub const MENTION_LINK: &str = "fluxgram:mention/";
+/// a #hashtag or a $cashtag as written — the chat's search with it;
+pub const TAG_LINK: &str = "fluxgram:tag/";
+/// a bank card's number (its digits) — copied.
+pub const CARD_LINK: &str = "fluxgram:card/";
 
 /// The range without the line breaks at its ends next to a block (`lead`, `tail`).
 fn trim_lines(
@@ -1712,11 +2070,12 @@ mod tests {
             links,
             [
                 ("example.com", "https://example.com"),
-                ("@anna", "https://t.me/anna"),
+                ("@anna", "fluxgram:mention/anna"),
                 ("Petya", "fluxgram:user/103"),
                 ("a@b.c", "mailto:a@b.c"),
                 ("/start", "fluxgram:command//start"),
                 ("+7 900", "tel:+7900"),
+                ("#tag", "fluxgram:tag/#tag"),
             ]
         );
     }
@@ -1770,7 +2129,30 @@ mod tests {
         assert!(private.message.author.is_none());
         let stranger = convert_with(&store, &message(6, GROUP, 999, text("Hi", json!([]))), None);
         assert_eq!(stranger.missing_users, [999]);
-        assert_eq!(private.message.actions, Some(vec![REPLY.into()]));
+        // Anyone may pin in a one-to-one chat (part 5), and forward from it.
+        assert_eq!(
+            private.message.actions,
+            Some(vec![REPLY.into(), PIN.into(), FORWARD.into()])
+        );
+        // A protected chat's messages don't go anywhere (part 5); a message's own word wins.
+        let mut protected = self::store();
+        protected.chats.get_mut(&101).unwrap().protected = true;
+        let kept = convert_with(
+            &protected,
+            &message(7, 101, 101, text("Hi", json!([]))),
+            None,
+        );
+        assert_eq!(kept.message.actions, Some(vec![REPLY.into(), PIN.into()]));
+        let mut allowed = message(8, 101, 101, text("Hi", json!([])));
+        allowed["can_be_forwarded"] = json!(true);
+        let allowed = convert_with(&protected, &allowed, None);
+        assert!(
+            allowed
+                .message
+                .actions
+                .unwrap()
+                .contains(&FORWARD.to_string())
+        );
     }
 
     #[test]
@@ -1782,9 +2164,16 @@ mod tests {
             None,
         );
         assert_eq!(read.message.delivery, Some(Delivery::Read));
+        // A supergroup's message has its link; an ordinary member doesn't pin (part 5).
         assert_eq!(
             read.message.actions,
-            Some(vec![REPLY.into(), EDIT.into(), DELETE.into()])
+            Some(vec![
+                REPLY.into(),
+                COPY_LINK.into(),
+                FORWARD.into(),
+                EDIT.into(),
+                DELETE.into()
+            ])
         );
         let sent = convert_with(
             &store,
@@ -1806,10 +2195,13 @@ mod tests {
         old["can_be_deleted_for_all_users"] = json!(false);
         old["can_be_deleted_only_for_self"] = json!(true);
         let actions = convert_with(&store, &old, None).message.actions.unwrap();
-        assert_eq!(actions, [REPLY, EDIT, DELETE_FOR_ME]);
-        // Someone else's message: Reply only.
+        assert_eq!(actions, [REPLY, COPY_LINK, FORWARD, EDIT, DELETE_FOR_ME]);
+        // Someone else's message: Reply, its link and Forward only.
         let theirs = convert_with(&store, &message(9, GROUP, 103, text("x", json!([]))), None);
-        assert_eq!(theirs.message.actions, Some(vec![REPLY.into()]));
+        assert_eq!(
+            theirs.message.actions,
+            Some(vec![REPLY.into(), COPY_LINK.into(), FORWARD.into()])
+        );
     }
 
     #[test]
@@ -2141,14 +2533,130 @@ mod tests {
         );
         let poll = json!({"@type": "messagePoll", "poll": {"question": {"text": "Lunch?"}}});
         let converted = convert_with(&store, &message(6, GROUP, 103, poll), None);
-        let Part::Placeholder(placeholder) = &converted.message.parts[0] else {
+        let Part::Poll(spec) = &converted.message.parts[0] else {
             panic!()
         };
-        assert_eq!(placeholder.text, "📊 Lunch?");
+        assert_eq!(spec.question[0].text, "Lunch?");
         let joined = json!({"@type": "messageChatAddMembers", "member_user_ids": [103]});
         let converted = convert_with(&store, &message(7, GROUP, 101, joined), None);
         assert!(matches!(converted.message.parts[0], Part::Notice(_)));
         assert!(converted.message.author.is_none());
+    }
+
+    #[test]
+    fn shows_a_channels_posts_with_views_and_signatures() {
+        let mut store = store();
+        const CHANNEL: i64 = -1000000001002;
+        store.apply(
+            &json!({"@type": "chat", "id": CHANNEL, "title": "Flux News",
+            "type": {"@type": "chatTypeSupergroup", "supergroup_id": 1002, "is_channel": true}}),
+        );
+        store.apply(
+            &json!({"@type": "supergroup", "id": 1002, "member_count": 12000,
+            "is_channel": true, "status": {"@type": "chatMemberStatusMember"}}),
+        );
+        let mut post = message(5, CHANNEL, 0, text("Flux 0.5 is out", json!([])));
+        post["sender_id"] = json!({"@type": "messageSenderChat", "chat_id": CHANNEL});
+        post["is_channel_post"] = json!(true);
+        post["interaction_info"] = json!({"view_count": 1234, "forward_count": 3});
+        let converted = convert_with(&store, &post, None);
+        // The channel is the author: no name over the text, the views at the foot.
+        assert_eq!(converted.message.author, None);
+        assert_eq!(converted.message.views, Some(1234));
+        assert!(!converted.message.outgoing);
+        // Signed: the signature as an author without a picture (dim at the foot).
+        post["author_signature"] = json!("Egor Ageev");
+        let signed = convert_with(&store, &post, None);
+        let author = signed.message.author.unwrap();
+        assert_eq!(author.name, "Egor Ageev");
+        assert_eq!(author.avatar, None);
+        // The user can't write there: no Reply.
+        assert!(!signed.message.actions.unwrap().contains(&REPLY.to_string()));
+    }
+
+    #[test]
+    fn labels_a_forums_messages_with_their_topics() {
+        let mut store = store();
+        store.apply(
+            &json!({"@type": "supergroup", "id": 1001, "member_count": 5,
+            "is_forum": true, "status": {"@type": "chatMemberStatusMember"}}),
+        );
+        store.apply(
+            &json!({"@type": "updateForumTopicInfo", "info": {"@type": "forumTopicInfo",
+            "chat_id": GROUP, "forum_topic_id": 1, "name": "General", "is_general": true,
+            "icon": {"@type": "forumTopicIcon", "color": 0x6FB9F0}}}),
+        );
+        store.apply(
+            &json!({"@type": "updateForumTopicInfo", "info": {"@type": "forumTopicInfo",
+            "chat_id": GROUP, "forum_topic_id": 7, "name": "Design",
+            "icon": {"@type": "forumTopicIcon", "color": 0xFF93B2}}}),
+        );
+        let mut value = message(9, GROUP, 103, text("New mockups", json!([])));
+        value["topic_id"] = json!({"@type": "messageTopicForum", "forum_topic_id": 7});
+        let topic = convert_with(&store, &value, None).message.topic.unwrap();
+        assert_eq!((topic.title.as_str(), topic.color), ("Design", 6));
+        assert_eq!(topic_of(&value), Some(7));
+        // No topic named: General's.
+        value["topic_id"] = Value::Null;
+        let general = convert_with(&store, &value, None).message.topic.unwrap();
+        assert_eq!(general.title, "General");
+        // Not a forum: no label.
+        store.apply(
+            &json!({"@type": "supergroup", "id": 1001, "member_count": 5,
+            "is_forum": false, "status": {"@type": "chatMemberStatusMember"}}),
+        );
+        assert_eq!(convert_with(&store, &value, None).message.topic, None);
+    }
+
+    #[test]
+    fn shows_an_advertisement_after_the_posts() {
+        let store = store();
+        let media = MediaOptions::default();
+        let cx = Context {
+            store: &store,
+            words: &English,
+            now: 1_763_380_000,
+            replied: None,
+            media: &media,
+        };
+        let ad = json!({"@type": "sponsoredMessage", "message_id": 4242, "is_recommended": false,
+            "can_be_reported": true, "title": "Rocket VPN", "button_text": "Open",
+            "accent_color_id": 2, "additional_info": "erid: 2Vtzqw",
+            "content": text("Fast and private", json!([])),
+            "sponsor": {"@type": "advertisementSponsor", "url": "https://rocket.example",
+                "info": "Rocket LLC"}});
+        let converted = sponsored(&cx, &ad).unwrap();
+        let message = converted.message;
+        assert_eq!(message.id, "4242");
+        assert_eq!(message.order, AD_ORDER);
+        assert_eq!(message.sponsored.as_deref(), Some("Ad"));
+        let author = message.author.unwrap();
+        assert_eq!((author.name.as_str(), author.color), ("Rocket VPN", 2));
+        assert_eq!(message.keyboard.len(), 1);
+        assert_eq!(message.keyboard[0][0].text, "Open");
+        assert_eq!(message.keyboard[0][0].kind, conv::KeyboardKind::Link);
+        assert_eq!(
+            message.actions,
+            Some(vec![ABOUT_AD.to_string(), REPORT_AD.to_string()])
+        );
+        // The sponsor's photo: the avatar, its initials until it downloads.
+        let mut pictured = ad.clone();
+        pictured["sponsor"]["photo"] = json!({"@type": "photo", "sizes": [
+            {"@type": "photoSize", "type": "s", "width": 90, "height": 90, "photo": file(61, "")}]});
+        let converted = sponsored(&cx, &pictured).unwrap();
+        let avatar = converted.message.author.unwrap().avatar.unwrap();
+        assert_eq!(avatar.image, None);
+        assert_eq!(avatar.initials, crate::model::initials("Rocket VPN"));
+        assert_eq!(converted.auto, vec![61]);
+        // Recommended, not reportable, no button.
+        let mut other = ad.clone();
+        other["is_recommended"] = json!(true);
+        other["can_be_reported"] = json!(false);
+        other["button_text"] = json!("");
+        let message = sponsored(&cx, &other).unwrap().message;
+        assert_eq!(message.sponsored.as_deref(), Some("Recommended"));
+        assert!(message.keyboard.is_empty());
+        assert_eq!(message.actions, Some(vec![ABOUT_AD.to_string()]));
     }
 
     #[test]
@@ -2177,6 +2685,140 @@ mod tests {
         assert_eq!(converted.message.reactions.len(), 1);
         assert_eq!(converted.message.reactions[0].count, 2);
         assert!(converted.message.reactions[0].chosen);
+    }
+
+    /// A poll's JSON as TDLib 1.8.61 sends it: options (text, percent, chosen).
+    fn poll_json(kind: Value, options: &[(&str, i64, bool)], closed: bool, voters: i64) -> Value {
+        let options: Vec<Value> = options
+            .iter()
+            .map(|(text, percent, chosen)| {
+                json!({"@type": "pollOption", "text": {"text": text, "entities": []},
+                    "voter_count": 0, "vote_percentage": percent, "is_chosen": chosen,
+                    "is_being_chosen": false})
+            })
+            .collect();
+        json!({"@type": "messagePoll", "poll": {"@type": "poll", "id": "1",
+            "question": {"text": "Where do we meet?", "entities": []}, "options": options,
+            "total_voter_count": voters, "is_anonymous": true, "type": kind,
+            "open_period": 0, "close_date": 0, "is_closed": closed}})
+    }
+
+    #[test]
+    fn shows_polls_and_quizzes_with_what_they_offer() {
+        let store = store();
+        let regular = json!({"@type": "pollTypeRegular", "allow_multiple_answers": false});
+        // Not answered: no shares; no Retract Vote; not the user's — no Stop Poll.
+        let fresh = poll_json(
+            regular.clone(),
+            &[("Office", 0, false), ("Café", 0, false)],
+            false,
+            0,
+        );
+        let converted = convert_with(&store, &message(5, GROUP, 103, fresh), None);
+        let Part::Poll(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert_eq!(spec.question[0].text, "Where do we meet?");
+        assert_eq!(spec.kind, "Anonymous poll");
+        assert_eq!(spec.footer, "No votes yet");
+        assert!(!spec.answered && !spec.closed && !spec.multiple);
+        let actions = converted.message.actions.clone().unwrap_or_default();
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action == RETRACT_VOTE || action == STOP_POLL)
+        );
+        // Voted, the user's own: the shares, Retract Vote and Stop Poll.
+        let voted = poll_json(
+            regular,
+            &[("Office", 67, true), ("Café", 33, false)],
+            false,
+            3,
+        );
+        let converted = convert_with(&store, &message(6, GROUP, ME, voted), None);
+        let Part::Poll(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert!(spec.answered);
+        assert_eq!(
+            (spec.options[0].percent, spec.options[0].chosen),
+            (67, true)
+        );
+        assert_eq!(spec.footer, "3 votes");
+        let actions = converted.message.actions.clone().unwrap_or_default();
+        assert!(actions.iter().any(|action| action == RETRACT_VOTE));
+        assert!(actions.iter().any(|action| action == STOP_POLL));
+        // A quiz answered wrong: the right one marked, the explanation; never retracted.
+        let quiz = json!({"@type": "pollTypeQuiz", "correct_option_id": 1,
+            "explanation": {"text": "Frames only for what plays.", "entities": []}});
+        let answered = poll_json(quiz, &[("Redraw", 40, true), ("Idle", 60, false)], false, 5);
+        let converted = convert_with(&store, &message(7, GROUP, 103, answered), None);
+        let Part::Poll(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert_eq!(spec.kind, "Anonymous quiz");
+        assert_eq!(spec.footer, "5 answers");
+        assert!(spec.options[1].correct && !spec.options[0].correct);
+        assert_eq!(
+            spec.explanation
+                .as_ref()
+                .map(|spans| spans[0].text.as_str()),
+            Some("Frames only for what plays.")
+        );
+        let actions = converted.message.actions.clone().unwrap_or_default();
+        assert!(!actions.iter().any(|action| action == RETRACT_VOTE));
+        // Closed: the results, final; nothing to vote or stop; several choices are said so.
+        let several = json!({"@type": "pollTypeRegular", "allow_multiple_answers": true});
+        let closed = poll_json(several, &[("A", 50, false), ("B", 50, false)], true, 2);
+        let converted = convert_with(&store, &message(8, GROUP, ME, closed), None);
+        let Part::Poll(spec) = &converted.message.parts[0] else {
+            panic!()
+        };
+        assert!(spec.closed && spec.answered && spec.multiple);
+        assert_eq!(spec.kind, "Final results");
+        let actions = converted.message.actions.clone().unwrap_or_default();
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action == RETRACT_VOTE || action == STOP_POLL)
+        );
+        // In a line: "📊 Poll: …".
+        let line = summary::line(
+            &store,
+            &message(8, GROUP, ME, poll_json(json!({}), &[], false, 0)),
+            &English,
+        );
+        assert_eq!(line, "📊 Poll: Where do we meet?");
+    }
+
+    #[test]
+    fn a_reaction_toggles_and_replaces_the_oldest_at_the_limit() {
+        let emoji = |emoji: &str| json!({"@type": "reactionTypeEmoji", "emoji": emoji});
+        let mut value = message(9, GROUP, 103, text("Hi", json!([])));
+        value["interaction_info"] = json!({"reactions": {"reactions": [
+            {"type": emoji("🔥"), "total_count": 3, "is_chosen": true},
+            {"type": {"@type": "reactionTypePaid"}, "total_count": 5, "is_chosen": true},
+            {"type": emoji("👍"), "total_count": 1, "is_chosen": false}]}});
+        // The paid one isn't the user's to take back.
+        let chosen = chosen_reactions(&value);
+        assert_eq!(chosen, vec![emoji("🔥")]);
+        // The user's own: taken back.
+        assert_eq!(toggle_reaction(&chosen, "🔥", 1), (vec![emoji("🔥")], None));
+        // Another at the limit of one: the old one goes first.
+        assert_eq!(
+            toggle_reaction(&chosen, "👍", 1),
+            (vec![emoji("🔥")], Some(emoji("👍")))
+        );
+        // Under the limit (Premium's three): just put.
+        assert_eq!(
+            toggle_reaction(&chosen, "👍", 3),
+            (Vec::new(), Some(emoji("👍")))
+        );
+        let full = vec![emoji("🔥"), emoji("👍"), emoji("🎉")];
+        assert_eq!(
+            toggle_reaction(&full, "😁", 3),
+            (vec![emoji("🔥")], Some(emoji("😁")))
+        );
     }
 
     #[test]
@@ -2248,7 +2890,11 @@ mod tests {
         // The captioned item's reactions, the first one's quote.
         assert_eq!(shown.message.reactions.len(), 1);
         assert_eq!(shown.reply_to, Some(5));
-        assert_eq!(shown.message.actions, Some(vec![REPLY.into()]));
+        // A supergroup's album has its link, by its first item (part 5).
+        assert_eq!(
+            shown.message.actions,
+            Some(vec![REPLY.into(), COPY_LINK.into()])
+        );
         // The caption above, as Telegram shows it then.
         items[2]["content"]["show_caption_above_media"] = json!(true);
         let refs: Vec<&Value> = items.iter().collect();
@@ -2272,7 +2918,12 @@ mod tests {
         assert_eq!(sent.message.delivery, Some(Delivery::Sent));
         assert_eq!(
             sent.message.actions,
-            Some(vec![REPLY.into(), EDIT.into(), DELETE.into()])
+            Some(vec![
+                REPLY.into(),
+                COPY_LINK.into(),
+                EDIT.into(),
+                DELETE.into()
+            ])
         );
         mine[1]["sending_state"] = json!({"@type": "messageSendingStatePending"});
         let refs: Vec<&Value> = mine.iter().collect();
@@ -2280,7 +2931,12 @@ mod tests {
         assert_eq!(sending.message.delivery, Some(Delivery::Sending));
         assert_eq!(
             sending.message.actions,
-            Some(vec![REPLY.into(), EDIT.into(), DELETE_FOR_ME.into()])
+            Some(vec![
+                REPLY.into(),
+                COPY_LINK.into(),
+                EDIT.into(),
+                DELETE_FOR_ME.into()
+            ])
         );
     }
 
@@ -2298,7 +2954,7 @@ mod tests {
                 rich(", "),
                 rich("Anna").link("fluxgram:user/101"),
                 rich(", "),
-                rich("@anna").link("https://t.me/anna"),
+                rich("@anna").link("fluxgram:mention/anna"),
                 rich(" "),
                 rich("x").code(),
                 rich(" "),

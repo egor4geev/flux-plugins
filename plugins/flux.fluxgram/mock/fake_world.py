@@ -139,6 +139,9 @@ USERS: dict[int, dict] = {u["id"]: u for u in [
     user(105, "Weather", "Bot", "weather_bot", 2, kind="userTypeBot", contact=False),
     user(106, "", "", None, 3, photo=False, kind="userTypeDeleted", contact=False),
     user(107, "Masha", "Volkova", "masha", 5),
+    # Part 5: people of "Backend · team" to mention — one without a username.
+    user(108, "Ольга", "Петрова", None, 4, photo=False),
+    user(109, "Сергей", "Иванов", "serg", 2),
 ]}
 
 # --- Groups ---

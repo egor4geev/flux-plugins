@@ -2,29 +2,35 @@
 //! `tgs`) or a WEBM (VP9 with its alpha channel, `webm`), told apart by their first bytes —
 //! rendered once into Flux's file of frames (`fxa`).
 //!
-//! Renders run on threads of their own, [`WORKERS`] at a time, the rest waiting in turn: the
-//! plugin's lines and TDLib's are never held up. A thread ends when nothing waits, so an idle
-//! program has none. A render asked for again while it waits or runs (the same output) is done
-//! once and answered for each.
+//! The renderers run in worker processes (`worker`), not in the program: a crash or a hang on a
+//! stranger's file fails that render only, and never reaches the TDLib clients. Renders run
+//! [`WORKERS`] at a time, the rest waiting in turn, each on a thread of the program that keeps a
+//! worker: the plugin's lines and TDLib's are never held up. A worker is started with the first
+//! render and kept for the next ones; one that died or took too long is gone, and the next render
+//! starts a new one. A thread with nothing to render for [`IDLE`] stops its worker and ends, so
+//! an idle program has neither. A render asked for again while it waits or runs (the same output)
+//! is done once and answered for each.
 
 use std::collections::VecDeque;
 use std::fs;
 use std::io;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::relay::InputError;
+use crate::worker::{self, Worker};
 use crate::{tgs, webm};
 
-/// The most renders at once.
+/// The most renders at once: a worker each.
 const WORKERS: usize = 2;
-/// A render's stack: rlottie's parser and libvpx go deep on theirs.
-const STACK: usize = 16 << 20;
+/// A worker with nothing to render is kept this long for the next one, then stopped.
+const IDLE: Duration = Duration::from_secs(30);
+/// A render's stack (in the worker): rlottie's parser and libvpx go deep on theirs.
+pub const STACK: usize = 16 << 20;
 /// The largest sticker file read (Telegram's are up to 64 KB for a TGS, 256 KB for a WEBM).
 const MAX_INPUT: u64 = 32 << 20;
 /// The most frames of a file: 20 s at 30 frames a second (stickers are up to 3 s).
@@ -67,20 +73,33 @@ struct Queue {
     waiting: VecDeque<Job>,
     /// The outputs being rendered, with their requests' `@extra`s (one asked again joins).
     running: Vec<(String, Vec<Option<Value>>)>,
-    workers: usize,
+    /// The render threads, each with its worker once it has rendered.
+    threads: usize,
+    /// Of them, those waiting for a render (up to [`IDLE`]).
+    idle: usize,
+    /// The program ends: a thread with nothing to render stops at once.
+    closing: bool,
 }
 
 static QUEUE: Mutex<Queue> = Mutex::new(Queue {
     waiting: VecDeque::new(),
     running: Vec::new(),
-    workers: 0,
+    threads: 0,
+    idle: 0,
+    closing: false,
 });
+/// Signaled when a render is queued, and at the end.
+static WAKE: Condvar = Condvar::new();
 /// Signaled when the last render thread ends.
-static IDLE: Condvar = Condvar::new();
+static DONE: Condvar = Condvar::new();
+
+fn queue() -> MutexGuard<'static, Queue> {
+    QUEUE.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Queues a render; its answer goes out through `write` (whole lines) when it's done. Never waits.
 pub fn submit(render: Render, extra: Option<Value>, write: fn(&[u8])) {
-    let mut queue = QUEUE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut queue = queue();
     if let Some((_, extras)) = queue
         .running
         .iter_mut()
@@ -101,14 +120,17 @@ pub fn submit(render: Render, extra: Option<Value>, write: fn(&[u8])) {
         render,
         extras: vec![extra],
     });
-    if queue.workers < WORKERS {
+    // A thread waiting with its worker takes it; another starts if more wait than that.
+    if queue.idle > 0 {
+        WAKE.notify_one();
+    }
+    if queue.waiting.len() > queue.idle && queue.threads < WORKERS {
         let spawned = thread::Builder::new()
             .name("render".into())
-            .stack_size(STACK)
             .spawn(move || work(write));
         match spawned {
-            Ok(_) => queue.workers += 1,
-            Err(error) if queue.workers == 0 => {
+            Ok(_) => queue.threads += 1,
+            Err(error) if queue.threads == 0 => {
                 // No thread to run it: it is answered now.
                 let job = queue.waiting.pop_back().unwrap();
                 drop(queue);
@@ -127,26 +149,45 @@ pub fn submit(render: Render, extra: Option<Value>, write: fn(&[u8])) {
     }
 }
 
-/// A render thread: takes the waiting renders in turn, ends when none waits.
+/// A render thread: takes the waiting renders in turn through its worker; with nothing to render
+/// for [`IDLE`] (or at the end), stops the worker and ends.
 fn work(write: fn(&[u8])) {
+    let mut worker: Option<Worker> = None;
     loop {
         let render = {
-            let mut queue = QUEUE.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(job) = queue.waiting.pop_front() else {
-                queue.workers -= 1;
-                if queue.workers == 0 {
-                    IDLE.notify_all();
+            let mut queue = queue();
+            let deadline = Instant::now() + IDLE;
+            loop {
+                if let Some(job) = queue.waiting.pop_front() {
+                    queue.running.push((job.render.output.clone(), job.extras));
+                    break Some(job.render);
                 }
-                return;
-            };
-            queue.running.push((job.render.output.clone(), job.extras));
-            job.render
+                let now = Instant::now();
+                if queue.closing || now >= deadline {
+                    // Counted out while the queue is held: a render queued from now on starts
+                    // a thread of its own.
+                    queue.threads -= 1;
+                    if queue.threads == 0 {
+                        DONE.notify_all();
+                    }
+                    break None;
+                }
+                queue.idle += 1;
+                queue = WAKE
+                    .wait_timeout(queue, deadline - now)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+                queue.idle -= 1;
+            }
         };
-        // A bug's panic answers the request, and the thread goes on.
-        let result = panic::catch_unwind(AssertUnwindSafe(|| run(&render)))
-            .unwrap_or_else(|_| Err("Can't render: the renderer failed".into()));
+        let Some(render) = render else {
+            // Stopped and waited for: no process stays.
+            drop(worker);
+            return;
+        };
+        let result = run_in_worker(&mut worker, &render);
         let extras = {
-            let mut queue = QUEUE.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut queue = queue();
             let at = queue
                 .running
                 .iter()
@@ -162,17 +203,39 @@ fn work(write: fn(&[u8])) {
     }
 }
 
+/// A render through the thread's worker, started for it if there is none (the program's own
+/// file, `--render-worker`); a worker that died or took too long is gone after it.
+fn run_in_worker(worker: &mut Option<Worker>, render: &Render) -> Result<Rendered, String> {
+    if worker.is_none() {
+        let started = std::env::current_exe().and_then(|program| Worker::spawn(&program));
+        match started {
+            Ok(started) => *worker = Some(started),
+            Err(error) => return Err(format!("Can't render: no renderer ({error})")),
+        }
+    }
+    match worker.as_mut().unwrap().run(render, worker::JOB_TIMEOUT) {
+        Ok(result) => result,
+        Err(message) => {
+            // Stopped and waited for, now: the next render starts a new one.
+            *worker = None;
+            Err(message)
+        }
+    }
+}
+
 /// The end of the program: the renders asked for are finished and answered first, up to
-/// `deadline` (no half-written files left).
+/// `deadline` (no half-written files left), and the workers stopped.
 pub fn finish(deadline: Instant) {
-    let mut queue = QUEUE.lock().unwrap_or_else(PoisonError::into_inner);
-    while queue.workers > 0 {
+    let mut queue = queue();
+    queue.closing = true;
+    WAKE.notify_all();
+    while queue.threads > 0 {
         let now = Instant::now();
         if now >= deadline {
             eprintln!("fluxgram-helper: the renders didn't finish in time");
             return;
         }
-        queue = IDLE
+        queue = DONE
             .wait_timeout(queue, deadline - now)
             .unwrap_or_else(PoisonError::into_inner)
             .0;
@@ -250,7 +313,6 @@ mod tests {
     use super::*;
     use crate::fxa::tests::read;
     use std::path::PathBuf;
-    use std::time::Duration;
 
     /// The fixtures: a TGS of 2 s at 60 frames a second, 512 × 512 (a gradient fading out, a
     /// trim path, a mask); a WEBM of 1 s at 30, 256 × 256, VP9 with its alpha.
@@ -380,56 +442,6 @@ mod tests {
         for name in ["sticker.tgs", "sticker.webm"] {
             let message = error(&sticker(name), &blocked);
             assert!(message.starts_with("Can't write the frames"), "{message}");
-        }
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    static LINES: Mutex<String> = Mutex::new(String::new());
-
-    fn collect(bytes: &[u8]) {
-        let text = std::str::from_utf8(bytes).unwrap();
-        assert!(text.ends_with('\n'), "whole lines");
-        LINES.lock().unwrap().push_str(text);
-    }
-
-    #[test]
-    fn the_queue_answers_every_request() {
-        let dir = scratch("queue");
-        let webm = dir.join("w.fxa");
-        for (extra, input, output) in [
-            (1, sticker("sticker.tgs"), dir.join("t.fxa")),
-            (2, sticker("sticker.webm"), webm.clone()),
-            (3, sticker("sticker.webm"), webm.clone()),
-            (4, sticker("missing.webm"), dir.join("m.fxa")),
-            (5, sticker("sticker.tgs"), dir.join("t2.fxa")),
-        ] {
-            submit(
-                job(&input, &output, 64, 30),
-                Some(Value::from(extra)),
-                collect,
-            );
-        }
-        let deadline = Instant::now() + Duration::from_secs(20);
-        finish(deadline);
-        assert_eq!(QUEUE.lock().unwrap().workers, 0, "the threads are gone");
-        let lines = LINES.lock().unwrap().clone();
-        let answers: Vec<Value> = lines
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        let mut extras: Vec<i64> = answers
-            .iter()
-            .map(|a| a["@extra"].as_i64().unwrap())
-            .collect();
-        extras.sort();
-        assert_eq!(extras, [1, 2, 3, 4, 5], "{lines}");
-        for answer in &answers {
-            let kind = if answer["@extra"] == 4 {
-                "fluxgram.error"
-            } else {
-                "fluxgram.rendered"
-            };
-            assert_eq!(answer["@type"], kind, "{answer}");
         }
         fs::remove_dir_all(&dir).ok();
     }

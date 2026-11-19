@@ -8,7 +8,8 @@
 //!   answers), their small photos downloaded; the rows follow the store's changes ([`Touched`]) and
 //!   go to every window at the end of a batch, only when they changed.
 //! - The Add Chat popup: the recent chats (`getChats` of the main list), then the query's
-//!   (`searchChats`, `searchChatsOnServer`) — people and groups only ([`Store::listed`]).
+//!   (`searchChats`, `searchChatsOnServer`) — people, bots, groups and channels (part 5; no
+//!   secret chats — [`Store::listed`]).
 //! - A notification per chat with new messages (not muted, not in sight in any window): the card
 //!   is updated while more come and removed once the chat is read; its Open runs the command
 //!   `open-chat` with the chat's tab key.
@@ -485,6 +486,14 @@ impl Chats {
                     storage::set(&storage_key(&key.account), &list.chats);
                 }
                 list.dirty = true;
+                // A hidden chat added where its window has the hidden chats closed (part 5): it
+                // leaves the open hidden list (a closed one drops it when next opened).
+                if let Some(unlocked) = &mut self.unlocked
+                    && unlocked.list.unhide(&key.account, key.chat)
+                {
+                    unlocked.dirty = true;
+                    storage::set(HIDDEN, &unlocked.key.seal(&unlocked.list, hidden::random()));
+                }
                 // The store's copy may be old (the popup's): TDLib's current one, and its updates
                 // from now on (the filter follows at the end of the batch).
                 cx.td.send(
@@ -1024,6 +1033,8 @@ pub fn row(store: &Store, chat: i64, words: &dyn Words) -> Option<ChatRow> {
             .as_deref()
             .map(summary::first_line)
             .filter(|draft| !draft.is_empty()),
+        bot: store.is_bot(chat),
+        blocked: found.blocked,
     })
 }
 
@@ -1116,8 +1127,8 @@ fn matches(store: &Store, chat: i64, query: &str, words: &dyn Words) -> bool {
     username.is_some_and(|name| name.to_lowercase().contains(&query))
 }
 
-/// The popup's chats: TDLib's answers in their order, then what the store had, people and groups
-/// only — each once.
+/// The popup's chats: TDLib's answers in their order, then what the store had (no secret
+/// chats) — each once.
 fn found_chats(store: &Store, search: &Search, added: &[i64], words: &dyn Words) -> Vec<FoundChat> {
     let mut seen = HashSet::new();
     search
@@ -1130,7 +1141,8 @@ fn found_chats(store: &Store, search: &Search, added: &[i64], words: &dyn Words)
         .collect()
 }
 
-/// A chat as the popup offers it: people (not bots) and groups, with "@anna" or "5 members".
+/// A chat as the popup offers it: people, bots, groups and channels (part 5), with "@anna",
+/// "bot", "5 members" or "12 345 subscribers".
 pub fn found(store: &Store, chat: i64, added: bool, words: &dyn Words) -> Option<FoundChat> {
     if !store.listed(chat) {
         return None;
@@ -1139,6 +1151,10 @@ pub fn found(store: &Store, chat: i64, added: bool, words: &dyn Words) -> Option
     let title = title(store, chat, words);
     let detail = match kind {
         _ if store.is_saved_messages(chat) => None,
+        _ if store.is_bot(chat) => Some(words.tr("bot")),
+        _ if store.is_channel(chat) => store
+            .group(chat)
+            .map(|group| crate::feed::subscribers_line(group.member_count, words)),
         ChatKind::Private { user } => store
             .users
             .get(&user)
@@ -1155,6 +1171,7 @@ pub fn found(store: &Store, chat: i64, added: bool, words: &dyn Words) -> Option
         title,
         detail,
         added,
+        saved: store.is_saved_messages(chat),
     })
 }
 
@@ -1208,18 +1225,7 @@ impl Chats {
             unlocked.dirty = true;
             return;
         }
-        // Accounts signed out while the list was closed go now, and so do chats added to the
-        // visible list again meanwhile (the Add Chat popup can't tell they are hidden).
-        let before = list.clone();
-        list.accounts
-            .retain(|account, _| self.lists.contains_key(account));
-        for (account, chats) in list.accounts.iter_mut() {
-            if let Some(visible) = self.lists.get(account) {
-                chats.retain(|chat| !visible.chats.contains(chat));
-            }
-        }
-        list.accounts.retain(|_, chats| !chats.is_empty());
-        if list != before {
+        if self.drop_visible(&mut list) {
             storage::set(HIDDEN, &key.seal(&list, hidden::random()));
         }
         for (account, chats) in &list.accounts {
@@ -1241,6 +1247,22 @@ impl Chats {
             sent: None,
             dirty: true,
         });
+    }
+
+    /// Accounts signed out while the list was closed go from it, and so do chats added to the
+    /// visible list meanwhile (the Add Chat popup, a link's tab, a profile can't tell they are
+    /// hidden — part 5): the list opened by a phrase, before it is sealed again. True — it changed.
+    fn drop_visible(&self, list: &mut HiddenList) -> bool {
+        let before = list.clone();
+        list.accounts
+            .retain(|account, _| self.lists.contains_key(account));
+        for (account, chats) in list.accounts.iter_mut() {
+            if let Some(visible) = self.lists.get(account) {
+                chats.retain(|chat| !visible.chats.contains(chat));
+            }
+        }
+        list.accounts.retain(|_, chats| !chats.is_empty());
+        *list != before
     }
 
     /// The hidden chats are hidden again in the window; once no window has them, the service
@@ -1295,6 +1317,7 @@ impl Chats {
             },
             (None, None) => return,
         };
+        self.drop_visible(&mut list);
         list.hide(&key.account, key.chat);
         storage::set(HIDDEN, &seal_key.seal(&list, hidden::random()));
         if let Some(unlocked) = &mut self.unlocked {
@@ -1355,6 +1378,8 @@ impl Chats {
                 }
             },
         };
+        let mut list = list;
+        self.drop_visible(&mut list);
         let started = Instant::now();
         let key = hidden::new_key(phrase);
         log::info(&format!(
@@ -1547,6 +1572,10 @@ mod tests {
             &json!({"@type": "supergroup", "id": 1001, "member_count": 5,
             "status": {"@type": "chatMemberStatusMember"}}),
         );
+        store.apply(
+            &json!({"@type": "supergroup", "id": 1002, "member_count": 12345, "is_channel": true,
+            "status": {"@type": "chatMemberStatusMember"}}),
+        );
         let group =
             json!({"@type": "chatTypeSupergroup", "supergroup_id": 1001, "is_channel": false});
         let channel =
@@ -1668,7 +1697,7 @@ mod tests {
         let mut stores = HashMap::new();
         stores.insert("a1".to_string(), store());
         let mut list = HiddenList::default();
-        // Anna, a chat the store lacks (yet), the channel (never shown), Backend · team.
+        // Anna, a chat the store lacks (yet), the channel (part 5: shown), Backend · team.
         for chat in [101, 999, -1000000001002, -1000000001001] {
             list.hide("a1", chat);
         }
@@ -1678,7 +1707,10 @@ mod tests {
             .iter()
             .map(|hidden| (hidden.account.as_str(), hidden.row.chat))
             .collect();
-        assert_eq!(shown, [("a1", -1000000001001), ("a1", 101)]);
+        assert_eq!(
+            shown,
+            [("a1", -1000000001001), ("a1", 101), ("a1", -1000000001002)]
+        );
         assert!(hidden_rows(&stores, &HiddenList::default(), &English).is_empty());
     }
 
@@ -1693,8 +1725,11 @@ mod tests {
         };
         let rows = rows(&store, &list, &English).unwrap();
         let order: Vec<i64> = rows.iter().map(|row| row.chat).collect();
-        // Pinned first; the bot and the channel are never shown.
-        assert_eq!(order, vec![-1000000001001, 103, 101, ME]);
+        // Pinned first; the bot and the channel too (part 5).
+        assert_eq!(
+            order,
+            vec![-1000000001001, 103, 101, 105, -1000000001002, ME]
+        );
     }
 
     #[test]
@@ -1719,15 +1754,18 @@ mod tests {
     }
 
     #[test]
-    fn the_popup_offers_people_and_groups() {
+    fn the_popup_offers_people_groups_bots_and_channels() {
         let store = store();
         let anna = found(&store, 101, true, &English).unwrap();
         assert_eq!(anna.detail.as_deref(), Some("@anna"));
         assert!(anna.added);
         let team = found(&store, -1000000001001, false, &English).unwrap();
         assert_eq!(team.detail.as_deref(), Some("5 members"));
-        assert_eq!(found(&store, 105, false, &English), None);
-        assert_eq!(found(&store, -1000000001002, false, &English), None);
+        let bot = found(&store, 105, false, &English).unwrap();
+        assert_eq!(bot.detail.as_deref(), Some("bot"));
+        let channel = found(&store, -1000000001002, false, &English).unwrap();
+        assert_eq!(channel.title, "Flux News");
+        assert_eq!(channel.detail.as_deref(), Some("12\u{a0}345 subscribers"));
         assert_eq!(found(&store, 999, false, &English), None);
 
         let search = Search {
@@ -1744,12 +1782,13 @@ mod tests {
             .iter()
             .map(|chat| chat.chat)
             .collect();
-        assert_eq!(chats, vec![101, -1000000001001, 103]);
+        // TDLib's order, each once; the bot and the channel among them (part 5).
+        assert_eq!(chats, vec![105, 101, -1000000001002, -1000000001001, 103]);
 
         assert!(matches(&store, 101, "ann", &English));
         assert!(matches(&store, 101, "@ANNA", &English));
         assert!(matches(&store, -1000000001001, "TEAM", &English));
-        assert!(!matches(&store, 105, "weather", &English));
+        assert!(matches(&store, 105, "weather", &English));
         assert!(matches(&store, ME, "saved", &English));
     }
 

@@ -4,6 +4,10 @@ members), `getSupergroupFullInfo`, `getSupergroupMembers` (recent, administrator
 `searchChatMembers`, `getUser` of the generated people, `createPrivateChat`,
 `setChatNotificationSettings` (→ `updateChatNotificationSettings`).
 
+Part 5 (the field's suggestions): "Backend · team" also has Ольга Петрова (no username), Сергей
+Иванов and the Weather Bot; the bot's commands (`WEATHER_COMMANDS`) come in its `userFullInfo`
+(`bot_info`) and in the group's `supergroupFullInfo` (`bot_commands`).
+
 - "Backend · team" has its five people and the account (Anna the owner, Dima an admin "backend
   lead"); "Design review" (a basic group) Anna, Masha (admin) and the account; "Flood" 240
   generated people (ids 5001–5240, every third with a photo, statuses of every kind; 5001 the
@@ -17,6 +21,9 @@ members), `getSupergroupFullInfo`, `getSupergroupMembers` (recent, administrator
 """
 
 from __future__ import annotations
+
+import os
+import threading
 
 import fake_feed
 import fake_world
@@ -88,6 +95,24 @@ def get_user(client, request: dict) -> None:
     client.answer(request, found)
 
 
+WEATHER_BOT = 105
+WEATHER_COMMANDS = [
+    {"@type": "botCommand", "command": "start", "description": "Start the bot"},
+    {"@type": "botCommand", "command": "now", "description": "The weather now"},
+    {"@type": "botCommand", "command": "week", "description": "The week ahead"},
+    {"@type": "botCommand", "command": "city", "description": "Choose a city"},
+    {"@type": "botCommand", "command": "help", "description": "What the bot can do"},
+]
+
+
+def bot_info(user_id: int) -> dict | None:
+    if user_id != WEATHER_BOT:
+        return None
+    return {"@type": "botInfo", "short_description": "Forecasts", "description": "", "photo": None,
+            "animation": None, "menu_button": None, "commands": WEATHER_COMMANDS,
+            "default_group_administrator_rights": None, "default_channel_administrator_rights": None}
+
+
 @handler("getUserFullInfo")
 def get_user_full_info(client, request: dict) -> None:
     user_id = int(request.get("user_id", 0))
@@ -101,7 +126,7 @@ def get_user_full_info(client, request: dict) -> None:
                             "has_posted_to_profile_stories": False, "set_chat_background": False,
                             "bio": {"@type": "formattedText", "text": bio, "entities": []},
                             "birthdate": None, "personal_chat_id": 0, "group_in_common_count": 1,
-                            "bot_info": None})
+                            "bot_info": bot_info(user_id)})
 
 
 # --- Groups and their members ---
@@ -124,7 +149,8 @@ def members_of(client, chat_id: int) -> list[dict] | None:
     if chat_id == BACKEND:
         return [member(101, "chatMemberStatusCreator"),
                 member(102, "chatMemberStatusAdministrator", "backend lead"),
-                member(103), member(104), member(107), member(me)]
+                member(103), member(104), member(107), member(108), member(109),
+                member(WEATHER_BOT), member(me)]
     if chat_id == DESIGN:
         return [member(101, "chatMemberStatusCreator"), member(107, "chatMemberStatusAdministrator"),
                 member(me)]
@@ -199,7 +225,10 @@ def get_supergroup_full_info(client, request: dict) -> None:
                             "has_hidden_members": False, "can_hide_members": False,
                             "can_set_sticker_set": False, "can_set_location": False,
                             "can_get_statistics": False, "is_all_history_available": True,
-                            "invite_link": None, "bot_commands": [], "upgraded_from_basic_group_id": 0,
+                            "invite_link": None,
+                            "bot_commands": ([{"@type": "botCommands", "bot_user_id": WEATHER_BOT,
+                                               "commands": WEATHER_COMMANDS}] if group_id == 1001 else []),
+                            "upgraded_from_basic_group_id": 0,
                             "upgraded_from_max_message_id": 0})
 
 
@@ -268,6 +297,23 @@ def set_chat_notification_settings(client, request: dict) -> None:
             fake_world.CHATS[chat_id] = dict(fake_world.CHATS[chat_id], notification_settings=kept)
     client.ok(request)
     client.send({"@type": "updateChatNotificationSettings", "chat_id": chat_id, "notification_settings": kept})
+    # A mute for a time ends as TDLib ends it: `updateChatNotificationSettings` with nothing left
+    # (part 5). FAKE_MUTE_SPEEDUP=<n> makes it n times sooner (600: an hour in 6 s).
+    seconds = kept["mute_for"]
+    if 0 < seconds < 2147483647:
+        speedup = max(1.0, float(os.environ.get("FAKE_MUTE_SPEEDUP", "1")))
+
+        def unmute() -> None:
+            ended = dict(kept, mute_for=0)
+            with fake_world.LOCK:
+                if chat_id in fake_world.CHATS:
+                    fake_world.CHATS[chat_id] = dict(fake_world.CHATS[chat_id], notification_settings=ended)
+            client.send({"@type": "updateChatNotificationSettings", "chat_id": chat_id,
+                         "notification_settings": ended})
+
+        timer = threading.Timer(seconds / speedup, unmute)
+        timer.daemon = True
+        timer.start()
 
 
 # --- Four months of media ---

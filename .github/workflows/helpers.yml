@@ -85,8 +85,9 @@ jobs:
           cargo clippy --release --all-targets -- -D warnings
           cargo test --release
 
-      # build.rs downloads TDLib's static libraries for the target and checks their SHA-256, and
-      # compiles rlottie and libvpx's VP9 decoder from native/ with the target's compiler.
+      # build.rs downloads TDLib's static libraries for the target (this repository's release
+      # tdlib-v1.8.61, built by tdlib.yml) and checks their SHA-256, and compiles rlottie and
+      # libvpx's VP9 decoder from native/ with the target's compiler.
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -97,8 +98,9 @@ jobs:
           ls -l "$exe"
           echo "EXE=$exe" >> "$GITHUB_ENV"
 
-      # One file: on macOS nothing but the system's libraries; on Windows, the DLLs it needs are
-      # listed (TDLib's prebuilt Windows libraries are built for the C runtime in DLLs, /MD).
+      # One file: nothing but the system's libraries. macOS — `otool -L`, and built for macOS 12
+      # (`minos`), libc++'s `__libcpp_verbose_abort` (13.3+) not taken from the system; Windows —
+      # `dumpbin /dependents`: no Visual C++ runtime DLLs (TDLib is built for /MT, tdlib.yml).
       - name: Libraries
         run: |
           if [ "${{ runner.os }}" = macOS ]; then
@@ -108,11 +110,22 @@ jobs:
               echo "::error title=Libraries::fluxgram-helper links a library outside the system"
               exit 1
             fi
+            minos=$(otool -l "$EXE" | awk '/LC_BUILD_VERSION/ { b = 1 } b && $1 == "minos" { print $2; exit }')
+            if [ "$minos" != "12.0" ]; then
+              echo "::error title=Deployment target::fluxgram-helper is built for macOS $minos, not 12.0"
+              exit 1
+            fi
+            if nm -u "$EXE" | grep __libcpp_verbose_abort; then
+              echo "::error title=libc++::fluxgram-helper takes __libcpp_verbose_abort from the system (macOS 13.3+)"
+              exit 1
+            fi
           else
-            dlls=$(grep -aoiE '[a-z0-9_.-]+\.dll' "$EXE" | tr 'A-Z' 'a-z' | sort -u)
-            echo "$dlls"
-            if echo "$dlls" | grep -qE '^(vcruntime140(_1)?|msvcp140)\.dll$'; then
-              echo "::warning title=C runtime::fluxgram-helper needs the Visual C++ runtime DLLs (TDLib's prebuilt libraries are /MD)"
+            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            dumpbin=$(cygpath -u "$("$vswhere" -latest -products '*' -find 'VC\Tools\MSVC\**\dumpbin.exe' | head -n 1)")
+            "$dumpbin" -nologo -dependents "$EXE" | tee dependents.txt
+            if grep -qiE '(vcruntime|msvcp)[0-9_]*\.dll' dependents.txt; then
+              echo "::error title=C runtime::fluxgram-helper needs the Visual C++ runtime DLLs"
+              exit 1
             fi
           fi
 

@@ -214,3 +214,61 @@ def render(request: dict) -> dict:
     shutil.copyfile(ready, output + ".tmp")
     os.replace(output + ".tmp", output)
     return {"@type": "fluxgram.rendered", "output": output, "width": 144, "height": 144, "frames": 60}
+
+
+def cache(request: dict) -> dict:
+    """`fluxgram.cache` (part 5) as the helper does it: the folder's files (8 folders deep, links
+    neither followed nor removed); `touch` — files of the folder set to now first; `limit` — the
+    least recently used (by modification time) removed until the folder holds no more; `"limit":
+    0, "clear": true` — every file removed; the answer is the size it holds then."""
+    folder = request.get("dir") or ""
+    limit = request.get("limit")
+    clear = request.get("clear") is True
+    if not os.path.isabs(folder) or ".." in folder.split(os.sep):
+        return {"@type": "fluxgram.error", "message": "A cache without a whole folder"}
+    if limit == 0 and not clear or clear and limit != 0:
+        return {"@type": "fluxgram.error", "message": "`clear` goes with a `limit` of 0"}
+    if not os.path.exists(folder):
+        return {"@type": "fluxgram.cacheSize", "size": 0}
+    if not os.path.isdir(folder):
+        return {"@type": "fluxgram.error", "message": f"Not a folder: {folder}"}
+    for path in request.get("touch") or []:
+        if os.path.dirname(path).startswith(folder) and os.path.isfile(path) and not os.path.islink(path):
+            os.utime(path)
+    files = []
+    for root, dirs, names in os.walk(folder):
+        if root[len(folder):].count(os.sep) >= 8:
+            dirs[:] = []
+        for name in names:
+            path = os.path.join(root, name)
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            stat = os.stat(path)
+            files.append((stat.st_mtime, path, stat.st_size))
+    total = sum(size for _, _, size in files)
+    if limit is not None:
+        for _, path, size in sorted(files):
+            if total <= limit:
+                break
+            try:
+                os.remove(path)
+                total -= size
+            except OSError:
+                pass
+    return {"@type": "fluxgram.cacheSize", "size": total}
+
+
+def storage_statistics(params: dict | None) -> dict:
+    """`getStorageStatisticsFast`: the size of the client's files folder, plus FAKE_FILES_SIZE bytes
+    (a cache of gigabytes for a check of the limit)."""
+    size = int(os.environ.get("FAKE_FILES_SIZE", "0"))
+    folder = (params or {}).get("files_directory")
+    if folder and os.path.isdir(folder):
+        for root, _, names in os.walk(folder):
+            for name in names:
+                path = os.path.join(root, name)
+                if os.path.isfile(path) and not os.path.islink(path):
+                    size += os.path.getsize(path)
+    return {"@type": "storageStatisticsFast", "files_size": size, "file_count": 0, "database_size": 0,
+            "language_pack_database_size": 0, "log_size": 0}
+

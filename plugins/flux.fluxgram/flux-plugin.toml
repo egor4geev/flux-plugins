@@ -154,8 +154,36 @@ options = [
     { value = "0", title = "No limit" },
 ]
 
+# The size the cache takes now — TDLib's files and the stickers' animations (part 5): one card
+# with Clear Cache.
+[[settings]]
+key = "cache-size"
+type = "status"
+title = ""
+default = "Measured once signed in"
+
 [[settings]]
 key = "clear-cache-button"
 type = "button"
 title = "Clear Cache"
 command = "clear-cache"
+
+# Settings → FluxGram → Links (part 5, src/links.rs): a web link is asked about before it opens in
+# the browser — always, when its text isn't its address, or never; an address that may pretend to
+# be another is asked about whatever this says.
+[[settings]]
+key = "links"
+type = "section"
+title = "Links"
+description = "Telegram's links open in FluxGram. An address with letters of different alphabets is always asked about."
+
+[[settings]]
+key = "ask-links"
+type = "choice"
+title = "Ask before opening links"
+default = "mismatch"
+options = [
+    { value = "always", title = "Always" },
+    { value = "mismatch", title = "When the text isn't the address" },
+    { value = "never", title = "Never" },
+]

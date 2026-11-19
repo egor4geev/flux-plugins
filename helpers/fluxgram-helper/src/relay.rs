@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
+use crate::cache::{self, Cache};
 use crate::render::{self, Render};
 
 /// A batch is written once it reaches this size; a single bigger message goes on its own.
@@ -30,6 +31,8 @@ pub enum Input {
         render: Render,
         extra: Option<Value>,
     },
+    /// `fluxgram.cache`: a cache folder measured, trimmed or emptied, and the line's `@extra`.
+    Cache { cache: Cache, extra: Option<Value> },
     /// `fluxgram.quit`.
     Quit,
     /// An empty line: nothing to do.
@@ -169,6 +172,49 @@ pub fn parse_input(line: &[u8]) -> Result<Input, InputError> {
                             "fluxgram.render needs \"input\" and \"output\" (files), \"size\" (1 to {} pixels) and maybe \"fps\" (1 to 60)",
                             render::MAX_SIZE
                         ),
+                        extra.as_ref(),
+                    )),
+                }
+            }
+            "cache" => {
+                let dir = match object.get("dir") {
+                    Some(Value::String(dir)) if cache::valid_dir(dir) => Some(dir.clone()),
+                    _ => None,
+                };
+                let limit = match object.get("limit") {
+                    None | Some(Value::Null) => Some(None),
+                    Some(limit) => limit.as_u64().map(Some),
+                };
+                let clear = match object.get("clear") {
+                    None | Some(Value::Null) => Some(false),
+                    Some(clear) => clear.as_bool(),
+                };
+                let touch = match object.get("touch") {
+                    None | Some(Value::Null) => Some(Vec::new()),
+                    Some(files) => files.as_array().and_then(|files| {
+                        files
+                            .iter()
+                            .map(|file| file.as_str().map(String::from))
+                            .collect::<Option<Vec<_>>>()
+                    }),
+                };
+                match (dir, limit, clear, touch) {
+                    // Emptied only when asked for both ways: a limit of 0 alone is a mistake.
+                    (Some(dir), Some(limit), Some(clear), Some(touch))
+                        if clear == (limit == Some(0)) || (clear && limit.is_none()) =>
+                    {
+                        Ok(Input::Cache {
+                            cache: Cache {
+                                dir,
+                                limit,
+                                clear,
+                                touch,
+                            },
+                            extra,
+                        })
+                    }
+                    _ => Err(InputError::new(
+                        "fluxgram.cache needs \"dir\" (a whole path to a folder), and maybe \"limit\" (bytes; 0 with \"clear\": true empties it) and \"touch\" (its files taken again)",
                         extra.as_ref(),
                     )),
                 }
@@ -545,6 +591,63 @@ mod tests {
         ] {
             let error = error(line);
             assert!(error.message.starts_with("fluxgram.render needs"), "{line}");
+            assert_eq!(error.extra, Some(Value::from(2)));
+        }
+    }
+
+    #[test]
+    fn cache_requests() {
+        let line = r#"{"@type":"fluxgram.cache","dir":"/d/cache/frames","limit":1000,"touch":["/d/cache/frames/1.fxa"],"@extra":5}"#;
+        assert_eq!(
+            parse_input(line.as_bytes()),
+            Ok(Input::Cache {
+                cache: Cache {
+                    dir: "/d/cache/frames".into(),
+                    limit: Some(1000),
+                    clear: false,
+                    touch: vec!["/d/cache/frames/1.fxa".into()],
+                },
+                extra: Some(Value::from(5)),
+            })
+        );
+        let size = r#"{"@type":"fluxgram.cache","dir":"/d/c"}"#;
+        assert!(matches!(
+            parse_input(size.as_bytes()),
+            Ok(Input::Cache {
+                cache: Cache {
+                    limit: None,
+                    clear: false,
+                    ..
+                },
+                extra: None
+            })
+        ));
+        for clear in [
+            r#"{"@type":"fluxgram.cache","dir":"/d/c","limit":0,"clear":true}"#,
+            r#"{"@type":"fluxgram.cache","dir":"/d/c","clear":true}"#,
+        ] {
+            assert!(
+                matches!(
+                    parse_input(clear.as_bytes()),
+                    Ok(Input::Cache {
+                        cache: Cache { clear: true, .. },
+                        ..
+                    })
+                ),
+                "{clear}"
+            );
+        }
+        for line in [
+            r#"{"@type":"fluxgram.cache","limit":10,"@extra":2}"#,
+            r#"{"@type":"fluxgram.cache","dir":"d/c","@extra":2}"#,
+            r#"{"@type":"fluxgram.cache","dir":"/d/../c","@extra":2}"#,
+            r#"{"@type":"fluxgram.cache","dir":"/d/c","limit":0,"@extra":2}"#,
+            r#"{"@type":"fluxgram.cache","dir":"/d/c","limit":10,"clear":true,"@extra":2}"#,
+            r#"{"@type":"fluxgram.cache","dir":"/d/c","limit":-1,"@extra":2}"#,
+            r#"{"@type":"fluxgram.cache","dir":"/d/c","touch":"/d/c/1","@extra":2}"#,
+        ] {
+            let error = error(line);
+            assert!(error.message.starts_with("fluxgram.cache needs"), "{line}");
             assert_eq!(error.extra, Some(Value::from(2)));
         }
     }

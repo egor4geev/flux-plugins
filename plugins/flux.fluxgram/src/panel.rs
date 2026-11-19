@@ -206,6 +206,12 @@ impl Panels {
         self.touch_all();
     }
 
+    /// The animations' folder was trimmed: the tabs are built again (an animation gone renders
+    /// again).
+    pub fn animations_trimmed(&mut self) {
+        self.touch_all();
+    }
+
     /// An animation was rendered (or failed): the tabs showing it are built again.
     pub fn rendered(&mut self, _output: &str, _ok: bool) {
         self.touch_all();

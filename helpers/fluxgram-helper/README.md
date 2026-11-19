@@ -8,11 +8,12 @@ stdout, a TDLib client per account. Everything Telegram-specific — the sign-in
 show — is the plugin's. It also renders animated stickers (TGS and WEBM) into Flux's files of frames
 (`fluxgram.render`): native code the plugin can't run either.
 
-One file per platform, TDLib and OpenSSL linked in statically (TDLib 1.8.61, the static libraries of
-the `tdlib-rs` releases, pinned by SHA-256), and rlottie and libvpx's VP9 decoder built from their
-sources (`native/`): `macos-aarch64`, `macos-x86_64`, `windows-x86_64`, `windows-aarch64`. CI (`.github/workflows/helpers.yml`) builds them; a new version of this crate is
-released as `fluxgram-helper-v<version>` with the four files gzipped; the plugin's manifest names
-them with their SHA-256 (`[[helpers]]`).
+One file per platform, TDLib, OpenSSL and zlib linked in statically (TDLib 1.8.61, built by this
+repository's `.github/workflows/tdlib.yml` and released as `tdlib-v1.8.61`, pinned by SHA-256),
+and rlottie and libvpx's VP9 decoder built from their sources (`native/`): `macos-aarch64`,
+`macos-x86_64`, `windows-x86_64`, `windows-aarch64`. CI (`.github/workflows/helpers.yml`) builds
+them; a new version of this crate is released as `fluxgram-helper-v<version>` with the four files
+gzipped; the plugin's manifest names them with their SHA-256 (`[[helpers]]`).
 
 ## Running
 
@@ -24,6 +25,8 @@ fluxgram-helper [--log <file>] [--verbosity <0–5>] [--stats]
 - `--verbosity` — TDLib's log level: 1 (errors) by default; 3–4 to see the network.
 - `--stats` — every write's size on stderr (`fluxgram-helper: a write of 12 lines, 5304 bytes`):
   for measuring the batches.
+- `--render-worker` — the program's own: a render worker (`fluxgram.render`), not for running by
+  hand.
 
 The program ends when its input ends (Flux stopped the plugin, or quit) or on `fluxgram.quit`: it
 closes every client first (TDLib's `close`) and finishes the renders asked for, up to 5 s for all of
@@ -94,12 +97,18 @@ the program's own messages (start, a failure) go to stderr.
   their first bytes. The frames are `size` pixels on the longer side (1–2048; the sticker's
   proportions kept), at most `fps` a second (1–60, 30 by default): the sticker's own frames, every
   other one or fewer when its rate is higher (a TGS of 60 → 30), so they stay evenly paced; a
-  Lottie's frames end before its out point (`op`). Renders run on threads of their own, two at a
-  time and the rest in turn, never holding up TDLib's lines; one asked for again while it waits or
-  runs (the same `output`) is done once and answered for each request. The output's folder is made
-  if it's missing; the file is written to `<output>.tmp` and renamed, so it is whole once it is
-  there. A sticker of up to 3 s renders in well under a second (on an M-series Mac: a 3 s TGS at
-  320 px ~60 ms; a 3 s WEBM of 512 px to 320 ~230 ms).
+  Lottie's frames end before its out point (`op`). The renderers — C and C++ fed with strangers'
+  files — run in worker processes, never in the program that holds the TDLib clients: the program
+  itself started again with `--render-worker` (no console window on Windows), one render at a
+  time each, two workers at most and the rest of the renders in turn, never holding up TDLib's
+  lines. A worker is started by the first render (~15 ms on an M-series Mac) and kept for the
+  next ones; one with nothing to render for 30 s ends, so an idle program has none (and keeps
+  none of the renders' memory). A worker that crashes fails its render only, and one that takes
+  over 15 s is stopped and fails it: the next render starts a new worker. A render asked for
+  again while it waits or runs (the same `output`) is done once and answered for each request.
+  The output's folder is made if it's missing; the file is written to `<output>.tmp` and
+  renamed, so it is whole once it is there. A sticker of up to 3 s renders in well under a
+  second (on an M-series Mac: a 3 s TGS at 320 px ~60 ms; a 3 s WEBM of 512 px to 320 ~230 ms).
 
   ```json
   {"@type": "fluxgram.render", "input": "/…/files/stickers/1.tgs", "output": "/…/cache/frames/AgAD-320.fxa", "size": 320, "fps": 30, "@extra": 9}
@@ -108,7 +117,30 @@ the program's own messages (start, a failure) go to stderr.
   → `{"@type": "fluxgram.rendered", "output": "/…/AgAD-320.fxa", "width": 320, "height": 320, "frames": 90, "@extra": 9}`,
   or `fluxgram.error` with the reason and the `@extra`: `Not a TGS or WEBM sticker`, `Can't read
   the sticker: …`, `A broken TGS: …`, `A broken WEBM: …` (a cut file, a codec other than VP9, more
-  than 8 bits a color), `Can't write the frames: …` (the output's folder, the disk).
+  than 8 bits a color), `Can't write the frames: …` (the output's folder, the disk), `Can't
+  render: the renderer failed` (its worker crashed), `Can't render: the renderer took too long`.
+
+- **`fluxgram.cache`** (part 5) — a cache folder of the plugin's (the stickers' files of frames)
+  measured, trimmed or emptied: a WebAssembly plugin may not list or delete files. The files are
+  the folder's and its folders' (8 deep); symbolic links are neither followed nor removed, and
+  `dir` must be a whole path without `..`. Used means the file's modification time: a render
+  writes it, and the plugin has the files it takes again touched — `touch`, files of the folder
+  set to now first (others are skipped) — so the least recently used go first.
+  - Without `limit`: only the size.
+  - `limit` (bytes): the oldest files are removed until the folder holds no more than that.
+  - `"limit": 0` with `"clear": true`: every file is removed (the folders stay). A `limit` of 0
+    alone is refused, as `clear` with a `limit` above 0.
+
+  A file another program holds open (on Windows) stays, and counts. The work runs on a thread of
+  its own; the answer is the size the folder holds then, in bytes (a folder that isn't there
+  holds 0):
+
+  ```json
+  {"@type": "fluxgram.cache", "dir": "/…/cache/frames", "limit": 268435456, "touch": ["/…/cache/frames/AgAD-320.fxa"], "@extra": 10}
+  ```
+
+  → `{"@type": "fluxgram.cacheSize", "size": 268311552, "@extra": 10}`, or `fluxgram.error` with
+  the reason and the `@extra`: `Not a folder: …`, `Can't read the cache: …`.
 
 - **`fluxgram.quit`** — closes every client and exits with 0, as the end of input does.
 
@@ -131,7 +163,7 @@ the program's own messages (start, a failure) go to stderr.
 - **`fluxgram.error`** — a line the program couldn't take (not JSON, not an object, no `@client` or
   not a non-empty string, an unknown `fluxgram.*`, a `fluxgram.execute` without `query`, a
   `fluxgram.keep` or `fluxgram.drop` without its `types`, a `fluxgram.chats` without `@client` or
-  `chats`):
+  `chats`, a `fluxgram.render` or `fluxgram.cache` without what it needs):
   `{"@type": "fluxgram.error", "message": "…", "@extra": …}` (`@extra` when the line had one). Empty
   lines are skipped.
 
@@ -157,14 +189,17 @@ cargo test --release                      # the protocol's pure parts, the test 
 python3 tests/live.py                     # on Telegram's test servers (see the file)
 ```
 
-The static libraries of TDLib come from the pinned archive of the `tdlib-rs` release for the target
-(downloaded and checked by `build.rs` into `target/tdlib/`, once), or from `TDLIB_DIR` (a folder with
-`lib/`).
+The static libraries of TDLib come from the pinned archive of this repository's release
+`tdlib-v1.8.61` for the target (downloaded and checked by `build.rs` into `target/tdlib/`, once), or
+from `TDLIB_DIR` (a folder with `lib/`, built the same way). The release is made by
+`.github/workflows/tdlib.yml` from TDLib's commit `6d50906` (the one `tdlib-rs` 1.4.0 built 1.8.61
+from), once: a new TDLib is a new version and commit there, a new release, and the new archives'
+SHA-256 in `build.rs`.
 
 - **macOS**: the program needs only the system's libraries and is built for macOS 12, as Flux
-  (`.cargo/config.toml`). TDLib's prebuilt libraries are built for macOS 15, but of what they take
-  from the system only libc++'s `__libcpp_verbose_abort` is newer than 12 (13.3), and the program
-  defines it itself (`td.rs`) — checked by the program's imports, not yet on a macOS 12 machine.
+  (`.cargo/config.toml`) — TDLib, OpenSSL and zlib too (deployment target 12.0, libc++ as the
+  system has it): CI checks the program's `minos` and that it takes nothing newer from the system
+  (libc++'s `__libcpp_verbose_abort`, 13.3+).
 - **Renderers** (`native/`, compiled by `build.rs` with the `cc` crate and the target's own C and C++
   compilers — no CMake, nothing from Homebrew): only the files that are compiled are there, with
   their licenses. Kept in the tree, not downloaded: the build needs no network for them, libvpx's
@@ -191,7 +226,7 @@ The static libraries of TDLib come from the pinned archive of the `tdlib-rs` rel
 
   A new version: the same folders from the new sources (only what's compiled, by the compilers'
   dependency lists), the configure step again for libvpx, then the tests and the smoke test.
-- **Windows**: TDLib's prebuilt libraries are built for the C runtime in DLLs (`/MD`), so the program
-  needs the Visual C++ runtime (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`) — unlike
-  Flux.exe (`+crt-static`). CI lists the DLLs and warns. A program without it needs TDLib built
-  with `/MT` (from source, `TDLIB_DIR`).
+- **Windows**: TDLib, OpenSSL and zlib are built for the static C runtime (`/MT`; vcpkg's static
+  triplet for OpenSSL and zlib), and so is the program (`+crt-static`, `.cargo/config.toml`; cargo
+  is run in this folder): it needs no Visual C++ runtime DLLs, as Flux.exe. CI prints
+  `dumpbin /dependents` and fails on `vcruntime140.dll` or `msvcp140.dll`.

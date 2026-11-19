@@ -1,7 +1,8 @@
 """The fake helper's chats (part 3, the chat's agent): a chat's history of every kind of message
 (filled into `fake_world.MESSAGES`), and TDLib's requests of an open chat — `openChat`,
 `closeChat`, `getChatHistory`, `getMessage`, `getMessages`, `getRepliedMessage`, `viewMessages`,
-`sendMessage`, `sendMessageAlbum`, `editMessageText`, `editMessageCaption`, `deleteMessages`,
+`sendMessage`, `sendMessageAlbum`, `editMessageText`, `editMessageCaption`, `deleteMessages` (one
+or several), `forwardMessages` (part 5: forwarded copies; "Old project" protects its content),
 `sendChatAction`, `setChatDraftMessage`, `downloadFile` (every file: media, profile and chat
 photos), `cancelDownloadFile`.
 
@@ -708,6 +709,9 @@ def send_one(client, request: dict, chat_id: int, content: dict, album: str = "0
     target = request.get("reply_to") or {}
     if target.get("message_id"):
         pending["reply_to"] = reply_to(chat_id, int(target["message_id"]))
+    # A forum's topic (part 5): the message stays in it.
+    if request.get("topic_id"):
+        pending["topic_id"] = request["topic_id"]
     client.send({"@type": "updateNewMessage", "message": pending})
     path = ((content.get("photo") or content.get("document") or {}).get("path")) or ""
 
@@ -869,6 +873,50 @@ def delete_messages(client, request: dict) -> None:
                  "is_permanent": True, "from_cache": False})
 
 
+# Part 5: "Old project" protects its content — its messages can't be forwarded (TDLib's
+# `has_protected_content`; messages no longer say `can_be_forwarded` themselves).
+fake_world.CHATS[OLD]["has_protected_content"] = True
+
+
+@handler("forwardMessages")
+def forward_messages(client, request: dict) -> None:
+    """Part 5: the messages of `from_chat_id` as new ones of `chat_id`, in the order asked,
+    "Forwarded from" their senders — on the server after a text sent just before them (0.6 s:
+    the text's own takes 0.5 s); a protected chat's don't go."""
+    chat_id, from_chat = int(request["chat_id"]), int(request["from_chat_id"])
+    if (fake_world.CHATS.get(from_chat) or {}).get("has_protected_content"):
+        client.error(request, 400, "MESSAGE_PROTECTED")
+        return
+    originals = [obj for obj in (find(client, from_chat, int(i)) for i in request.get("message_ids") or [])
+                 if obj is not None]
+    client.answer(request, {"@type": "messages", "total_count": 0, "messages": []})
+
+    def done() -> None:
+        sent = []
+        for original in originals:
+            sender = original["sender_id"]
+            origin = ({"@type": "messageOriginChannel", "chat_id": sender["chat_id"],
+                       "message_id": original["id"], "author_signature": ""}
+                      if sender.get("@type") == "messageSenderChat"
+                      else {"@type": "messageOriginUser",
+                            "sender_user_id": sender.get("user_id") or me_of(client)})
+            with fake_world.LOCK:
+                obj = message(chat_id, 0, original["content"], int(time.time()),
+                              message_id=fake_world.next_id(chat_id), outgoing=True,
+                              forward_info=dict(forward(origin), date=original["date"]),
+                              can_be_edited=False, can_be_deleted_for_all_users=True,
+                              can_be_deleted_only_for_self=False)
+                add(chat_id, obj)
+            obj = served(client, obj)
+            sent.append(obj)
+            client.send({"@type": "updateNewMessage", "message": obj})
+        if sent:
+            client.send({"@type": "updateChatLastMessage", "chat_id": chat_id, "last_message": sent[-1],
+                         "positions": (fake_world.CHATS.get(chat_id) or {}).get("positions") or []})
+
+    threading.Timer(0.6, done).start()
+
+
 @handler("sendChatAction")
 def send_chat_action(client, request: dict) -> None:
     client.ok(request)
@@ -933,12 +981,20 @@ def download_file(client, request: dict) -> None:
         client.send({"@type": "updateFile", "file": done})
         return
     key = (client.key, file_id)
+    # A file only a click downloads (part 5: a photo's full size in the profile's media, to see
+    # the viewer's spinner and its swap): nothing for a lower priority, slowly for a click's.
+    click_only = bool(spec and spec.get("click_only"))
+    if click_only and int(request.get("priority") or 1) < 32:
+        client.answer(request, file_object(file_id, size=size))
+        return
     client.answer(request, file_object(file_id, size=size, downloading=True))
     if key in DOWNLOADS:
         return
     seconds = float(os.environ.get("FAKE_DOWNLOAD_SECONDS", "1"))
     steps = 4 if size > 100_000 else 1
     seconds = seconds if size > 100_000 else min(seconds, 0.2)
+    if click_only:
+        seconds, steps = 2.0, 4
 
     def step(n: int) -> None:
         if key not in DOWNLOADS:
