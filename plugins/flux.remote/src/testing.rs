@@ -6,9 +6,11 @@
 use std::collections::BTreeMap;
 
 use flux_plugin_api::remote::{
-    Awake, Mode, Project, Response, Session, SessionState, SystemState, TranscriptItem,
+    Awake, Mode, Project, RegionState, Response, RollbackCheck, Session, SessionState, SystemState,
+    TranscriptItem, UsageLimits,
 };
 use flux_plugin_api::settings::Tone;
+use flux_plugin_api::tasks::{Task, TaskRun, TaskStarted};
 use serde_json::{Value, json};
 
 use crate::bot::Bot;
@@ -19,6 +21,10 @@ pub struct FakeHost {
     next: u64,
     /// Started requests: (id, URL, body).
     pub http: Vec<(u64, String, Vec<u8>)>,
+    /// Of them, the GETs (the files' downloads).
+    pub gets: std::collections::BTreeSet<u64>,
+    /// The plugin's data folder: a new one in the system's temporary folder.
+    pub data: String,
     pub cancelled: Vec<u64>,
     /// Started timers: (id, ms).
     pub timers: Vec<(u64, u32)>,
@@ -37,19 +43,48 @@ pub struct FakeHost {
     pub transcript: Vec<TranscriptItem>,
     pub system: SystemState,
     /// Claude's calls, as lines: "send <session> <text>", "answer <session> <request> <response>",
-    /// "interrupt <session>", "mode <session> <mode>", "new <project> <prompt>", "awake <mode>".
+    /// "interrupt <session>", "mode <session> <mode>", "new <project> <prompt>", "awake <mode>",
+    /// "diff|check|rollback <session> <turn>"; and the tasks' ("tasks mine", "tasks search
+    /// <words>", "task <key>", "run <key> <action> <project>" — [`FakeHost::fail`] isn't theirs).
     pub claude: Vec<String>,
     /// The next new session's id.
     pub new_session_id: String,
+    /// The new sessions asked for, whole.
+    pub started: Vec<NewSession>,
     /// The next Claude call fails with this.
     pub fail: Option<String>,
+    /// What `limits()` returns (none — it fails).
+    pub limits: Option<UsageLimits>,
+    /// What `region()` returns.
+    pub region: RegionState,
+    /// What `turn_diff()` returns.
+    pub diff: String,
+    /// What `check_rollback()` returns.
+    pub rollback: RollbackCheck,
+    /// The user's tasks (`my_tasks`, `search_tasks` by a word of the key or the title, `task` by
+    /// its key); none — no source (the calls fail).
+    pub tasks: Option<Vec<Task>>,
+    /// The tracker's own failure for `my_tasks` (signed out…), over `tasks`.
+    pub tasks_error: Option<String>,
+    /// What `run_task()` returns; none — a session with [`FakeHost::new_session_id`].
+    pub run: Option<Result<TaskStarted, String>>,
 }
+
+/// Each fake's own data folder.
+static DATA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Default for FakeHost {
     fn default() -> Self {
+        let data = std::env::temp_dir().join(format!(
+            "flux-remote-test-{}-{}",
+            std::process::id(),
+            DATA.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         FakeHost {
             next: 0,
             http: Vec::new(),
+            gets: Default::default(),
+            data: data.to_string_lossy().into_owned(),
             cancelled: Vec::new(),
             timers: Vec::new(),
             now: 1_795_000_000_000,
@@ -69,8 +104,26 @@ impl Default for FakeHost {
             },
             claude: Vec::new(),
             new_session_id: "11111111-2222-3333-4444-555555555555".into(),
+            started: Vec::new(),
             fail: None,
+            limits: None,
+            region: RegionState::Allowed,
+            diff: String::new(),
+            rollback: RollbackCheck {
+                files: Vec::new(),
+                changed_since: Vec::new(),
+                created: Vec::new(),
+            },
+            tasks: None,
+            tasks_error: None,
+            run: None,
         }
+    }
+}
+
+impl Drop for FakeHost {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.data);
     }
 }
 
@@ -94,11 +147,7 @@ impl FakeHost {
             .iter()
             .map(|(id, url, body)| {
                 let method = url.rsplit('/').next().unwrap_or_default().to_string();
-                (
-                    *id,
-                    method,
-                    serde_json::from_slice(body).unwrap_or(Value::Null),
-                )
+                (*id, method, params_of(body))
             })
             .collect()
     }
@@ -111,6 +160,40 @@ impl FakeHost {
             .find(|(_, name, _)| name == method)
             .map(|(id, _, params)| (id, params))
     }
+}
+
+/// A call's parameters: its JSON, or the fields of a `multipart/form-data` upload — a field as JSON
+/// when it is (numbers, buttons), the file as `{"filename", "text"}`.
+fn params_of(body: &[u8]) -> Value {
+    if let Ok(value) = serde_json::from_slice(body) {
+        return value;
+    }
+    let text = String::from_utf8_lossy(body);
+    let Some(boundary) = text.lines().next().and_then(|line| line.strip_prefix("--")) else {
+        return Value::Null;
+    };
+    let mut params = serde_json::Map::new();
+    for part in text.split(&format!("--{boundary}")) {
+        let Some((head, content)) = part.split_once("\r\n\r\n") else {
+            continue;
+        };
+        let content = content.strip_suffix("\r\n").unwrap_or(content);
+        let field = |name: &str| {
+            head.split(&format!("{name}=\""))
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .map(str::to_string)
+        };
+        let Some(name) = field("name") else {
+            continue;
+        };
+        let value = match field("filename") {
+            Some(filename) => json!({ "filename": filename, "text": content }),
+            None => serde_json::from_str(content).unwrap_or_else(|_| json!(content)),
+        };
+        params.insert(name, value);
+    }
+    Value::Object(params)
 }
 
 /// Finishes a request with Telegram's `ok` and this result.
@@ -190,6 +273,23 @@ impl Host for FakeHost {
         id
     }
 
+    fn http_post_raw(
+        &mut self,
+        url: &str,
+        _content_type: &str,
+        body: Vec<u8>,
+        timeout_ms: u32,
+    ) -> u64 {
+        self.http_post(url, body, timeout_ms)
+    }
+
+    fn http_get(&mut self, url: &str, _timeout_ms: u32) -> u64 {
+        let id = self.id();
+        self.http.push((id, url.into(), Vec::new()));
+        self.gets.insert(id);
+        id
+    }
+
     fn http_cancel(&mut self, request: u64) {
         self.cancelled.push(request);
     }
@@ -221,6 +321,10 @@ impl Host for FakeHost {
             .collect()
     }
 
+    fn data_dir(&self) -> String {
+        self.data.clone()
+    }
+
     fn load(&self, key: &str) -> Option<Value> {
         self.storage.get(key).cloned()
     }
@@ -238,6 +342,11 @@ impl Host for FakeHost {
 
     fn setting(&self, key: &str) -> Option<Value> {
         self.settings.get(key).cloned()
+    }
+
+    fn set_setting(&mut self, key: &str, value: &Value) -> Result<(), String> {
+        self.settings.insert(key.into(), value.clone());
+        Ok(())
     }
 
     fn status(&mut self, key: &str, line: Option<(&str, Tone, bool)>) {
@@ -301,12 +410,26 @@ impl Host for FakeHost {
         self.claude_call(format!("mode {session} {mode:?}"))
     }
 
+    fn rename(&mut self, session: &str, title: &str) -> Result<(), String> {
+        self.claude_call(format!("rename {session} {title}"))
+    }
+
+    fn close(&mut self, session: &str) -> Result<(), String> {
+        self.claude_call(format!("close {session}"))
+    }
+
     fn new_session(&mut self, spec: &NewSession) -> Result<String, String> {
+        let images = if spec.images.is_empty() {
+            String::new()
+        } else {
+            format!(" +{}", spec.images.join(","))
+        };
         self.claude_call(format!(
-            "new {} {}",
+            "new {} {}{images}",
             spec.project,
             spec.prompt.as_deref().unwrap_or_default()
         ))?;
+        self.started.push(spec.clone());
         Ok(self.new_session_id.clone())
     }
 
@@ -320,6 +443,77 @@ impl Host for FakeHost {
 
     fn system_status(&mut self) -> Result<SystemState, String> {
         Ok(self.system)
+    }
+
+    fn limits(&mut self) -> Result<UsageLimits, String> {
+        self.claude_call("limits".into())?;
+        self.limits.ok_or_else(|| "Claude Code isn't ready".into())
+    }
+
+    fn region(&mut self, check_again: bool) -> Result<RegionState, String> {
+        self.claude_call(format!("region {check_again}"))?;
+        Ok(self.region.clone())
+    }
+
+    fn turn_diff(&mut self, session: &str, turn: u32) -> Result<String, String> {
+        self.claude_call(format!("diff {session} {turn}"))?;
+        Ok(self.diff.clone())
+    }
+
+    fn check_rollback(&mut self, session: &str, turn: u32) -> Result<RollbackCheck, String> {
+        self.claude_call(format!("check {session} {turn}"))?;
+        Ok(self.rollback.clone())
+    }
+
+    fn rollback(&mut self, session: &str, turn: u32) -> Result<(), String> {
+        self.claude_call(format!("rollback {session} {turn}"))
+    }
+
+    fn my_tasks(&mut self) -> Result<Vec<Task>, String> {
+        self.claude.push("tasks mine".into());
+        if let Some(error) = &self.tasks_error {
+            return Err(error.clone());
+        }
+        self.tasks
+            .clone()
+            .ok_or_else(|| "No plugin gives tasks".into())
+    }
+
+    fn search_tasks(&mut self, words: &str) -> Result<Vec<Task>, String> {
+        self.claude.push(format!("tasks search {words}"));
+        let words = words.to_lowercase();
+        Ok(self
+            .tasks
+            .clone()
+            .ok_or("No plugin gives tasks")?
+            .into_iter()
+            .filter(|task| {
+                format!("{} {}", task.key, task.title)
+                    .to_lowercase()
+                    .contains(&words)
+            })
+            .collect())
+    }
+
+    fn task(&mut self, key: &str) -> Result<Option<Task>, String> {
+        self.claude.push(format!("task {key}"));
+        Ok(self
+            .tasks
+            .clone()
+            .ok_or("No plugin gives tasks")?
+            .into_iter()
+            .find(|task| task.key == key))
+    }
+
+    fn run_task(&mut self, run: &TaskRun) -> Result<TaskStarted, String> {
+        self.claude
+            .push(format!("run {} {} {}", run.key, run.action, run.project));
+        self.run.clone().unwrap_or_else(|| {
+            Ok(TaskStarted {
+                session: self.new_session_id.clone(),
+                notes: Vec::new(),
+            })
+        })
     }
 }
 
@@ -351,6 +545,7 @@ pub const SHORT_TIMER_MS: u32 = 3_000;
 pub struct Telegram {
     answered: std::collections::BTreeSet<u64>,
     messages: i64,
+    topics: i64,
 }
 
 impl Telegram {
@@ -360,11 +555,26 @@ impl Telegram {
     pub fn flush(&mut self, bot: &mut Bot, host: &mut FakeHost) -> Vec<(String, Value)> {
         let mut out = Vec::new();
         loop {
-            let Some((id, method, params)) = host
-                .tg_calls()
-                .into_iter()
-                .find(|(id, method, _)| method != "getUpdates" && !self.answered.contains(id))
-            else {
+            // A file's download: its bytes are "bytes of <its path>".
+            if let Some((id, url, _)) = host
+                .http
+                .iter()
+                .find(|(id, _, _)| host.gets.contains(id) && !self.answered.contains(id))
+                .cloned()
+            {
+                self.answered.insert(id);
+                let path = url.split_once("/file/bot").map_or("", |(_, rest)| {
+                    rest.split_once('/').map_or("", |(_, path)| path)
+                });
+                bot.on_http_head(id, 200);
+                bot.on_http_body(id, format!("bytes of {path}").as_bytes());
+                bot.on_http_done(host, id, None);
+                out.push(("GET".into(), json!({ "path": path })));
+                continue;
+            }
+            let Some((id, method, params)) = host.tg_calls().into_iter().find(|(id, method, _)| {
+                method != "getUpdates" && !self.answered.contains(id) && !host.gets.contains(id)
+            }) else {
                 let Some(&(timer, ms)) = host.timers.iter().find(|(_, ms)| *ms <= SHORT_TIMER_MS)
                 else {
                     break;
@@ -376,11 +586,26 @@ impl Telegram {
             };
             self.answered.insert(id);
             let result = match method.as_str() {
-                "sendMessage" | "sendRichMessage" | "editMessageText" => {
+                "sendMessage" | "sendRichMessage" | "editMessageText" | "sendDocument" => {
                     self.messages += 1;
                     let id = params["message_id"].as_i64().unwrap_or(100 + self.messages);
                     json!({ "message_id": id, "chat": { "id": OWNER, "type": "private" },
                             "message_thread_id": params["message_thread_id"] })
+                }
+                // A photo's file is a JPEG, a document's keeps no name.
+                "getFile" => {
+                    let file = params["file_id"].as_str().unwrap_or_default();
+                    let path = if file.starts_with("photo") {
+                        format!("photos/{file}.jpg")
+                    } else {
+                        format!("documents/{file}")
+                    };
+                    json!({ "file_id": file, "file_size": 1000, "file_path": path })
+                }
+                // Topics 800, 801… in the order they were asked for.
+                "createForumTopic" => {
+                    self.topics += 1;
+                    json!({ "message_thread_id": 799 + self.topics, "name": params["name"] })
                 }
                 _ => json!(true),
             };
@@ -395,7 +620,9 @@ impl Telegram {
         let (id, method, _) = host
             .tg_calls()
             .into_iter()
-            .find(|(id, method, _)| method != "getUpdates" && !self.answered.contains(id))
+            .find(|(id, method, _)| {
+                method != "getUpdates" && !self.answered.contains(id) && !host.gets.contains(id)
+            })
             .expect("a call waits");
         self.answered.insert(id);
         reply_error(bot, host, id, 400, description);
@@ -403,11 +630,14 @@ impl Telegram {
     }
 }
 
-/// The owner's message in a topic (none — outside topics).
+/// [`FakeHost`]'s clock at the start, in seconds: the date of the user's messages.
+pub const NOW_S: i64 = 1_795_000_000;
+
+/// The owner's message in a topic (none — outside topics), sent at [`NOW_S`].
 pub fn user_message(update: i64, thread: Option<i64>, text: &str) -> crate::telegram::Update {
     let mut message = json!({
         "message_id": 10_000 + update, "from": { "id": OWNER, "is_bot": false, "first_name": "Egor" },
-        "chat": { "id": OWNER, "type": "private" }, "date": 1, "text": text,
+        "chat": { "id": OWNER, "type": "private" }, "date": NOW_S, "text": text,
     });
     if let Some(thread) = thread {
         message["message_thread_id"] = json!(thread);
@@ -458,6 +688,39 @@ pub fn bot_with_topic(host: &mut FakeHost, thread: i64, session: &str) -> Bot {
         session: session.into(),
         project: "/work/project".into(),
         title: String::new(),
+        head: None,
     });
     bot
+}
+
+/// The data of the button whose text has `text`, on a call that carries buttons.
+pub fn button(call: &Value, text: &str) -> String {
+    call["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| row.as_array().unwrap())
+        .find(|button| button["text"].as_str().unwrap().contains(text))
+        .unwrap_or_else(|| panic!("no «{text}» in {call}"))["callback_data"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The buttons' texts of a call, row by row.
+pub fn buttons(call: &Value) -> Vec<Vec<String>> {
+    call["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    row.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|button| button["text"].as_str().unwrap().to_string())
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

@@ -6,7 +6,6 @@
 //! no second one: the topic gets a note instead. The bot not bound yet — a Flux notification says
 //! where to connect it.
 
-use flux_plugin_api::remote::Mode;
 use serde_json::Value;
 
 use crate::bot::Bot;
@@ -14,9 +13,9 @@ use crate::general::{folder_name, title_of};
 use crate::host::Host;
 use crate::render::{RICH_LIMIT, cut, escape};
 use crate::store::Topic;
-use crate::telegram::{self, CallbackQuery, ForumTopic, TgError};
+use crate::telegram::{self, CallbackQuery, ForumTopic, Message, TgError};
 use crate::transport::{Lane, Module, Purpose};
-use crate::{awake, general, requests};
+use crate::{awake, general, newchat, requests};
 
 /// The manifest's `[[claude-actions]]` id.
 pub const ACTION: &str = "continue";
@@ -83,14 +82,12 @@ fn opened(bot: &mut Bot, host: &mut dyn Host, session: &str, topic: ForumTopic) 
         session: session.to_string(),
         project: found.project.clone(),
         title: topic.name,
+        head: None,
     });
     bot.save(host);
     let lane = Lane::Topic(thread);
-    let first = format!(
-        "📁 <b>{}</b> · {}",
-        escape(&folder_name(&found.project)),
-        escape(&mode_name(host, found.mode))
-    );
+    let first = newchat::head_html(host, &folder_name(&found.project), found.mode);
+    newchat::head_shows(bot, session, found.mode);
     bot.call(
         host,
         telegram::send_message(chat, Some(thread), &first, None),
@@ -118,9 +115,9 @@ fn opened(bot: &mut Bot, host: &mut dyn Host, session: &str, topic: ForumTopic) 
         lane,
         Purpose::new(Module::Handoff, format!("hint:{thread}")),
     );
-    if found.request.is_some() {
-        requests::repost(bot, host, session);
-    }
+    // The request it waits on comes into the topic (with the words «Другое…» or «Доработать» in
+    // «Общее» asked for).
+    requests::repost(bot, host, session);
     general::sessions_changed(bot, host);
     awake::update(bot, host);
 }
@@ -135,22 +132,21 @@ fn last_answer(host: &mut dyn Host, session: &str) -> Option<String> {
         .map(|item| item.text)
 }
 
-/// A permission mode as Flux names it.
-pub fn mode_name(host: &dyn Host, mode: Mode) -> String {
-    host.tr(match mode {
-        Mode::Ask => "Ask",
-        Mode::AcceptEdits => "Accept edits",
-        Mode::Plan => "Plan",
-        Mode::Bypass => "No checks",
-        Mode::Other => "Own mode",
-    })
+/// The key of a session's «Продолжить здесь» button ([`crate::keys::Kind::Handoff`]): the
+/// requests in «Общее» and `/sessions` put it on their buttons, [`on_press`] finds the session by
+/// it ([`session_by_key`]). The same session has the same key, across restarts too (a hash of its
+/// id).
+pub fn key_for(session: &str) -> u64 {
+    key_of(session)
 }
 
-/// The key of a session's «Продолжить здесь» button ([`crate::keys::Kind::Handoff`]): agent B's
-/// requests in «Общее» put it on their buttons, [`on_press`] finds the session by it. The same
-/// session has the same key, across restarts too (a hash of its id).
-pub fn key_for(_bot: &mut Bot, session: &str) -> u64 {
-    key_of(session)
+/// The session a button's key names: one Flux has, or one with a topic.
+pub fn session_by_key(bot: &Bot, key: u64) -> Option<String> {
+    bot.sessions
+        .keys()
+        .chain(bot.store.topics.iter().map(|topic| &topic.session))
+        .find(|session| key_of(session) == key)
+        .cloned()
 }
 
 /// FNV-1a of the session's id, 48 bits: short in the button's data.
@@ -171,13 +167,7 @@ pub fn on_press(
     key: u64,
     _choice: &str,
 ) {
-    let session = bot
-        .sessions
-        .keys()
-        .cloned()
-        .chain(bot.store.topics.iter().map(|topic| topic.session.clone()))
-        .find(|session| key_of(session) == key);
-    match session {
+    match session_by_key(bot, key) {
         Some(session) => {
             bot.answer_press(host, query, None);
             continue_in_telegram(bot, host, &session);
@@ -204,6 +194,15 @@ pub fn on_answer(bot: &mut Bot, host: &mut dyn Host, tag: &str, result: Result<V
                 Err(err) => host.log(&format!("Couldn't make the session's topic: {err:?}")),
             }
         }
+        // The topic's first message: it follows the session's mode.
+        "first" => match (
+            result.and_then(telegram::result::<Message>),
+            first.parse::<i64>(),
+        ) {
+            (Ok(message), Ok(thread)) => newchat::head_sent(bot, host, thread, message.message_id),
+            (Err(err), _) => host.log(&format!("Telegram refused the handoff's first: {err:?}")),
+            _ => {}
+        },
         // The note in a topic that is gone: the session gets a new one.
         "note" => {
             if let Err(err) = result
@@ -340,6 +339,7 @@ mod tests {
             session: "s1".into(),
             project: "/p/web".into(),
             title: "web".into(),
+            head: None,
         });
         continue_in_telegram(&mut bot, &mut host, "s1");
         let (id, _) = host.last_call("sendMessage").unwrap();
@@ -376,8 +376,8 @@ mod tests {
         );
         found.title = "Migrations".into();
         bot.sessions.insert(found.id.clone(), found.clone());
-        let key = key_for(&mut bot, &found.id);
-        assert_eq!(key, key_for(&mut bot, &found.id), "the same key each time");
+        let key = key_for(&found.id);
+        assert_eq!(key, key_for(&found.id), "the same key each time");
         let data = keys::encode(Kind::Handoff, key, "here");
         assert!(data.len() <= 24, "{data}");
         let query = |data: String| crate::telegram::CallbackQuery {

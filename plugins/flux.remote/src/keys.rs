@@ -14,6 +14,16 @@ pub enum Kind {
     General,
     /// [`crate::handoff`]: «Продолжить здесь».
     Handoff,
+    /// [`crate::commands`]: the buttons of `/sessions`, `/stop`, `/mode`.
+    Command,
+    /// [`crate::menu`]: the screens of `/settings`.
+    Menu,
+    /// [`crate::late`]: «Выполнить» / «Не выполнять» under messages that came while Flux was closed.
+    Late,
+    /// [`crate::turn`]: «Дифф» and «Откатить» under a turn's «Готово» (the key is the turn).
+    Turn,
+    /// [`crate::task`]: «Из задачи» in a new chat.
+    Task,
     /// A button that only shows something (an answered request's result).
     Noop,
 }
@@ -25,6 +35,11 @@ impl Kind {
             Kind::NewChat => 'n',
             Kind::General => 'g',
             Kind::Handoff => 'h',
+            Kind::Command => 'c',
+            Kind::Menu => 'm',
+            Kind::Late => 'l',
+            Kind::Turn => 'd',
+            Kind::Task => 't',
             Kind::Noop => 'x',
         }
     }
@@ -35,6 +50,11 @@ impl Kind {
             "n" => Kind::NewChat,
             "g" => Kind::General,
             "h" => Kind::Handoff,
+            "c" => Kind::Command,
+            "m" => Kind::Menu,
+            "l" => Kind::Late,
+            "d" => Kind::Turn,
+            "t" => Kind::Task,
             "x" => Kind::Noop,
             _ => return None,
         })

@@ -185,6 +185,9 @@ pub struct Message {
     pub photo: Option<Vec<PhotoSize>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document: Option<Document>,
+    /// An album: its photos and files come as messages with the same id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_group_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_message: Option<Box<Message>>,
 }
@@ -283,6 +286,21 @@ fn number_or_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D
     }
 }
 
+/// A file the user sent, as `getFile` tells of it: its bytes are at
+/// `<API>/file/bot<token>/<file_path>` for an hour ([`crate::transport::Transport::download`]).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct TgFile {
+    pub file_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+    /// "photos/file_12.jpg"; none — the file can't be downloaded (over 20 MB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+}
+
+/// The most a bot downloads (`getFile`).
+pub const MAX_DOWNLOAD: u64 = 20 * 1024 * 1024;
+
 /// The bot itself (`getMe`).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Me {
@@ -356,16 +374,32 @@ fn markup(keyboard: &Keyboard) -> Value {
 /// The colors Telegram allows for a topic's icon.
 pub const COLORS: [i64; 6] = [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F];
 
-/// A call: the method and its parameters.
+/// A call: the method and its parameters, and the file it uploads.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
     pub method: &'static str,
     pub params: Value,
+    /// A file: the call goes as `multipart/form-data` ([`multipart`]) instead of JSON.
+    pub upload: Option<Upload>,
+}
+
+/// A file a call uploads (`sendDocument`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Upload {
+    /// The parameter that carries it: "document".
+    pub field: &'static str,
+    /// The file's name as the chat shows it.
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 impl Call {
     fn new(method: &'static str, params: Value) -> Self {
-        Call { method, params }
+        Call {
+            method,
+            params,
+            upload: None,
+        }
     }
 
     fn with(mut self, key: &str, value: Value) -> Self {
@@ -388,6 +422,79 @@ impl Call {
             None => self,
         }
     }
+
+    /// The message answers one of the user's (it shows quoted above); sent anyway when that one
+    /// is gone.
+    pub fn reply_to(self, message: i64) -> Self {
+        self.with(
+            "reply_parameters",
+            json!({ "message_id": message, "allow_sending_without_reply": true }),
+        )
+    }
+
+    /// Without a sound or a banner on the phone.
+    pub fn silent(self) -> Self {
+        self.with("disable_notification", json!(true))
+    }
+}
+
+/// Where a file the user sent can be downloaded from ([`TgFile`]).
+pub fn get_file(file: &str) -> Call {
+    Call::new("getFile", json!({ "file_id": file }))
+}
+
+/// A file in a topic (`sendDocument`) with an HTML caption: an upload ([`multipart`]).
+pub fn send_document(
+    chat: i64,
+    thread: Option<i64>,
+    name: &str,
+    bytes: Vec<u8>,
+    caption: &str,
+) -> Call {
+    let mut call = Call::new(
+        "sendDocument",
+        json!({ "chat_id": chat, "caption": caption, "parse_mode": "HTML" }),
+    )
+    .in_thread(thread);
+    call.upload = Some(Upload {
+        field: "document",
+        name: name.into(),
+        bytes,
+    });
+    call
+}
+
+/// A call with a file as `multipart/form-data`: (its content type, its body); none — the call
+/// uploads nothing (it goes as JSON). Each parameter is a field — a string as it is, anything else
+/// as JSON (Telegram reads `reply_markup` so) — and the file is the last one.
+pub fn multipart(call: &Call, boundary: &str) -> Option<(String, Vec<u8>)> {
+    let upload = call.upload.as_ref()?;
+    let mut body = Vec::new();
+    if let Value::Object(params) = &call.params {
+        for (key, value) in params {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{text}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+    }
+    let name = upload.name.replace(['"', '\r', '\n', '\\'], "_");
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+            upload.field
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&upload.bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Some((format!("multipart/form-data; boundary={boundary}"), body))
 }
 
 pub fn get_me() -> Call {
@@ -514,14 +621,31 @@ pub fn delete_topic(chat: i64, thread: i64) -> Call {
     )
 }
 
-/// The bot's commands in the «/» menu: (command, description). Part 3.
-#[allow(dead_code)]
-pub fn set_commands(commands: &[(&str, &str)]) -> Call {
+pub fn delete_message(chat: i64, message: i64) -> Call {
+    Call::new(
+        "deleteMessage",
+        json!({ "chat_id": chat, "message_id": message }),
+    )
+}
+
+/// The bot's commands in the «/» menu of one chat (the owner's): (command, description).
+pub fn set_commands(chat: i64, commands: &[(&str, String)]) -> Call {
     let commands: Vec<Value> = commands
         .iter()
         .map(|(command, description)| json!({ "command": command, "description": description }))
         .collect();
-    Call::new("setMyCommands", json!({ "commands": commands }))
+    Call::new(
+        "setMyCommands",
+        json!({ "commands": commands, "scope": { "type": "chat", "chat_id": chat } }),
+    )
+}
+
+/// The chat's «/» menu goes (the bot was unbound).
+pub fn delete_commands(chat: i64) -> Call {
+    Call::new(
+        "deleteMyCommands",
+        json!({ "scope": { "type": "chat", "chat_id": chat } }),
+    )
 }
 
 /// A topic's name: 1–128 characters.
@@ -601,5 +725,20 @@ mod tests {
             json!({"inline_keyboard": []})
         );
         assert_eq!(topic_name("  "), "…");
+    }
+
+    #[test]
+    fn a_document_goes_as_multipart() {
+        let call = send_document(1, Some(7), "fix-turn-2.diff", b"+a\n".to_vec(), "Turn 2");
+        assert!(multipart(&send_message(1, None, "x", None), "B").is_none());
+        let (content_type, body) = multipart(&call, "BOUND").unwrap();
+        assert_eq!(content_type, "multipart/form-data; boundary=BOUND");
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.contains("name=\"chat_id\"\r\n\r\n1\r\n"));
+        assert!(body.contains("name=\"message_thread_id\"\r\n\r\n7\r\n"));
+        assert!(body.contains("name=\"caption\"\r\n\r\nTurn 2\r\n"));
+        assert!(body.contains(
+            "name=\"document\"; filename=\"fix-turn-2.diff\"\r\nContent-Type: application/octet-stream\r\n\r\n+a\n\r\n--BOUND--\r\n"
+        ));
     }
 }

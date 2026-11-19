@@ -10,9 +10,11 @@
 //!
 //! Where: in the session's topic; a session without one — only while the Mac is locked
 //! (`SystemState::screen_locked`, [`on_lock_changed`]), in «Общее» with the session's name and
-//! «Продолжить здесь» ([`crate::handoff`]). Words can't be asked for there («Общее» is the
-//! console's), so its cards have buttons only. The buttons' data names a short key
-//! ([`crate::keys`]) this module maps to the card: the session, the request, where it is.
+//! «Продолжить здесь» ([`crate::handoff`]). Words aren't written there («Общее» is the console's):
+//! «Other…» and «Keep planning» on its cards continue the session in a topic of its own, and the
+//! topic's card waits for the words, as if pressed there (the questions answered in «Общее» go
+//! along). The buttons' data names a short key ([`crate::keys`]) this module maps to the card: the
+//! session, the request, where it is.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,6 +47,9 @@ pub struct State {
     waiting: BTreeMap<String, Request>,
     /// Topics whose next message is a card's words («Other…», «Keep planning»): thread → key.
     words: BTreeMap<i64, u64>,
+    /// «Other…» or «Keep planning» pressed in «Общее»: the session's topic is on its way, its card
+    /// will wait for the words — session → (the request, the prompt).
+    words_after_handoff: BTreeMap<String, (String, &'static str)>,
 }
 
 /// A request on a card.
@@ -72,7 +77,15 @@ pub fn on_request(bot: &mut Bot, host: &mut dyn Host, session: &str, request: &R
         .map(|topic| topic.thread)
     {
         if !shown(bot, session, &request.id, false) {
-            post(bot, host, session, request, thread, false);
+            post(
+                bot,
+                host,
+                session,
+                request,
+                thread,
+                false,
+                Progress::default(),
+            );
         }
     } else if bot.system.screen_locked {
         to_general(bot, host, session, request);
@@ -272,6 +285,20 @@ pub fn repost(bot: &mut Bot, host: &mut dyn Host, session: &str) {
         .filter(|(_, card)| card.session == session && card.general)
         .map(|(key, _)| *key)
         .collect();
+    // The questions answered in «Общее» go along.
+    let progress = copies
+        .iter()
+        .filter_map(|key| bot.requests.cards.get(key))
+        .map(|card| {
+            (
+                card.request.id.clone(),
+                Progress {
+                    question: card.question,
+                    answers: card.answers.clone(),
+                },
+            )
+        })
+        .next();
     let result = format!("→ {}", host.tr("Continued in the topic"));
     for key in copies {
         finish(bot, host, key, &result);
@@ -281,11 +308,33 @@ pub fn repost(bot: &mut Bot, host: &mut dyn Host, session: &str) {
             .get(session)
             .and_then(|session| session.request.clone())
     });
-    if let Some(request) = request
-        && !shown(bot, session, &request.id, false)
-    {
-        post(bot, host, session, &request, thread, false);
+    let Some(request) = request else {
+        bot.requests.words_after_handoff.remove(session);
+        return;
+    };
+    if !shown(bot, session, &request.id, false) {
+        let progress = progress
+            .filter(|(id, _)| *id == request.id)
+            .map(|(_, progress)| progress)
+            .unwrap_or_default();
+        post(bot, host, session, &request, thread, false, progress);
     }
+    // «Other…» or «Keep planning» pressed in «Общее»: the topic's card waits for the words.
+    if let Some((id, prompt)) = bot.requests.words_after_handoff.remove(session)
+        && id == request.id
+        && let Some(key) = topic_card(bot, session, &id)
+    {
+        ask_words(bot, host, key, prompt);
+    }
+}
+
+/// The card of a session's request in its topic.
+fn topic_card(bot: &Bot, session: &str, request: &str) -> Option<u64> {
+    bot.requests
+        .cards
+        .iter()
+        .find(|(_, card)| card.session == session && card.request.id == request && !card.general)
+        .map(|(key, _)| *key)
 }
 
 pub fn on_answer(bot: &mut Bot, host: &mut dyn Host, tag: &str, result: Result<Value, TgError>) {
@@ -334,8 +383,23 @@ fn to_general(bot: &mut Bot, host: &mut dyn Host, session: &str, request: &Reque
         return;
     };
     if !shown(bot, session, &request.id, true) {
-        post(bot, host, session, request, general, true);
+        post(
+            bot,
+            host,
+            session,
+            request,
+            general,
+            true,
+            Progress::default(),
+        );
     }
+}
+
+/// Claude's questions answered so far: the one shown now, the answers before it.
+#[derive(Default)]
+struct Progress {
+    question: usize,
+    answers: Vec<Vec<String>>,
 }
 
 fn post(
@@ -345,6 +409,7 @@ fn post(
     request: &Request,
     thread: i64,
     general: bool,
+    progress: Progress,
 ) {
     bot.requests.last_key = (bot.requests.last_key + 1).max(host.now_ms() % 1_000_000_000_000);
     let key = bot.requests.last_key;
@@ -356,8 +421,8 @@ fn post(
             thread,
             general,
             message: None,
-            question: 0,
-            answers: Vec::new(),
+            question: progress.question,
+            answers: progress.answers,
             picked: BTreeSet::new(),
         },
     );
@@ -377,7 +442,7 @@ fn send_card(bot: &mut Bot, host: &mut dyn Host, key: u64, rich: bool) {
     else {
         return;
     };
-    let handoff = general.then(|| handoff::key_for(bot, &session));
+    let handoff = general.then(|| handoff::key_for(&session));
     let Some(card) = bot.requests.cards.get(&key) else {
         return;
     };
@@ -582,18 +647,14 @@ fn card_keyboard(host: &dyn Host, key: u64, card: &Card) -> Keyboard {
             if question.multi_select {
                 rows.push(vec![Button::press(&host.tr("Done"), data("ok")).primary()]);
             }
-            if !card.general {
-                rows.push(vec![Button::press(&host.tr("Other…"), data("x"))]);
-            }
+            rows.push(vec![Button::press(&host.tr("Other…"), data("x"))]);
         }
         RequestKind::Plan(_) => {
             rows.push(vec![
                 Button::press(&host.tr("Run, accept edits"), data("p1")).primary(),
             ]);
             rows.push(vec![Button::press(&host.tr("Run, ask"), data("p0"))]);
-            if !card.general {
-                rows.push(vec![Button::press(&host.tr("Keep planning"), data("pk"))]);
-            }
+            rows.push(vec![Button::press(&host.tr("Keep planning"), data("pk"))]);
         }
     }
     rows
@@ -742,12 +803,35 @@ fn toggle(bot: &mut Bot, host: &mut dyn Host, key: u64, index: usize) {
     );
 }
 
-/// «Other…», «Keep planning»: the topic's next message is the card's words.
-fn ask_words(bot: &mut Bot, host: &mut dyn Host, key: u64, prompt: &str) {
+/// «Other…», «Keep planning»: the topic's next message is the card's words. Pressed in «Общее» —
+/// the session continues in its topic first ([`handoff::continue_in_telegram`]), whose card then
+/// waits for them ([`repost`]).
+fn ask_words(bot: &mut Bot, host: &mut dyn Host, key: u64, prompt: &'static str) {
     let Some(card) = bot.requests.cards.get(&key) else {
         return;
     };
     if card.general {
+        let (session, request) = (card.session.clone(), card.request.id.clone());
+        if bot.store.topic_by_session(&session).is_none() {
+            bot.requests
+                .words_after_handoff
+                .insert(session.clone(), (request, prompt));
+            handoff::continue_in_telegram(bot, host, &session);
+            return;
+        }
+        // The session has its topic already: its card waits for the words there.
+        bot.requests
+            .words_after_handoff
+            .insert(session.clone(), (request.clone(), prompt));
+        match topic_card(bot, &session, &request) {
+            Some(topic_key) => {
+                bot.requests.words_after_handoff.remove(&session);
+                let result = format!("→ {}", host.tr("Continued in the topic"));
+                finish(bot, host, key, &result);
+                ask_words(bot, host, topic_key, prompt);
+            }
+            None => repost(bot, host, &session),
+        }
         return;
     }
     let thread = card.thread;
@@ -1073,6 +1157,136 @@ mod tests {
         );
         let calls = tg.flush(&mut bot, &mut host);
         assert_eq!(inert_text(&calls[1].1), "✓ Allowed");
+    }
+
+    #[test]
+    fn other_and_keep_planning_in_general_continue_in_the_topic() {
+        let mut host = FakeHost::default();
+        let mut bot = bot_with_topic(&mut host, 77, "s1");
+        let mut tg = Telegram::default();
+        let mut other = session("s2", "/work/project", SessionState::Waiting);
+        other.title = "Migrations".into();
+        bot.sessions.insert("s2".into(), other);
+        let questions = vec![
+            question("What about the old login?", &["Keep", "Remove"], false),
+            question("Where?", &["Here", "There"], false),
+        ];
+        bot.on_claude(
+            &mut host,
+            ClaudeEvent::Request(
+                "s2".into(),
+                Request {
+                    id: "q1".into(),
+                    kind: RequestKind::Questions(questions),
+                },
+            ),
+        );
+        bot.on_claude(&mut host, ClaudeEvent::System(SystemEvent::ScreenLocked));
+        let calls = tg.flush(&mut bot, &mut host);
+        let card = calls
+            .iter()
+            .find(|(method, _)| method == "sendMessage")
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(card["message_thread_id"], GENERAL);
+        bot.on_update(&mut host, press(2, 101, GENERAL, &button(&card, "Keep")));
+        let calls = tg.flush(&mut bot, &mut host);
+        let second = calls
+            .iter()
+            .find(|(method, _)| method == "sendMessage")
+            .unwrap()
+            .1
+            .clone();
+        assert!(second["text"].as_str().unwrap().contains("2/2\nWhere?"));
+        // «Other…» in «Общее»: the session gets its topic, the card waits for the words there.
+        let shown_in_general = |bot: &Bot| {
+            bot.requests
+                .cards
+                .values()
+                .find(|card| card.general)
+                .and_then(|card| card.message)
+                .unwrap()
+        };
+        let pressed = shown_in_general(&bot);
+        bot.on_update(
+            &mut host,
+            press(3, pressed, GENERAL, &button(&second, "Other")),
+        );
+        let calls = tg.flush(&mut bot, &mut host);
+        let topic = bot.store.topic_by_session("s2").unwrap().thread;
+        assert_eq!(topic, 800);
+        let in_topic: Vec<&Value> = calls
+            .iter()
+            .filter(|(_, params)| params["message_thread_id"] == topic)
+            .map(|(_, params)| params)
+            .collect();
+        let texts: Vec<&str> = in_topic
+            .iter()
+            .map(|params| params["text"].as_str().unwrap_or_default())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("2/2\nWhere?")),
+            "the question goes on where it was: {texts:?}"
+        );
+        assert_eq!(texts.last().unwrap(), &"Write the answer in one message.");
+        assert!(
+            calls
+                .iter()
+                .any(|(method, params)| method == "editMessageReplyMarkup"
+                    && inert_text(params) == "→ Continued in the topic")
+        );
+        bot.on_update(&mut host, user_message(4, Some(topic), "Behind a flag"));
+        assert_eq!(
+            host.claude.last().unwrap(),
+            "answer s2 q1 Response::Answers([[\"Keep\"], [\"Behind a flag\"]])"
+        );
+        // The plan's «Keep planning» the same way (the session has its topic now).
+        bot.on_claude(
+            &mut host,
+            ClaudeEvent::Request(
+                "s3".into(),
+                Request {
+                    id: "p1".into(),
+                    kind: RequestKind::Plan("1. Do it".into()),
+                },
+            ),
+        );
+        bot.sessions.insert(
+            "s3".into(),
+            session("s3", "/work/api", SessionState::Waiting),
+        );
+        let calls = tg.flush(&mut bot, &mut host);
+        let plan = calls
+            .iter()
+            .find(|(_, params)| params["message_thread_id"] == GENERAL)
+            .unwrap()
+            .1
+            .clone();
+        bot.on_update(
+            &mut host,
+            press(
+                5,
+                shown_in_general(&bot),
+                GENERAL,
+                &button(&plan, "Keep planning"),
+            ),
+        );
+        let calls = tg.flush(&mut bot, &mut host);
+        let topic = bot.store.topic_by_session("s3").unwrap().thread;
+        assert_eq!(
+            calls
+                .iter()
+                .rfind(|(_, params)| params["message_thread_id"] == topic)
+                .unwrap()
+                .1["text"],
+            "Write what to change in the plan, in one message."
+        );
+        bot.on_update(&mut host, user_message(6, Some(topic), "Shorter"));
+        assert_eq!(
+            host.claude.last().unwrap(),
+            "answer s3 p1 Response::KeepPlanning(\"Shorter\")"
+        );
     }
 
     #[test]

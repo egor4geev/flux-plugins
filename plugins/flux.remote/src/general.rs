@@ -5,15 +5,26 @@
 //! and while the computer is locked, per session that waits for an answer (its questions come
 //! here then, [`crate::requests`]). A message the user writes here is answered with how to start
 //! a session. «Общее» gone (`TOPIC_ID_INVALID`) — it is made again.
+//!
+//! What happens to the computer and to Claude itself is told here too:
+//! - the computer goes to sleep — «💤 …» at once, ahead of the queue (Flux holds the sleep about
+//!   two seconds on macOS; Windows doesn't wait); on waking the note becomes one line, «💤 slept
+//!   23:10–07:45» (an edit: no sound), or, when it never went, «☀️ woke up» without a sound
+//!   ([`on_sleep`]);
+//! - Claude is blocked in this country — Flux's sentence and «Проверить снова», once while it
+//!   lasts (the message is kept, [`crate::store::Store::region_message`]); allowed again — the same
+//!   message says Claude works again ([`on_region`], checked on each connection too);
+//! - the subscription's limit is reached — one line with when it resets ([`on_limits`]).
 
-use flux_plugin_api::remote::{Mode, Session, SessionState};
+use flux_plugin_api::remote::{Mode, RegionState, Session, SessionState, UsageLimits};
 use flux_plugin_api::system::LocalTime;
 use serde_json::Value;
 
 use crate::bot::Bot;
 use crate::host::{Host, trf};
+use crate::keys::{self, Kind};
 use crate::render::escape;
-use crate::telegram::{self, CallbackQuery, ForumTopic, Message, TgError};
+use crate::telegram::{self, Button, CallbackQuery, ForumTopic, Message, TgError};
 use crate::transport::{Lane, Module, Purpose};
 
 /// The status message's lane: its newest text wins.
@@ -27,6 +38,21 @@ pub struct State {
     sending: bool,
     /// The status message's text as sent last (or on its way).
     shown: Option<String>,
+    /// The computer went to sleep: the note's message and when.
+    sleep: Option<Sleep>,
+    /// The country's block message is on its way.
+    region_sending: bool,
+    /// The limit's line was told (until Claude goes again).
+    rejected: bool,
+}
+
+/// The note of the computer's sleep.
+struct Sleep {
+    /// When it went to sleep, and woke (ms since 1970).
+    since: u64,
+    woke: Option<u64>,
+    /// The note, once Telegram took it.
+    message: Option<i64>,
 }
 
 /// «Общее» exists (made once after the binding, and again when it is gone).
@@ -47,11 +73,13 @@ pub fn ensure(bot: &mut Bot, host: &mut dyn Host) {
     );
 }
 
-/// The bot was just bound: «Общее» greets the owner (with the status message after).
+/// The bot was just bound: «Общее» greets the owner (with the status message after, and the
+/// country's block if Claude is blocked).
 pub fn bound(bot: &mut Bot, host: &mut dyn Host) {
     if bot.store.general.is_some() {
         welcome(bot, host);
         sessions_changed(bot, host);
+        check_region(bot, host);
     } else {
         ensure(bot, host);
     }
@@ -87,13 +115,55 @@ pub fn on_answer(bot: &mut Bot, host: &mut dyn Host, tag: &str, result: Result<V
                 Ok(topic) if bot.chat().is_some() => {
                     bot.store.general = Some(topic.message_thread_id);
                     bot.store.status_message = None;
+                    bot.store.region_message = None;
                     bot.general.shown = None;
                     bot.save(host);
                     welcome(bot, host);
                     sessions_changed(bot, host);
+                    check_region(bot, host);
                 }
                 Ok(_) => {}
                 Err(err) => host.log(&format!("Couldn't make «General»: {err:?}")),
+            }
+        }
+        "sleep" => match result.and_then(telegram::result::<Message>) {
+            Ok(message) => {
+                let woke = bot.general.sleep.as_ref().and_then(|sleep| sleep.woke);
+                if let Some(sleep) = bot.general.sleep.as_mut() {
+                    sleep.message = Some(message.message_id);
+                }
+                if let Some(woke) = woke
+                    && let Some(sleep) = bot.general.sleep.take()
+                {
+                    slept(bot, host, &sleep, woke);
+                }
+            }
+            Err(err) => {
+                // It never went: on waking, «☀️» says the computer is back.
+                if bot
+                    .general
+                    .sleep
+                    .take()
+                    .is_some_and(|sleep| sleep.woke.is_some())
+                {
+                    woke(bot, host);
+                }
+                failed(bot, host, thread, &err);
+            }
+        },
+        "region" => {
+            bot.general.region_sending = false;
+            match result.and_then(telegram::result::<Message>) {
+                Ok(message) if thread == bot.store.general => {
+                    bot.store.region_message = Some(message.message_id);
+                    bot.save(host);
+                    // Allowed again while it was on its way.
+                    if let Ok(RegionState::Allowed) = host.region(false) {
+                        on_region(bot, host, &RegionState::Allowed);
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => failed(bot, host, thread, &err),
             }
         }
         "status" => {
@@ -125,6 +195,7 @@ fn failed(bot: &mut Bot, host: &mut dyn Host, thread: Option<i64>, err: &TgError
     if err.topic_gone() {
         bot.store.general = None;
         bot.store.status_message = None;
+        bot.store.region_message = None;
         bot.general.shown = None;
         bot.save(host);
         ensure(bot, host);
@@ -237,7 +308,11 @@ pub fn folder_name(path: &str) -> String {
 
 /// The session's line in the status message: "🔵 Fix the parser — working" (HTML).
 pub fn status_line(host: &dyn Host, session: &Session, title: &str) -> String {
-    let title = escape(title);
+    session_line(host, session, &escape(title))
+}
+
+/// A session's state after its label (HTML, escaped already): "🔵 <b>Fix</b> · flux — working".
+pub fn session_line(host: &dyn Host, session: &Session, title: &str) -> String {
     if waits(session) {
         format!("🟡 {}", trf(host, "{0} — waiting for an answer", &[&title]))
     } else {
@@ -265,15 +340,187 @@ pub fn on_message(bot: &mut Bot, host: &mut dyn Host, _message: &Message) {
     note(bot, host, &text);
 }
 
-/// A press of one of «Общее»'s own buttons (none yet: the requests' are agent B's).
+/// A press of one of «Общее»'s own buttons: «Проверить снова» under the country's block.
 pub fn on_press(
     bot: &mut Bot,
     host: &mut dyn Host,
     query: &CallbackQuery,
     _key: u64,
-    _choice: &str,
+    choice: &str,
 ) {
-    bot.answer_press(host, query, None);
+    if choice != "region" {
+        bot.answer_press(host, query, None);
+        return;
+    }
+    match host.region(true) {
+        Ok(RegionState::Allowed) => {
+            bot.answer_press(host, query, None);
+            on_region(bot, host, &RegionState::Allowed);
+        }
+        Ok(RegionState::Checking) => {
+            // The answer comes as an event.
+            let toast = host.tr("Checking…");
+            bot.answer_press(host, query, Some(&toast));
+        }
+        Ok(RegionState::Blocked(_)) => {
+            let toast = host.tr("Nothing has changed yet");
+            bot.answer_press(host, query, Some(&toast));
+        }
+        Err(err) => bot.answer_press(host, query, Some(&err)),
+    }
+}
+
+// --- The computer's sleep, the country's block, the limit ---
+
+/// The computer goes to sleep (`asleep`) or woke.
+pub fn on_sleep(bot: &mut Bot, host: &mut dyn Host, asleep: bool) {
+    let (Some(chat), Some(general)) = (bot.chat(), bot.store.general) else {
+        return;
+    };
+    let now = host.now_ms();
+    if asleep {
+        bot.general.sleep = Some(Sleep {
+            since: now,
+            woke: None,
+            message: None,
+        });
+        let text = format!("💤 {}", host.tr("The computer is going to sleep"));
+        // Ahead of everything: the computer waits only a moment.
+        bot.call(
+            host,
+            telegram::send_message(chat, Some(general), &escape(&text), None),
+            Lane::Urgent,
+            Purpose::new(Module::General, format!("sleep:{general}")),
+        );
+        return;
+    }
+    match bot.general.sleep.as_mut() {
+        // The note is on its way: its answer makes it one line.
+        Some(sleep) if sleep.message.is_none() => sleep.woke = Some(now),
+        Some(_) => {
+            if let Some(sleep) = bot.general.sleep.take() {
+                slept(bot, host, &sleep, now);
+            }
+        }
+        None => woke(bot, host),
+    }
+}
+
+/// The sleep's note becomes one line: «💤 The computer slept 23:10–07:45».
+fn slept(bot: &mut Bot, host: &mut dyn Host, sleep: &Sleep, woke: u64) {
+    let (Some(chat), Some(message)) = (bot.chat(), sleep.message) else {
+        return;
+    };
+    let at = |ms: u64| {
+        let seconds = (ms / 1000) as i64;
+        LocalTime::at(seconds, host.utc_offset(seconds)).hm()
+    };
+    let text = format!(
+        "💤 {}",
+        trf(
+            host,
+            "The computer slept {0}–{1}",
+            &[&at(sleep.since), &at(woke)]
+        )
+    );
+    bot.call(
+        host,
+        telegram::edit_text(chat, message, &escape(&text), None),
+        Lane::Topic(bot.store.general.unwrap_or(0)),
+        Purpose::new(Module::General, "edit"),
+    );
+}
+
+/// «☀️ The computer woke up», without a sound: the sleep's note never went.
+fn woke(bot: &mut Bot, host: &mut dyn Host) {
+    let (Some(chat), Some(general)) = (bot.chat(), bot.store.general) else {
+        return;
+    };
+    let text = format!("☀️ {}", host.tr("The computer woke up"));
+    bot.call(
+        host,
+        telegram::send_message(chat, Some(general), &escape(&text), None).silent(),
+        Lane::Topic(general),
+        Purpose::new(Module::General, format!("note:{general}")),
+    );
+}
+
+/// The country check now (on each connection): a block is told once.
+pub fn check_region(bot: &mut Bot, host: &mut dyn Host) {
+    match host.region(false) {
+        Ok(state) => on_region(bot, host, &state),
+        Err(err) => host.log(&format!("No country check: {err}")),
+    }
+}
+
+/// The country check changed: blocked — Flux's sentence and «Проверить снова» (once while it
+/// lasts); allowed again — the same message says so, without the button.
+pub fn on_region(bot: &mut Bot, host: &mut dyn Host, state: &RegionState) {
+    let (Some(chat), Some(general)) = (bot.chat(), bot.store.general) else {
+        return;
+    };
+    match state {
+        RegionState::Blocked((_, sentence)) => {
+            if bot.store.region_message.is_some() || bot.general.region_sending {
+                return;
+            }
+            bot.general.region_sending = true;
+            let html = format!("⛔ {}", escape(sentence.trim()));
+            let keyboard = vec![vec![Button::press(
+                &host.tr("Check Again"),
+                keys::encode(Kind::General, 0, "region"),
+            )]];
+            bot.call(
+                host,
+                telegram::send_message(chat, Some(general), &html, Some(&keyboard)),
+                Lane::Topic(general),
+                Purpose::new(Module::General, format!("region:{general}")),
+            );
+        }
+        RegionState::Allowed => {
+            let Some(message) = bot.store.region_message.take() else {
+                return;
+            };
+            bot.save(host);
+            let text = format!("✅ {}", host.tr("Claude works again."));
+            bot.call(
+                host,
+                telegram::edit_text(chat, message, &escape(&text), None),
+                Lane::Topic(general),
+                Purpose::new(Module::General, format!("edit:{general}")),
+            );
+        }
+        RegionState::Checking => {}
+    }
+}
+
+/// The usage changed: kept for `/usage`; the limit reached — one line with when it resets.
+pub fn on_limits(bot: &mut Bot, host: &mut dyn Host, limits: UsageLimits) {
+    let rejected = limits.rejected;
+    let resets = [&limits.five_hour, &limits.seven_day]
+        .into_iter()
+        .flatten()
+        .max_by_key(|window| window.percent)
+        .map(|window| window.resets_at);
+    bot.limits = Some(limits);
+    if !rejected || bot.general.rejected {
+        bot.general.rejected = rejected;
+        return;
+    }
+    bot.general.rejected = true;
+    let now = (host.now_ms() / 1000) as i64;
+    let text = match resets {
+        Some(at) => format!(
+            "⛔ {}",
+            trf(
+                host,
+                "Claude's limit is reached — {0}",
+                &[&crate::commands::resets(host, at, now)]
+            )
+        ),
+        None => format!("⛔ {}", host.tr("Claude's limit is reached.")),
+    };
+    note(bot, host, &text);
 }
 
 /// «Общее» has no timers: the transport paces the status message.
@@ -333,6 +580,7 @@ mod tests {
                 session: session.id.clone(),
                 project: session.project.clone(),
                 title: String::new(),
+                head: None,
             });
         }
         for session in [working, waiting, done, idle, free] {
@@ -438,6 +686,140 @@ mod tests {
             params["text"], "Nothing is going on in Flux now",
             "the status again"
         );
+    }
+
+    /// The calls but the status message's.
+    fn notes(host: &FakeHost, from: usize) -> Vec<(String, Value)> {
+        host.tg_calls()
+            .into_iter()
+            .skip(from)
+            .filter(|(_, method, params)| {
+                method != "getUpdates"
+                    && !params["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("in Flux"))
+            })
+            .map(|(_, method, params)| (method, params))
+            .collect()
+    }
+
+    #[test]
+    fn sleep_and_waking_are_one_line_in_general() {
+        let (mut bot, mut host) = bound_bot();
+        let before = host.http.len();
+        let (poll, _) = host.last_call("getUpdates").unwrap();
+        bot.on_claude(
+            &mut host,
+            crate::bot::ClaudeEvent::System(flux_plugin_api::remote::SystemEvent::WillSleep),
+        );
+        let calls = notes(&host, before);
+        assert_eq!(calls[0].1["text"], "💤 The computer is going to sleep");
+        assert_eq!(calls[0].1["message_thread_id"], 500);
+        settle(&mut bot, &mut host);
+        host.now += 8 * 3600 * 1000;
+        bot.on_claude(
+            &mut host,
+            crate::bot::ClaudeEvent::System(flux_plugin_api::remote::SystemEvent::DidWake),
+        );
+        let calls = notes(&host, before);
+        let edit = calls
+            .iter()
+            .find(|(method, _)| method == "editMessageText")
+            .unwrap();
+        // 1_795_000_000 is 11:06 UTC (the fake's zone).
+        assert_eq!(edit.1["text"], "💤 The computer slept 11:06–19:06");
+        assert!(host.cancelled.contains(&poll), "the poll that slept goes");
+        assert_ne!(host.last_call("getUpdates").unwrap().0, poll, "a new one");
+        settle(&mut bot, &mut host);
+        // Woken without a note that went (it failed): «☀️», without a sound.
+        bot.on_claude(
+            &mut host,
+            crate::bot::ClaudeEvent::System(flux_plugin_api::remote::SystemEvent::WillSleep),
+        );
+        let (note, _) = host.last_call("sendMessage").unwrap();
+        bot.on_claude(
+            &mut host,
+            crate::bot::ClaudeEvent::System(flux_plugin_api::remote::SystemEvent::DidWake),
+        );
+        reply_error(&mut bot, &mut host, note, 400, "Bad Request: something");
+        let (_, woke) = host.last_call("sendMessage").unwrap();
+        assert_eq!(woke["text"], "☀️ The computer woke up");
+        assert_eq!(woke["disable_notification"], true);
+    }
+
+    #[test]
+    fn the_countrys_block_is_told_once_and_checked_again() {
+        let mut host = FakeHost::default();
+        host.secrets.insert("token".into(), "1:T".into());
+        host.storage.insert(
+            "state".into(),
+            serde_json::json!({ "bot": 77, "owner": { "id": 5, "name": "Egor (@egor)" } }),
+        );
+        let blocked =
+            RegionState::Blocked(("RU".into(), "Claude isn't available in Russia.".into()));
+        host.region = blocked.clone();
+        let mut bot = Bot::new(&host);
+        bot.start(&mut host);
+        settle(&mut bot, &mut host);
+        let block = host
+            .tg_calls()
+            .into_iter()
+            .find(|(_, _, params)| {
+                params["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with('⛔'))
+            })
+            .unwrap();
+        assert_eq!(block.2["text"], "⛔ Claude isn't available in Russia.");
+        assert_eq!(block.2["message_thread_id"], 500);
+        let data = crate::testing::button(&block.2, "Check Again");
+        let message = bot.store.region_message.unwrap();
+        assert_eq!(host.storage["state"]["region_message"], message);
+        // The same block again: nothing new.
+        let before = host.http.len();
+        bot.on_claude(&mut host, crate::bot::ClaudeEvent::Region(blocked));
+        assert_eq!(host.http.len(), before);
+        // «Check Again»: still blocked — a toast; allowed — the message says so.
+        bot.on_update(&mut host, crate::testing::press(1, message, 500, &data));
+        assert_eq!(host.claude.last().unwrap(), "region true");
+        assert_eq!(
+            host.last_call("answerCallbackQuery").unwrap().1["text"],
+            "Nothing has changed yet"
+        );
+        host.region = RegionState::Allowed;
+        bot.on_update(&mut host, crate::testing::press(2, message, 500, &data));
+        let (_, edit) = host.last_call("editMessageText").unwrap();
+        assert_eq!(edit["message_id"], message);
+        assert_eq!(edit["text"], "✅ Claude works again.");
+        assert!(edit.get("reply_markup").is_none());
+        assert_eq!(bot.store.region_message, None);
+    }
+
+    #[test]
+    fn a_reached_limit_is_one_line() {
+        let (mut bot, mut host) = bound_bot();
+        let before = host.http.len();
+        let limits = |rejected| UsageLimits {
+            five_hour: Some(flux_plugin_api::remote::UsageWindow {
+                percent: 100,
+                resets_at: 1_795_000_000 + 1800,
+            }),
+            seven_day: None,
+            rejected,
+        };
+        bot.on_claude(&mut host, crate::bot::ClaudeEvent::Limits(limits(true)));
+        bot.on_claude(&mut host, crate::bot::ClaudeEvent::Limits(limits(true)));
+        settle(&mut bot, &mut host);
+        let calls = notes(&host, before);
+        assert_eq!(calls.len(), 1, "once");
+        assert_eq!(
+            calls[0].1["text"],
+            "⛔ Claude's limit is reached — resets at 11:36"
+        );
+        bot.on_claude(&mut host, crate::bot::ClaudeEvent::Limits(limits(false)));
+        bot.on_claude(&mut host, crate::bot::ClaudeEvent::Limits(limits(true)));
+        settle(&mut bot, &mut host);
+        assert_eq!(notes(&host, before).len(), 2, "reached again");
     }
 
     #[test]

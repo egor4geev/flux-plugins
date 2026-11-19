@@ -13,26 +13,35 @@
 //! - [`store`] — what is kept between runs: the owner, «Общее», the sessions' topics;
 //! - [`keys`] — the buttons' data;
 //! - [`bot`] — the state and the routing; the modules: [`binding`], [`general`], [`handoff`],
-//!   [`awake`] (agent A), [`newchat`], [`conversation`], [`requests`], [`render`] (agent B);
+//!   [`awake`], [`newchat`], [`conversation`], [`requests`], [`render`], and part 3's
+//!   [`commands`] (the «/» menu), [`menu`] (`/settings`), [`late`] (messages that came while
+//!   Flux was closed), [`turn`] (a turn's diff and its rollback), [`inbox`] (photos and files from
+//!   the phone), [`task`] («From a task» in a new chat);
 //! - [`model`] — the messages between the service and the windows.
 
 mod awake;
 mod binding;
 mod bot;
+mod commands;
 mod conversation;
 mod general;
 mod handoff;
 mod host;
+mod inbox;
 mod keys;
+mod late;
+mod menu;
 mod model;
 mod newchat;
 mod render;
 mod requests;
 mod store;
+mod task;
 mod telegram;
 #[cfg(test)]
 mod testing;
 mod transport;
+mod turn;
 mod window;
 
 use flux_plugin_api::{CommandContext, Event, Plugin, register_plugin, service};

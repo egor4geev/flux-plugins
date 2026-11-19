@@ -10,8 +10,10 @@
 //! - The link's «Start» comes in a topic of its own (Telegram names it «/start …»): the binding
 //!   deletes it and greets in «Общее» ([`crate::general`]); the owner's `/start` later — the same,
 //!   with a short note.
-//! - «Unbind» forgets the owner, «Общее» and the topics (they are that chat's) and makes a new code;
-//!   «Check Again» asks Telegram again (topics turned on, the other program gone).
+//! - «Unbind» (in the settings, or `/settings` in the chat) forgets the owner, «Общее» and the
+//!   topics (they are that chat's) and makes a new code; «Check Again» asks Telegram again (topics
+//!   turned on, the other program gone).
+//! - Bound and connected, the owner's chat gets the bot's «/» menu ([`commands::publish`]).
 
 use flux_plugin_api::settings::Tone;
 use serde_json::Value;
@@ -23,7 +25,7 @@ use crate::render;
 use crate::store::{Owner, Store};
 use crate::telegram::{self, Me, Message, TgError};
 use crate::transport::{Lane, Module, Purpose};
-use crate::{awake, general};
+use crate::{awake, commands, general};
 
 /// The secret setting with the bot's token.
 pub const TOKEN: &str = "token";
@@ -134,6 +136,8 @@ fn connect(bot: &mut Bot, host: &mut dyn Host) {
     if bot.store.owner.is_some() {
         general::ensure(bot, host);
         general::sessions_changed(bot, host);
+        general::check_region(bot, host);
+        commands::publish(bot, host);
     }
 }
 
@@ -234,6 +238,7 @@ pub fn on_message(bot: &mut Bot, host: &mut dyn Host, message: &Message) -> bool
     set(bot, host, online);
     delete_start_topic(bot, host, from.id, message);
     general::bound(bot, host);
+    commands::publish(bot, host);
     true
 }
 
@@ -320,8 +325,17 @@ pub fn on_window(bot: &mut Bot, host: &mut dyn Host, _window: Option<u64>, messa
     }
 }
 
-/// Forgets the owner, «Общее» and the topics (they are that chat's); a new code.
-fn unbind(bot: &mut Bot, host: &mut dyn Host) {
+/// Forgets the owner, «Общее» and the topics (they are that chat's); a new code. The old chat's
+/// «/» menu goes. «Unbind» in Flux's settings, or `/settings` → «Привязка» in the chat.
+pub fn unbind(bot: &mut Bot, host: &mut dyn Host) {
+    if let Some(chat) = bot.chat() {
+        bot.call(
+            host,
+            telegram::delete_commands(chat),
+            Lane::Topic(0),
+            Purpose::new(Module::Binding, "commands"),
+        );
+    }
     bot.store = Store {
         bot: bot.store.bot,
         offset: bot.store.offset,
@@ -333,6 +347,8 @@ fn unbind(bot: &mut Bot, host: &mut dyn Host) {
     bot.newchat = Default::default();
     bot.conversation = Default::default();
     bot.requests = Default::default();
+    bot.commands = Default::default();
+    bot.late = Default::default();
     if bot.me.is_some() {
         new_code(bot, host);
     } else {

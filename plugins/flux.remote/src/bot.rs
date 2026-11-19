@@ -14,7 +14,18 @@
 //! - [`crate::conversation`] — a session's topic both ways: the user's messages, Claude's answer as
 //!   a draft, the steps, the turn's end, «Stop»;
 //! - [`crate::requests`] — permissions, Claude's questions and the plan as buttons; while the Mac
-//!   is locked, every session's in «Общее».
+//!   is locked, every session's in «Общее»;
+//! - [`crate::commands`] — the «/» menu: `/sessions`, `/stop`, `/mode`, `/usage`, and `/settings`
+//!   ([`crate::menu`]: the plugin's settings as screens of one message);
+//! - [`crate::late`] — the user's words that waited more than a minute (Flux was closed, the
+//!   computer slept): asked about, run or noted, as the setting says;
+//! - [`crate::turn`] — «Diff» and «Roll back» under a turn's «Done»;
+//! - [`crate::inbox`] — photos and files from the phone, downloaded, then into the session;
+//! - [`crate::task`] — «From a task» in a new chat: the tracker's tasks and its Claude actions.
+//!
+//! A message of the owner goes: the binding's `/start` → a command → a late one waits
+//! ([`crate::late::hold`]) → [`Bot::route`]: «Общее», the words a card waits for, a session's
+//! topic, a new chat.
 //!
 //! The bot answers its owner only: anything from anyone else is dropped unread.
 
@@ -33,7 +44,10 @@ use crate::model::{Connection, ToService, ToWindow};
 use crate::store::Store;
 use crate::telegram::{self, Call, CallbackQuery, Me, Message, TgError, Update};
 use crate::transport::{Incoming, Lane, Module, Purpose, Transport};
-use crate::{awake, binding, conversation, general, handoff, newchat, requests};
+use crate::{
+    awake, binding, commands, conversation, general, handoff, inbox, late, menu, newchat, requests,
+    task, turn,
+};
 
 /// Claude's events, as the SDK brings them (`lib.rs` turns `Event`s into these).
 #[derive(Clone, Debug)]
@@ -46,10 +60,7 @@ pub enum ClaudeEvent {
     Resolved(String, String),
     TurnEnded(String, TurnSummary),
     Failed(String, String),
-    // Part 3: `/usage`, the country's block.
-    #[allow(dead_code)]
     Limits(UsageLimits),
-    #[allow(dead_code)]
     Region(RegionState),
     System(SystemEvent),
     /// The plugin's action in the Claude console: (the action's id, the session).
@@ -65,6 +76,8 @@ pub struct Bot {
     /// Every session of Flux by id, the latest of each.
     pub sessions: BTreeMap<String, Session>,
     pub system: SystemState,
+    /// The subscription's usage as Flux told it last (`ClaudeLimits`, or `/usage` asked).
+    pub limits: Option<UsageLimits>,
     pub binding: binding::State,
     pub general: general::State,
     pub handoff: handoff::State,
@@ -72,6 +85,10 @@ pub struct Bot {
     pub newchat: newchat::State,
     pub conversation: conversation::State,
     pub requests: requests::State,
+    pub commands: commands::State,
+    pub late: late::State,
+    pub inbox: inbox::State,
+    pub task: task::State,
 }
 
 impl Bot {
@@ -86,6 +103,7 @@ impl Bot {
                 screen_locked: false,
                 on_power: true,
             },
+            limits: None,
             binding: Default::default(),
             general: Default::default(),
             handoff: Default::default(),
@@ -93,6 +111,10 @@ impl Bot {
             newchat: Default::default(),
             conversation: Default::default(),
             requests: Default::default(),
+            commands: Default::default(),
+            late: Default::default(),
+            inbox: Default::default(),
+            task: Default::default(),
         }
     }
 
@@ -110,8 +132,11 @@ impl Bot {
         if let Ok(system) = host.system_status() {
             self.system = system;
         }
+        // What was sent while Flux was closed is late.
+        late::awake(self, host);
         binding::start(self, host);
         awake::update(self, host);
+        inbox::clean(host);
     }
 
     /// The owner's private chat; none — not bound yet.
@@ -195,11 +220,18 @@ impl Bot {
                         self.on_update(host, update);
                     }
                     if had {
+                        // The late messages of the batch: a question per topic.
+                        late::flush(self, host);
                         self.save(host);
                     }
                 }
                 Incoming::PollFailed(error) => binding::on_polled(self, host, Some(error)),
                 Incoming::Answer(purpose, result) => self.on_answer(host, purpose, result),
+                Incoming::File(purpose, result) => {
+                    if purpose.module == Module::Inbox {
+                        inbox::on_file(self, host, &purpose.tag, result);
+                    }
+                }
             }
         }
     }
@@ -230,6 +262,11 @@ impl Bot {
             Kind::NewChat => newchat::on_press(self, host, &query, key, &choice),
             Kind::General => general::on_press(self, host, &query, key, &choice),
             Kind::Handoff => handoff::on_press(self, host, &query, key, &choice),
+            Kind::Command => commands::on_press(self, host, &query, key, &choice),
+            Kind::Menu => menu::on_press(self, host, &query, key, &choice),
+            Kind::Late => late::on_press(self, host, &query, key, &choice),
+            Kind::Turn => turn::on_press(self, host, &query, key, &choice),
+            Kind::Task => task::on_press(self, host, &query, key, &choice),
             Kind::Noop => self.answer_press(host, &query, None),
         }
     }
@@ -249,22 +286,36 @@ impl Bot {
             return;
         }
         if message.forum_topic_created.is_some() {
-            newchat::on_topic_created(self, host, &message);
+            if !commands::on_topic_created(self, host, &message) {
+                newchat::on_topic_created(self, host, &message);
+            }
             return;
         }
         if message.is_service() {
             return;
         }
+        if commands::on_message(self, host, &message)
+            || commands::take_title(self, host, &message)
+            || late::hold(self, host, &message)
+        {
+            return;
+        }
+        self.route(host, &message);
+    }
+
+    /// The owner's words, as they come now (or as «Выполнить» brings the late ones): «Общее»'s
+    /// hint, the words a card waits for, the session of the topic, or a new chat.
+    pub fn route(&mut self, host: &mut dyn Host, message: &Message) {
         let thread = message.thread();
         if thread.is_some() && thread == self.store.general {
-            general::on_message(self, host, &message);
-        } else if requests::on_user_message(self, host, &message) {
+            general::on_message(self, host, message);
+        } else if requests::on_user_message(self, host, message) {
             // The words of «Other…» or of the plan's «Keep planning».
         } else if let Some(topic) = thread.and_then(|thread| self.store.topic_by_thread(thread)) {
             let session = topic.session.clone();
-            conversation::on_user_message(self, host, &message, &session);
+            conversation::on_user_message(self, host, message, &session);
         } else {
-            newchat::on_message(self, host, &message);
+            newchat::on_message(self, host, message);
         }
     }
 
@@ -284,6 +335,12 @@ impl Bot {
             Module::NewChat => newchat::on_answer(self, host, &purpose.tag, result),
             Module::Conversation => conversation::on_answer(self, host, &purpose.tag, result),
             Module::Requests => requests::on_answer(self, host, &purpose.tag, result),
+            Module::Commands => commands::on_answer(self, host, &purpose.tag, result),
+            Module::Menu => menu::on_answer(self, host, &purpose.tag, result),
+            Module::Late => late::on_answer(self, host, &purpose.tag, result),
+            Module::Turn => turn::on_answer(self, host, &purpose.tag, result),
+            Module::Inbox => inbox::on_answer(self, host, &purpose.tag, result),
+            Module::Task => task::on_answer(self, host, &purpose.tag, result),
         }
     }
 
@@ -321,8 +378,8 @@ impl Bot {
             ClaudeEvent::Failed(session, error) => {
                 conversation::on_failed(self, host, &session, &error)
             }
-            // Part 3: `/usage`, the country's block.
-            ClaudeEvent::Limits(_) | ClaudeEvent::Region(_) => {}
+            ClaudeEvent::Limits(limits) => general::on_limits(self, host, limits),
+            ClaudeEvent::Region(state) => general::on_region(self, host, &state),
             ClaudeEvent::System(event) => {
                 let locked = self.system.screen_locked;
                 match event {
@@ -330,8 +387,14 @@ impl Bot {
                     SystemEvent::ScreenUnlocked => self.system.screen_locked = false,
                     SystemEvent::OnPower => self.system.on_power = true,
                     SystemEvent::OnBattery => self.system.on_power = false,
-                    // Part 3: «going to sleep» / «awake» in «Общее».
-                    SystemEvent::WillSleep | SystemEvent::DidWake => {}
+                    SystemEvent::WillSleep => general::on_sleep(self, host, true),
+                    SystemEvent::DidWake => {
+                        // What was sent while it slept is late; the poll that slept is likely
+                        // dead: the news (and those messages) come at once, not after its timeout.
+                        late::awake(self, host);
+                        self.tg.poll_again(host);
+                        general::on_sleep(self, host, false);
+                    }
                 }
                 if locked != self.system.screen_locked {
                     requests::on_lock_changed(self, host);
@@ -353,7 +416,9 @@ impl Bot {
         }
         let _ = binding::on_timer(self, host, timer)
             || general::on_timer(self, host, timer)
-            || conversation::on_timer(self, host, timer);
+            || conversation::on_timer(self, host, timer)
+            || inbox::on_timer(self, host, timer)
+            || task::on_timer(self, host, timer);
     }
 }
 

@@ -1,7 +1,8 @@
 //! A session's topic both ways — agent B's.
 //!
 //! - The user's message → the session ([`Host::send`](crate::host::Host::send)); an unloaded one
-//!   resumes, a working one queues it (Flux does both). Pictures and files — part 3: a calm note.
+//!   resumes, a working one queues it (Flux does both). Photos and files go by [`crate::inbox`]
+//!   (downloaded first), then the same way.
 //! - Claude's message as it is written ([`on_text`], the whole text each time) → a draft in the
 //!   topic with «Stop» ([`crate::telegram::send_draft`], lane [`Lane::Draft`]: one request in
 //!   flight, the newest text next, at most every [`DRAFT_EVERY_MS`]); when it is written to the end
@@ -12,12 +13,13 @@
 //!   [`REFRESH_MS`] — by one timer that runs only while a draft is shown.
 //! - A group of steps ([`on_steps`]) → one folded block when the group ends («Read 4 files ·
 //!   searched env_override», a line per step inside).
-//! - The turn's end ([`on_turn_end`]) → «✅ Done · 3 files · +12 −4» (part 3 adds the diff as a
-//!   file and the rollback), «⚠️ The turn broke off» when it failed; an error ([`on_failed`]) →
-//!   «⚠️ …».
+//! - The turn's end ([`on_turn_end`]) → «✅ Done · 3 files · +12 −4» with «Diff» and «Roll back»
+//!   when it changed files ([`crate::turn`]), «⚠️ The turn broke off» when it failed; an error
+//!   ([`on_failed`]) → «⚠️ …».
 //! - «Stop» under a draft ([`on_stop`], found by the draft's id — the topic isn't always named) →
 //!   the session is interrupted and what was shown is sent as a message with «⏹ Stopped»
-//!   (Telegram drops the draft's text); the rest of that message is dropped.
+//!   (Telegram drops the draft's text); the rest of that message is dropped. `/stop` goes the same
+//!   way ([`stop`]).
 //! - A session closed in Flux ([`on_gone`]) → a note, and the topic is let go: a new message there
 //!   starts a new chat.
 //!
@@ -92,16 +94,26 @@ pub fn on_user_message(bot: &mut Bot, host: &mut dyn Host, message: &Message, se
     let Some(thread) = message.thread() else {
         return;
     };
-    if message.photo.is_some() || message.document.is_some() {
-        let note = host.tr("I'll learn to take photos and files later.");
-        send_note(bot, host, thread, &render::escape(&note));
+    if crate::inbox::receive(bot, host, message) {
         return;
     }
     let words = message.words().trim();
     if words.is_empty() {
         return;
     }
-    match host.send(session, words, &[]) {
+    send(bot, host, thread, session, words, &[]);
+}
+
+/// The user's words (and pictures: paths in the plugin's data folder) to the session.
+pub fn send(
+    bot: &mut Bot,
+    host: &mut dyn Host,
+    thread: i64,
+    session: &str,
+    words: &str,
+    images: &[String],
+) {
+    match host.send(session, words, images) {
         Ok(()) => {
             bot.conversation.stopped.remove(session);
             think(bot, host, session);
@@ -232,7 +244,17 @@ pub fn on_turn_end(bot: &mut Bot, host: &mut dyn Host, session: &str, summary: &
     } else {
         host.tr("⚠️ The turn broke off")
     };
-    send_note(bot, host, thread, &render::escape(&line));
+    match bot.chat() {
+        // «Diff» and «Roll back» under a turn that changed files.
+        Some(chat) if !summary.failed && !summary.files.is_empty() => {
+            let keyboard = crate::turn::keyboard(host, summary.turn);
+            let html = render::escape(&line);
+            let call = telegram::send_message(chat, Some(thread), &html, Some(&keyboard));
+            bot.call(host, call, Lane::Topic(thread), Purpose::none());
+            sent_to_topic(bot, host, thread);
+        }
+        _ => send_note(bot, host, thread, &render::escape(&line)),
+    }
     disarm_if_idle(bot, host);
 }
 
@@ -273,20 +295,37 @@ pub fn on_stop(bot: &mut Bot, host: &mut dyn Host, stopped: &StoppedGeneration) 
     else {
         return;
     };
-    let Some(live) = bot.conversation.live.remove(&session) else {
-        return;
-    };
-    if let Err(err) = host.interrupt(&session) {
+    if let Some(live) = bot.conversation.live.remove(&session) {
+        stop_live(bot, host, &session, Some(live));
+    }
+}
+
+/// The session is interrupted; the topic gets what the draft showed (if it showed anything) and
+/// «⏹ Stopped».
+fn stop_live(bot: &mut Bot, host: &mut dyn Host, session: &str, live: Option<Live>) {
+    if let Err(err) = host.interrupt(session) {
         host.log(&format!("Couldn't stop {session}: {err}"));
     }
-    bot.conversation.stopped.insert(session.clone());
-    if let Some(message) = live.message {
-        bot.conversation.finished.insert(session.clone(), message);
+    bot.conversation.stopped.insert(session.to_string());
+    let Some(thread) = live
+        .as_ref()
+        .map(|live| live.thread)
+        .or_else(|| thread_of(bot, session))
+    else {
+        return;
+    };
+    let (message, text) = live
+        .map(|live| (live.message, live.text))
+        .unwrap_or_default();
+    if let Some(message) = message {
+        bot.conversation
+            .finished
+            .insert(session.to_string(), message);
     }
-    let mut parts = if live.text.trim().is_empty() {
+    let mut parts = if text.trim().is_empty() {
         Vec::new()
     } else {
-        render::html_parts(&live.text)
+        render::html_parts(&text)
     };
     let mark = render::escape(&host.tr("⏹ Stopped"));
     match parts.last_mut() {
@@ -296,7 +335,7 @@ pub fn on_stop(bot: &mut Bot, host: &mut dyn Host, stopped: &StoppedGeneration) 
         _ => parts.push(format!("<i>{mark}</i>")),
     }
     for part in parts {
-        send_note(bot, host, live.thread, &part);
+        send_note(bot, host, thread, &part);
     }
     disarm_if_idle(bot, host);
 }
@@ -516,7 +555,7 @@ fn send_final(bot: &mut Bot, host: &mut dyn Host, thread: i64, markdown: &str) {
 }
 
 /// An HTML message in a topic (nobody waits for its answer).
-fn send_note(bot: &mut Bot, host: &mut dyn Host, thread: i64, html: &str) {
+pub fn send_note(bot: &mut Bot, host: &mut dyn Host, thread: i64, html: &str) {
     let Some(chat) = bot.chat() else {
         return;
     };
@@ -737,20 +776,13 @@ mod tests {
             ClaudeEvent::Session(session("s1", "/work/project", SessionState::Idle)),
         );
         assert!(host.timers.is_empty(), "no timer when nothing works");
-        // A photo: a note; a failed send: a note.
-        let mut photo = user_message(2, Some(77), "");
-        photo.message.as_mut().unwrap().photo = Some(vec![Default::default()]);
-        bot.on_update(&mut host, photo);
+        // A failed send: a note (photos and files: `inbox`'s tests).
         host.fail = Some("The session is gone".into());
         bot.on_update(&mut host, user_message(3, Some(77), "Hi"));
         let calls = tg.flush(&mut bot, &mut host);
         let calls = in_topic(&bot, calls);
         assert_eq!(
             calls[0].1["text"],
-            "I'll learn to take photos and files later."
-        );
-        assert_eq!(
-            calls[1].1["text"],
             "Couldn't send it to Claude: The session is gone"
         );
     }

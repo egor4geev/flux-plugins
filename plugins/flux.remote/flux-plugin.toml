@@ -18,6 +18,8 @@ service = true
 
 [permissions]
 claude-remote = true
+# «From a task» in a new chat: the tracker's tasks and its Claude actions.
+tasks = true
 network = ["api.telegram.org"]
 
 # At a session in the Claude console: the bot opens a topic for it with its last answer.
@@ -26,7 +28,8 @@ id = "continue"
 title = "Continue in Telegram"
 
 # Settings → Flux Remote: the bot's token and its state, the binding to the owner (the link with a
-# one-time code and its QR code), the computer's sleep.
+# one-time code and its QR code), the messages that came while Flux was closed, the computer's
+# sleep. The bot's `/settings` shows and changes the same values.
 [[settings]]
 key = "bot"
 type = "section"
@@ -47,6 +50,24 @@ title = "Connection"
 id = "binding"
 title = "Binding"
 location = "settings"
+
+# The user's words that came while Flux was closed or the computer slept.
+[[settings]]
+key = "messages"
+type = "section"
+title = "Messages"
+
+[[settings]]
+key = "late-messages"
+type = "choice"
+default = "ask"
+title = "Messages that came while Flux was closed"
+description = "Those that came while Flux was closed or the computer slept."
+options = [
+    { value = "ask", title = "Ask" },
+    { value = "always", title = "Run always" },
+    { value = "never", title = "Don't run" },
+]
 
 [[settings]]
 key = "computer"

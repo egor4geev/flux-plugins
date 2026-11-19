@@ -17,6 +17,10 @@
 //!   call goes again after each of [`RETRY_MS`], then its error comes back; a refusal comes back at
 //!   once.
 //!
+//! A call that uploads a file (`sendDocument`) goes as `multipart/form-data` in its lane like any
+//! other; the files the user sent are downloaded beside the calls ([`Transport::download`]: no
+//! lane, no pace — their bytes come back as [`Incoming::File`]).
+//!
 //! Nothing ticks at rest: a timer runs only while a call waits for its moment.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -39,6 +43,8 @@ pub const RETRY_MS: [u64; 2] = [1_000, 3_000];
 const ENDED_DRAFTS: usize = 64;
 /// A call gives up after this long.
 const CALL_TIMEOUT_MS: u32 = 20_000;
+/// An upload or a download (up to 20 MB) gives up after this long.
+const FILE_TIMEOUT_MS: u32 = 120_000;
 /// The polling's pause after a failure: doubles up to the last.
 const POLL_RETRY_MS: [u32; 5] = [2_000, 5_000, 10_000, 30_000, 60_000];
 
@@ -101,6 +107,12 @@ pub enum Module {
     NewChat,
     Conversation,
     Requests,
+    Commands,
+    Menu,
+    Late,
+    Turn,
+    Inbox,
+    Task,
 }
 
 /// What the transport hands to the bot.
@@ -111,6 +123,8 @@ pub enum Incoming {
     Updates(Vec<Update>),
     /// A poll failed: `Unauthorized` and `Conflict` stop the polling, others retry by themselves.
     PollFailed(TgError),
+    /// A file's download ended ([`Transport::download`]): its bytes, or why not.
+    File(Purpose, Result<Vec<u8>, String>),
 }
 
 struct Queued {
@@ -179,6 +193,8 @@ pub struct Transport {
     pause: Option<(u64, u64)>,
     /// The poll in flight.
     poll: Option<u64>,
+    /// The files being downloaded, by request: who wants the bytes.
+    downloads: BTreeMap<u64, Purpose>,
     polling: bool,
     offset: Option<i64>,
     /// Failed polls in a row.
@@ -206,6 +222,7 @@ impl Transport {
             wake: None,
             pause: None,
             poll: None,
+            downloads: BTreeMap::new(),
             polling: false,
             offset: None,
             poll_failures: 0,
@@ -218,7 +235,11 @@ impl Transport {
     /// A new token (or none): everything waiting or in flight is dropped.
     pub fn set_token(&mut self, host: &mut dyn Host, token: Option<String>) {
         self.stop_polling(host);
-        for request in std::mem::take(&mut self.flights).into_keys() {
+        let downloads = std::mem::take(&mut self.downloads).into_keys();
+        for request in std::mem::take(&mut self.flights)
+            .into_keys()
+            .chain(downloads)
+        {
             host.http_cancel(request);
         }
         for (timer, _) in [self.wake.take(), self.pause.take()].into_iter().flatten() {
@@ -282,6 +303,18 @@ impl Transport {
         self.pump(host);
     }
 
+    /// Downloads a file the user sent (`getFile`'s `file_path`); false — no token. The bytes come
+    /// back as [`Incoming::File`] with `purpose`.
+    pub fn download(&mut self, host: &mut dyn Host, path: &str, purpose: Purpose) -> bool {
+        let Some(token) = &self.token else {
+            return false;
+        };
+        let url = format!("{API}/file/bot{token}/{path}");
+        let request = host.http_get(&url, FILE_TIMEOUT_MS);
+        self.downloads.insert(request, purpose);
+        true
+    }
+
     pub fn start_polling(&mut self, host: &mut dyn Host, offset: Option<i64>) {
         if offset.is_some() {
             self.offset = offset;
@@ -290,6 +323,24 @@ impl Transport {
         if self.poll.is_none() && self.poll_timer.is_none() {
             self.poll_now(host);
         }
+    }
+
+    /// The poll in flight may be dead (the computer slept with it open): a new one now, so the news
+    /// come at once rather than after the old one's timeout.
+    pub fn poll_again(&mut self, host: &mut dyn Host) {
+        if !self.polling {
+            return;
+        }
+        if let Some(request) = self.poll.take() {
+            host.http_cancel(request);
+            self.statuses.remove(&request);
+            self.bodies.remove(&request);
+        }
+        if let Some(timer) = self.poll_timer.take() {
+            host.cancel_timer(timer);
+        }
+        self.poll_failures = 0;
+        self.poll_now(host);
     }
 
     pub fn stop_polling(&mut self, host: &mut dyn Host) {
@@ -330,6 +381,14 @@ impl Transport {
         }
         let status = self.statuses.remove(&request).unwrap_or(0);
         let body = self.bodies.remove(&request).unwrap_or_default();
+        if let Some(purpose) = self.downloads.remove(&request) {
+            let result = match error {
+                Some(error) => Err(error),
+                None if status == 200 => Ok(body),
+                None => Err(format!("HTTP {status}")),
+            };
+            return vec![Incoming::File(purpose, result)];
+        }
         let result = match error {
             Some(error) => Err(TgError::Network(error)),
             None => telegram::parse(status, &body),
@@ -382,7 +441,9 @@ impl Transport {
     }
 
     fn is_ours(&self, request: u64) -> bool {
-        self.poll == Some(request) || self.flights.contains_key(&request)
+        self.poll == Some(request)
+            || self.flights.contains_key(&request)
+            || self.downloads.contains_key(&request)
     }
 
     fn url(&self, method: &str) -> Option<String> {
@@ -502,8 +563,23 @@ impl Transport {
         let Some(url) = self.url(queued.call.method) else {
             return;
         };
-        let body = serde_json::to_vec(&queued.call.params).unwrap_or_default();
-        let request = host.http_post(&url, body, CALL_TIMEOUT_MS);
+        let upload = queued.call.upload.is_some().then(|| {
+            let boundary: String = host
+                .random(12)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            telegram::multipart(&queued.call, &format!("flux-remote-{boundary}"))
+        });
+        let request = match upload.flatten() {
+            Some((content_type, body)) => {
+                host.http_post_raw(&url, &content_type, body, FILE_TIMEOUT_MS)
+            }
+            None => {
+                let body = serde_json::to_vec(&queued.call.params).unwrap_or_default();
+                host.http_post(&url, body, CALL_TIMEOUT_MS)
+            }
+        };
         if queued.lane.every() > 0 {
             self.sent.insert(queued.lane.clone(), now);
         }
@@ -986,6 +1062,74 @@ mod tests {
         assert!(matches!(&out[0], Incoming::Answer(_, Err(err)) if err.topic_gone()));
         assert_eq!(host.http.len(), 4, "a refusal isn't sent again");
         assert!(host.timers.is_empty());
+    }
+
+    #[test]
+    fn an_upload_goes_as_multipart_in_its_lane_and_a_download_brings_bytes() {
+        let mut host = FakeHost::default();
+        let mut tg = transport(&mut host);
+        tg.send(
+            &mut host,
+            message(7, "first"),
+            Lane::Topic(7),
+            Purpose::none(),
+        );
+        let file = telegram::send_document(1, Some(7), "a.diff", b"+x\n".to_vec(), "Turn 1");
+        tg.send(
+            &mut host,
+            file,
+            Lane::Topic(7),
+            Purpose::new(Module::Turn, "diff"),
+        );
+        assert_eq!(host.http.len(), 1, "the file waits for the topic's message");
+        ok(&mut tg, &mut host, 1, json!({"message_id": 1}));
+        let (id, url, body) = host.http[1].clone();
+        assert_eq!(url, "https://api.telegram.org/bot1:T/sendDocument");
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.starts_with("--flux-remote-"), "{body}");
+        assert!(body.contains("filename=\"a.diff\""));
+        let out = ok(&mut tg, &mut host, id, json!({"message_id": 2}));
+        assert_eq!(
+            out,
+            vec![Incoming::Answer(
+                Purpose::new(Module::Turn, "diff"),
+                Ok(json!({"message_id": 2}))
+            )]
+        );
+        // A download: beside the calls, its bytes as they came; a refusal is its status.
+        assert!(tg.download(
+            &mut host,
+            "photos/f.jpg",
+            Purpose::new(Module::Inbox, "file:1:0")
+        ));
+        assert!(tg.download(
+            &mut host,
+            "photos/g.jpg",
+            Purpose::new(Module::Inbox, "file:2:0")
+        ));
+        let (first, url, _) = host.http[2].clone();
+        assert_eq!(url, "https://api.telegram.org/file/bot1:T/photos/f.jpg");
+        assert!(host.gets.contains(&first));
+        tg.on_head(first, 200);
+        tg.on_body(first, b"\xFF\xD8");
+        let out = tg.on_done(&mut host, first, None);
+        assert_eq!(
+            out,
+            vec![Incoming::File(
+                Purpose::new(Module::Inbox, "file:1:0"),
+                Ok(vec![0xFF, 0xD8])
+            )]
+        );
+        let second = host.http[3].0;
+        tg.on_head(second, 404);
+        let out = tg.on_done(&mut host, second, None);
+        assert_eq!(
+            out,
+            vec![Incoming::File(
+                Purpose::new(Module::Inbox, "file:2:0"),
+                Err("HTTP 404".into())
+            )]
+        );
     }
 
     #[test]

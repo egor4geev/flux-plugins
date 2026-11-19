@@ -1,6 +1,7 @@
 //! What the service keeps between runs — the plugin's storage, one JSON value under [`KEY`]: the
-//! bot it belongs to, the owner, «Общее», the topic of each session, where the polling goes on
-//! from. A token of another bot starts a new one ([`Store::for_bot`]).
+//! bot it belongs to, the owner, «Общее» (its status message, the country's block), the topic of
+//! each session, where the polling goes on from. A token of another bot starts a new one
+//! ([`Store::for_bot`]).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +27,9 @@ pub struct Store {
     /// The status message in «Общее».
     #[serde(default)]
     pub status_message: Option<i64>,
+    /// The message in «Общее» that says Claude is blocked in this country, while it is.
+    #[serde(default)]
+    pub region_message: Option<i64>,
     /// A topic per session.
     #[serde(default)]
     pub topics: Vec<Topic>,
@@ -54,6 +58,9 @@ pub struct Topic {
     pub project: String,
     /// The topic's name as the bot set it last.
     pub title: String,
+    /// The topic's first message, «📁 project · mode»: it follows the session's mode.
+    #[serde(default)]
+    pub head: Option<i64>,
 }
 
 impl Store {

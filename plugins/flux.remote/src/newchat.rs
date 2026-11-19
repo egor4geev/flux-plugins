@@ -4,10 +4,14 @@
 //! «More…» pages) — keeps the first message, and on the choice opens a session in that project
 //! with it ([`Host::new_session`](crate::host::Host::new_session)), binds the topic to the
 //! session ([`crate::store::Store::add_topic`]), edits the question into the topic's first line
-//! («📁 project · mode») and renames the topic when the session has a title ([`on_session`]). More
-//! messages before the choice join the first one. A message in a topic the bot knows no session of
-//! (one whose session was closed) is asked the same. Part 3 adds «From a task» between the project
-//! and the session.
+//! («📁 project · mode», kept as the topic's `head`: it follows the session's mode wherever it
+//! changed — `/mode`, Flux, after a restart too) and renames the topic when the session has a title
+//! ([`on_session`]). More
+//! messages before the choice join the first one; photos and files come by [`crate::inbox`] and
+//! wait with them ([`take`]). A message in a topic the bot knows no session of (one whose session
+//! was closed) is asked the same. When a tracker gives tasks, «From a task» comes between the
+//! project and the session ([`crate::task`]: it opens the session by [`open`] or binds the one its
+//! action opened by [`bind`]).
 
 use std::collections::BTreeMap;
 
@@ -16,6 +20,7 @@ use serde_json::Value;
 
 use crate::bot::Bot;
 use crate::conversation;
+use crate::general::folder_name;
 use crate::host::{Host, NewSession, trf};
 use crate::keys::{self, Kind};
 use crate::render;
@@ -32,8 +37,9 @@ pub struct State {
     pending: BTreeMap<u64, Pending>,
     /// The last key given (they start from the clock: a button of the last run means nothing).
     last_key: u64,
-    /// The first line of each new chat's topic, by session: what it shows, to follow the mode.
-    heads: BTreeMap<String, Head>,
+    /// The mode each topic's first line shows, by session (unknown after a restart: the next
+    /// change of the session edits it).
+    shown: BTreeMap<String, Mode>,
 }
 
 /// A new chat waiting for its project.
@@ -41,6 +47,8 @@ struct Pending {
     thread: i64,
     /// The user's messages so far: the session's first message.
     words: Vec<String>,
+    /// Pictures that came with them: paths in the plugin's data folder.
+    images: Vec<String>,
     /// The projects offered, as Flux named them when asked.
     projects: Vec<Project>,
     page: usize,
@@ -48,11 +56,24 @@ struct Pending {
     question: Option<i64>,
 }
 
-/// A topic's first line: «📁 project · mode».
-struct Head {
-    message: i64,
-    project: String,
-    mode: Mode,
+/// A new chat whose project is chosen: what its session starts with.
+#[derive(Clone, Debug)]
+pub struct Chat {
+    pub thread: i64,
+    pub project: Project,
+    /// The user's messages so far.
+    pub words: Vec<String>,
+    /// Pictures: paths in the plugin's data folder.
+    pub images: Vec<String>,
+    /// The bot's message the chat's questions are in: it becomes the topic's first line.
+    pub question: Option<i64>,
+}
+
+impl Chat {
+    /// The user's words as one message.
+    pub fn text(&self) -> String {
+        self.words.join("\n\n")
+    }
 }
 
 /// The user's new topic (its service message): nothing to do — its first message comes next.
@@ -63,20 +84,21 @@ pub fn on_message(bot: &mut Bot, host: &mut dyn Host, message: &Message) {
     let Some(thread) = message.thread() else {
         return;
     };
-    if message.photo.is_some() || message.document.is_some() {
-        let note = host.tr("I'll learn to take photos and files later.");
-        send(
-            bot,
-            host,
-            thread,
-            &render::escape(&note),
-            None,
-            Purpose::none(),
-        );
+    if crate::inbox::receive(bot, host, message) {
         return;
     }
     let words = message.words().trim();
     if words.is_empty() {
+        return;
+    }
+    take(bot, host, thread, words, Vec::new());
+}
+
+/// The user's words and pictures in a topic without a session: they join the chat that waits for
+/// its project (or its task — [`crate::task::take`]), or start one.
+pub fn take(bot: &mut Bot, host: &mut dyn Host, thread: i64, words: &str, images: Vec<String>) {
+    let words = words.trim();
+    if crate::task::take(bot, host, thread, words, &images) {
         return;
     }
     if let Some(pending) = bot
@@ -85,7 +107,10 @@ pub fn on_message(bot: &mut Bot, host: &mut dyn Host, message: &Message) {
         .values_mut()
         .find(|pending| pending.thread == thread)
     {
-        pending.words.push(words.to_string());
+        if !words.is_empty() {
+            pending.words.push(words.to_string());
+        }
+        pending.images.extend(images);
         return;
     }
     let mut projects = host.projects().unwrap_or_default();
@@ -106,7 +131,12 @@ pub fn on_message(bot: &mut Bot, host: &mut dyn Host, message: &Message) {
     let key = next_key(bot, host);
     let pending = Pending {
         thread,
-        words: vec![words.to_string()],
+        words: if words.is_empty() {
+            Vec::new()
+        } else {
+            vec![words.to_string()]
+        },
+        images,
         projects,
         page: 0,
         question: None,
@@ -155,64 +185,142 @@ pub fn on_press(bot: &mut Bot, host: &mut dyn Host, query: &CallbackQuery, key: 
     else {
         return;
     };
-    let thread = pending.thread;
+    let chat = Chat {
+        thread: pending.thread,
+        project,
+        words: pending.words.clone(),
+        images: pending.images.clone(),
+        question: pending.question,
+    };
+    // «From a task» first, when a tracker gives tasks: the chat is the task step's now.
+    if crate::task::offer(bot, host, key, &chat) {
+        bot.newchat.pending.remove(&key);
+        return;
+    }
+    let text = chat.text();
     let spec = NewSession {
-        project: project.path.clone(),
-        prompt: Some(pending.words.join("\n\n")),
+        project: chat.project.path.clone(),
+        prompt: (!text.is_empty()).then_some(text),
+        images: chat.images.clone(),
         ..Default::default()
     };
-    let session = match host.new_session(&spec) {
-        Ok(session) => session,
+    match open(bot, host, &chat, &spec) {
+        Ok(_) => {
+            bot.newchat.pending.remove(&key);
+        }
         Err(err) => {
             // The buttons stay: the user may try again, or another project.
             let note = trf(host, "Couldn't start the session: {0}", &[&err]);
             send(
                 bot,
                 host,
-                thread,
+                chat.thread,
                 &render::escape(&note),
                 None,
                 Purpose::none(),
             );
-            return;
         }
+    }
+}
+
+/// Opens the chat's session and binds its topic to it ([`bind`]): the session's id. «Thinking…»
+/// when it has something to answer. Pictures without words go as the session's first message:
+/// Flux sends a new session's pictures only with its prompt.
+pub fn open(
+    bot: &mut Bot,
+    host: &mut dyn Host,
+    chat: &Chat,
+    spec: &NewSession,
+) -> Result<String, String> {
+    let pictures_alone = spec.prompt.is_none() && !spec.images.is_empty();
+    let session = if pictures_alone {
+        host.new_session(&NewSession {
+            images: Vec::new(),
+            ..spec.clone()
+        })?
+    } else {
+        host.new_session(spec)?
     };
-    let Some(pending) = bot.newchat.pending.remove(&key) else {
+    bind(bot, host, chat, &session, spec.mode, spec.title.as_deref());
+    if pictures_alone {
+        conversation::send(bot, host, chat.thread, &session, "", &spec.images);
+    } else if spec.prompt.is_some() {
+        conversation::expect_answer(bot, host, &session);
+    }
+    Ok(session)
+}
+
+/// The chat's topic is the session's now: bound to it, renamed when the session has a name, the
+/// chat's question edited into the first line «📁 project · mode» (`mode` — the mode it starts in,
+/// until Flux tells).
+pub fn bind(
+    bot: &mut Bot,
+    host: &mut dyn Host,
+    chat: &Chat,
+    session: &str,
+    mode: Option<Mode>,
+    title: Option<&str>,
+) {
+    let Some(chat_id) = bot.chat() else {
         return;
     };
+    let thread = chat.thread;
+    let title = title.map(telegram::topic_name).unwrap_or_default();
     bot.store.add_topic(Topic {
         thread,
-        session: session.clone(),
-        project: project.path.clone(),
-        title: String::new(),
+        session: session.to_string(),
+        project: chat.project.path.clone(),
+        title: title.clone(),
+        head: chat.question,
     });
     bot.save(host);
+    if !title.is_empty() {
+        let call = telegram::rename_topic(chat_id, thread, &title);
+        bot.call(
+            host,
+            call,
+            Lane::Topic(thread),
+            Purpose::new(Module::NewChat, format!("rename:{thread}")),
+        );
+    }
     let mode = bot
         .sessions
-        .get(&session)
-        .map_or(Mode::Ask, |session| session.mode);
-    let head = head_html(host, &project.name, mode);
-    match pending.question {
+        .get(session)
+        .map(|session| session.mode)
+        .or(mode)
+        .unwrap_or(Mode::Ask);
+    let head = head_html(host, &chat.project.name, mode);
+    match chat.question {
         Some(question) => {
-            let call = telegram::edit_text(chat, question, &head, None);
+            let call = telegram::edit_text(chat_id, question, &head, None);
             bot.call(
                 host,
                 call,
                 Lane::Topic(thread),
                 Purpose::new(Module::NewChat, "edit"),
             );
-            bot.newchat.heads.insert(
-                session.clone(),
-                Head {
-                    message: question,
-                    project: project.name.clone(),
-                    mode,
-                },
-            );
+            head_shows(bot, session, mode);
         }
         None => send(bot, host, thread, &head, None, Purpose::none()),
     }
-    conversation::expect_answer(bot, host, &session);
+}
+
+/// The topic's first line shows this mode now.
+pub fn head_shows(bot: &mut Bot, session: &str, mode: Mode) {
+    bot.newchat.shown.insert(session.to_string(), mode);
+}
+
+/// The topic's first line was sent (by «Продолжить в Telegram»): it follows the mode from now on.
+pub fn head_sent(bot: &mut Bot, host: &mut dyn Host, thread: i64, message: i64) {
+    if let Some(topic) = bot
+        .store
+        .topics
+        .iter_mut()
+        .find(|topic| topic.thread == thread)
+    {
+        topic.head = Some(message);
+        bot.save(host);
+    }
 }
 
 pub fn on_answer(bot: &mut Bot, host: &mut dyn Host, tag: &str, result: Result<Value, TgError>) {
@@ -278,23 +386,19 @@ pub fn on_session(bot: &mut Bot, host: &mut dyn Host, session: &Session) {
             Purpose::new(Module::NewChat, format!("rename:{thread}")),
         );
     }
-    let Some(head) = bot.newchat.heads.get_mut(&session.id) else {
-        return;
-    };
-    if head.mode == session.mode {
-        return;
-    }
-    head.mode = session.mode;
-    let (message, project, mode) = (head.message, head.project.clone(), head.mode);
-    let Some(thread) = bot
+    // The first line follows the mode, wherever it was changed (`/mode`, Flux).
+    let Some((thread, message, project)) = bot
         .store
         .topic_by_session(&session.id)
-        .map(|topic| topic.thread)
+        .and_then(|topic| Some((topic.thread, topic.head?, topic.project.clone())))
     else {
-        bot.newchat.heads.remove(&session.id);
         return;
     };
-    let html = head_html(host, &project, mode);
+    if bot.newchat.shown.get(&session.id) == Some(&session.mode) {
+        return;
+    }
+    head_shows(bot, &session.id, session.mode);
+    let html = head_html(host, &folder_name(&project), session.mode);
     let call = telegram::edit_text(chat, message, &html, None);
     bot.call(
         host,
@@ -305,7 +409,7 @@ pub fn on_session(bot: &mut Bot, host: &mut dyn Host, session: &Session) {
 }
 
 /// «📁 <b>project</b> · Ask».
-fn head_html(host: &dyn Host, project: &str, mode: Mode) -> String {
+pub fn head_html(host: &dyn Host, project: &str, mode: Mode) -> String {
     format!(
         "📁 <b>{}</b> · {}",
         render::escape(project),
