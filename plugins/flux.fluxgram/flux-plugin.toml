@@ -1,0 +1,227 @@
+# FluxGram: Telegram chats in Flux — an unofficial client that works through the Telegram API
+# (TDLib in the plugin's own program, helpers/fluxgram-helper). Several accounts, signed in with a
+# QR code from the phone or with the number, the code and the password; the chats you add, in the
+# window on the left and a tab each. The service holds the program, the accounts and their chats;
+# the windows draw them.
+id = "flux.fluxgram"
+name = "FluxGram"
+version = "0.1.0"
+api = "0.5"
+authors = ["Egor Ageev"]
+description = "Unofficial Telegram client: works through the Telegram API. Your chats and groups in Flux — several accounts, only the chats you add."
+repository = "https://github.com/egor4geev/flux-plugins"
+icon = "icons/fluxgram.svg"
+wasm = "target/wasm32-wasip2/release/flux_fluxgram.wasm"
+# One instance for the whole app holds the program and the accounts: TDLib opens a database once.
+service = true
+
+# Reply with Claude (part 6): a message's action and the field's button open a Claude session
+# with the chat attached.
+[permissions]
+claude = true
+
+# The plugin's program: TDLib (helpers/fluxgram-helper, built by this repository's CI) — the files
+# of its release fluxgram-helper-v0.2.0 and their checksums (of the .gz files). A developer's build
+# still comes from FLUX_DEV_HELPERS.
+[[helpers]]
+name = "fluxgram-helper"
+
+[helpers.platforms]
+macos-aarch64 = { url = "https://github.com/egor4geev/flux-plugins/releases/download/fluxgram-helper-v0.2.0/fluxgram-helper-macos-aarch64.gz", sha256 = "d865387a6c74c85100d4eeb630b372fa4582012116fc296456958c97f3d0524d" }
+macos-x86_64 = { url = "https://github.com/egor4geev/flux-plugins/releases/download/fluxgram-helper-v0.2.0/fluxgram-helper-macos-x86_64.gz", sha256 = "1a45c531a423a506a9ddb062a77c0ef37db6db7695a61502403f8f5a9615096c" }
+windows-x86_64 = { url = "https://github.com/egor4geev/flux-plugins/releases/download/fluxgram-helper-v0.2.0/fluxgram-helper-windows-x86_64.gz", sha256 = "302c9a753ca6bea7c0df275655dfb3b8ad0c755ecca000919f8de1c6a28757cc" }
+windows-aarch64 = { url = "https://github.com/egor4geev/flux-plugins/releases/download/fluxgram-helper-v0.2.0/fluxgram-helper-windows-aarch64.gz", sha256 = "386796b85f3f6e55f2185a3ef3a3bf0312743a4fc7a90d21674d6d1b9000affd" }
+
+[[commands]]
+id = "add-account"
+title = "Add Telegram Account…"
+category = "FluxGram"
+
+# Add Chat…: the popup of the current account's people and groups.
+[[commands]]
+id = "add-chat"
+title = "Add Chat…"
+category = "FluxGram"
+
+# A notification's Open: the chat's tab (the argument is its key).
+[[commands]]
+id = "open-chat"
+title = "Open Chat"
+category = "FluxGram"
+palette = false
+
+# The chats, on the left island in place of the project tree: the accounts' switcher on top.
+[[tool-windows]]
+id = "fluxgram"
+title = "FluxGram"
+icon = "icons/fluxgram.svg"
+location = "left"
+
+# A chat per tab among the editor's tabs: `chat/<account>:<chat id>`.
+[[tool-windows]]
+id = "chat"
+title = "Chat"
+icon = "icons/fluxgram.svg"
+location = "editor"
+tabs = true
+
+# Settings → FluxGram: the accounts, each with Sign Out, and Add Account.
+[[tool-windows]]
+id = "accounts"
+title = "Accounts"
+location = "settings"
+
+# Settings → FluxGram: the hidden chats — the phrase that shows them in the list's search.
+[[tool-windows]]
+id = "hidden-chats"
+title = "Hidden Chats"
+location = "settings"
+
+# A person's or a group's profile over Flux: the info, the members, the chat's media.
+[[tool-windows]]
+id = "profile"
+title = "Profile"
+location = "dialog"
+
+# Hide Chat when the hidden chats aren't open: the phrase that hides it.
+[[tool-windows]]
+id = "hide-chat"
+title = "Hide Chat"
+location = "dialog"
+
+# Adding an account: the QR code for the phone's camera, or the number, the code and the password.
+[[tool-windows]]
+id = "sign-in"
+title = "Add Account"
+location = "dialog"
+
+# Claude's tools (part 6, src/claude.rs): the Claude sessions of the window get them as
+# mcp__flux__fluxgram_*. They read only the chats the user made available to Claude (⋯ → Available
+# to Claude, the profile's switch) — never a hidden one; a message leaves only by the user's Send
+# on send_message's card.
+[[tools]]
+name = "chats"
+title = "Chats"
+description = "Lists the Telegram chats the user made available to Claude in FluxGram, across their accounts: each chat's key (for read_chat and search_chat), title, kind (private chat, group, channel, bot, saved messages), the account, the unread count and the last message. Call it first when the user asks about their chats or messages. Other chats can't be read: the user turns a chat on with «Available to Claude» in its ⋯ menu."
+schema = "tools/chats.json"
+
+[[tools]]
+name = "read_chat"
+title = "Read Chat"
+description = "Reads a page of a chat's messages (one per line, oldest to newest: [id] date author (reply to [id]) (forwarded from …) (edited): text; media described; the user's own messages as You). With no before or around: the newest messages. To go further back, call again with before = the id the page ends with («Older: before=…») until you understand the context. around = a message's id: the page around an old message. The chat's key comes from the chats tool."
+schema = "tools/read_chat.json"
+
+[[tools]]
+name = "search_chat"
+title = "Search Chats"
+description = "Searches the messages of one chat (chat = its key) or of every chat available to Claude (no chat) for words; the matches newest first, in read_chat's line format, with their ids — read_chat with around = an id shows a match in its context. For more matches of a chat, call again with its chat and before, as the answer says."
+schema = "tools/search_chat.json"
+
+[[tools]]
+name = "send_message"
+title = "Message to a Chat"
+description = "Proposes a message for a chat available to Claude (chat = its key from the chats tool), as a reply to a message (reply_to = its id) or a new one. It isn't sent by itself: the user sees it on a card in this chat and sends it, edits it in the chat's field, or declines — the answer says which; after an edit or a decline, don't send it again. Read the chat first (read_chat) so the reply fits the conversation; write in the chat's language and tone."
+schema = "tools/send_message.json"
+write = true
+
+# Settings → FluxGram → Media (part 4): what plays by itself, what downloads by itself, the cache.
+[[commands]]
+id = "clear-cache"
+title = "Clear Cache"
+category = "FluxGram"
+palette = false
+
+[[settings]]
+key = "media"
+type = "section"
+title = "Media"
+
+[[settings]]
+key = "autoplay"
+type = "bool"
+title = "Autoplay GIFs and video messages"
+description = "Without sound, while they are on screen."
+default = true
+
+[[settings]]
+key = "loop-stickers"
+type = "bool"
+title = "Loop animated stickers"
+default = true
+
+[[settings]]
+key = "auto-download"
+type = "section"
+title = "Auto-download"
+description = "What downloads by itself once it is on screen. Videos and files download on a click."
+
+[[settings]]
+key = "download-photos"
+type = "bool"
+title = "Photos"
+default = true
+
+[[settings]]
+key = "download-voice"
+type = "bool"
+title = "Voice and video messages"
+default = true
+
+[[settings]]
+key = "download-gifs"
+type = "bool"
+title = "GIFs and stickers"
+default = true
+
+[[settings]]
+key = "cache"
+type = "section"
+title = "Cache"
+description = "Downloaded media is kept on this computer. Past the limit, what you've seen longest ago goes."
+
+[[settings]]
+key = "cache-limit"
+type = "choice"
+title = "Size limit"
+default = "2"
+options = [
+    { value = "1", title = "1 GB" },
+    { value = "2", title = "2 GB" },
+    { value = "5", title = "5 GB" },
+    { value = "10", title = "10 GB" },
+    { value = "0", title = "No limit" },
+]
+
+# The size the cache takes now — TDLib's files and the stickers' animations (part 5): one card
+# with Clear Cache.
+[[settings]]
+key = "cache-size"
+type = "status"
+title = ""
+default = "Measured once signed in"
+
+[[settings]]
+key = "clear-cache-button"
+type = "button"
+title = "Clear Cache"
+command = "clear-cache"
+
+# Settings → FluxGram → Links (part 5, src/links.rs): a web link is asked about before it opens in
+# the browser — always, when its text isn't its address, or never; an address that may pretend to
+# be another is asked about whatever this says.
+[[settings]]
+key = "links"
+type = "section"
+title = "Links"
+description = "Telegram's links open in FluxGram. An address with letters of different alphabets is always asked about."
+
+[[settings]]
+key = "ask-links"
+type = "choice"
+title = "Ask before opening links"
+default = "mismatch"
+options = [
+    { value = "always", title = "Always" },
+    { value = "mismatch", title = "When the text isn't the address" },
+    { value = "never", title = "Never" },
+]
