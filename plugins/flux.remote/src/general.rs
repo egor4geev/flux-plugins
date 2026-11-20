@@ -502,13 +502,14 @@ pub fn on_limits(bot: &mut Bot, host: &mut dyn Host, limits: UsageLimits) {
         .flatten()
         .max_by_key(|window| window.percent)
         .map(|window| window.resets_at);
+    let now = (host.now_ms() / 1000) as i64;
     bot.limits = Some(limits);
+    bot.limits_at = now;
     if !rejected || bot.general.rejected {
         bot.general.rejected = rejected;
         return;
     }
     bot.general.rejected = true;
-    let now = (host.now_ms() / 1000) as i64;
     let text = match resets {
         Some(at) => format!(
             "⛔ {}",

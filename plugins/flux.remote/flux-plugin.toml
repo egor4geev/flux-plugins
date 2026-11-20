@@ -6,7 +6,7 @@
 # locked, every session's questions come there too.
 id = "flux.remote"
 name = "Flux Remote"
-version = "0.1.0"
+version = "0.1.1"
 api = "0.6"
 authors = ["Egor Ageev"]
 description = "Claude from your phone: your own Telegram bot runs Flux's Claude sessions — a topic per session, answers as they are written, permissions and questions by buttons."

@@ -22,7 +22,9 @@
 //!   asks first, in the same message. The topic's first line follows the mode
 //!   ([`crate::newchat::on_session`]).
 //! - `/usage` — the 5-hour and the 7-day windows: how much is used and when each resets, in the
-//!   user's time ([`resets`]); the last `ClaudeLimits` event serves while its windows last.
+//!   user's time ([`resets`]). Flux is asked each time (it answers with what came within a minute,
+//!   or asks Claude Code): Claude may work elsewhere, and the last `ClaudeLimits` event can be
+//!   hours old. When Flux can't ask, the last known ones come with their time.
 //!
 //! The buttons keep no state: their data names the session by [`handoff::key_for`] and the page or
 //! the mode by the choice, so a button of the last run still works.
@@ -508,25 +510,30 @@ fn mode_pressed(
 
 fn usage(bot: &mut Bot, host: &mut dyn Host, thread: i64) {
     let now = (host.now_ms() / 1000) as i64;
-    // The last event serves while none of its windows has reset; otherwise Flux is asked.
-    let fresh = bot.limits.as_ref().is_some_and(|limits| {
-        windows(limits).all(|(_, window)| window.resets_at > now)
-            && (limits.five_hour.is_some() || limits.seven_day.is_some())
+    let asked = match host.limits() {
+        Ok(limits) => {
+            bot.limits = Some(limits);
+            bot.limits_at = now;
+            true
+        }
+        Err(err) => {
+            host.log(&format!("No limits: {err}"));
+            false
+        }
+    };
+    // The last known ones while none of their windows has reset.
+    let known = bot.limits.as_ref().filter(|limits| {
+        (limits.five_hour.is_some() || limits.seven_day.is_some())
+            && (asked || windows(limits).all(|(_, window)| window.resets_at > now))
     });
-    if !fresh {
-        match host.limits() {
-            Ok(limits) => bot.limits = Some(limits),
-            Err(err) => {
-                host.log(&format!("No limits: {err}"));
-                bot.limits = None;
-            }
+    let html = match known {
+        Some(limits) if asked => usage_html(host, limits, now),
+        Some(limits) => {
+            let at = LocalTime::at(bot.limits_at, host.utc_offset(bot.limits_at)).hm();
+            let note = trf(host, "Flux can't ask Claude Code now: as of {0}.", &[&at]);
+            format!("{}\n{}", usage_html(host, limits, now), escape(&note))
         }
-    }
-    let html = match &bot.limits {
-        Some(limits) if limits.five_hour.is_some() || limits.seven_day.is_some() => {
-            usage_html(host, limits, now)
-        }
-        _ => escape(&host.tr("Flux can't tell Claude's limits now.")),
+        None => escape(&host.tr("Flux can't tell Claude's limits now.")),
     };
     send(bot, host, thread, &html, None);
 }
@@ -978,13 +985,23 @@ mod tests {
     }
 
     #[test]
-    fn usage_tells_the_windows_in_the_users_time() {
+    fn usage_asks_flux_each_time_and_tells_the_windows_in_the_users_time() {
         let mut host = FakeHost::default();
         let mut bot = bound_bot(&mut host);
         let mut tg = Telegram::default();
-        bot.on_update(&mut host, user_message(1, Some(GENERAL), "/usage"));
-        let calls = tg.flush(&mut bot, &mut host);
-        assert_eq!(calls[0].1["text"], "Flux can't tell Claude's limits now.");
+        let usage = |bot: &mut Bot, host: &mut FakeHost, tg: &mut Telegram, update: i64| {
+            bot.on_update(host, user_message(update, Some(GENERAL), "/usage"));
+            let calls = tg.flush(bot, host);
+            let calls = without_status(bot, calls);
+            calls.last().unwrap().1["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            usage(&mut bot, &mut host, &mut tg, 1),
+            "Flux can't tell Claude's limits now."
+        );
         // NOW_S is a Wednesday, 11:06 UTC (the fake's zone).
         host.limits = Some(UsageLimits {
             five_hour: Some(UsageWindow {
@@ -997,14 +1014,11 @@ mod tests {
             }),
             rejected: false,
         });
-        bot.on_update(&mut host, user_message(2, Some(GENERAL), "/usage"));
-        let calls = tg.flush(&mut bot, &mut host);
         assert_eq!(
-            calls[0].1["text"],
+            usage(&mut bot, &mut host, &mut tg, 2),
             "<b>Claude's limits</b>\n5 hours: 42%, resets at 12:06\n7 days: 13%, resets Sat at 11:06"
         );
-        // The event serves while its windows last: Flux isn't asked.
-        let asked = host.claude.iter().filter(|line| *line == "limits").count();
+        // An event is kept, yet Flux is asked again: Claude may have worked elsewhere since.
         let mut full = host.limits.unwrap();
         full.five_hour = Some(UsageWindow {
             percent: 100,
@@ -1012,20 +1026,25 @@ mod tests {
         });
         full.rejected = true;
         bot.on_claude(&mut host, ClaudeEvent::Limits(full));
-        bot.on_update(&mut host, user_message(3, Some(GENERAL), "/usage"));
-        let calls = {
-            let calls = tg.flush(&mut bot, &mut host);
-            without_status(&bot, calls)
-        };
         assert!(
-            calls.last().unwrap().1["text"]
-                .as_str()
-                .unwrap()
-                .contains("5 hours: limit reached, resets at 11:36")
+            usage(&mut bot, &mut host, &mut tg, 3).contains("5 hours: 42%, resets at 12:06"),
+            "Flux's answer wins over the event"
         );
         assert_eq!(
             host.claude.iter().filter(|line| *line == "limits").count(),
-            asked
+            3
+        );
+        // Flux can't ask: the last known ones, with their time, while their windows last.
+        host.limits = None;
+        assert_eq!(
+            usage(&mut bot, &mut host, &mut tg, 4),
+            "<b>Claude's limits</b>\n5 hours: 42%, resets at 12:06\n7 days: 13%, resets Sat at 11:06\n\
+             Flux can't ask Claude Code now: as of 11:06."
+        );
+        host.now += 3600 * 1000;
+        assert_eq!(
+            usage(&mut bot, &mut host, &mut tg, 5),
+            "Flux can't tell Claude's limits now."
         );
     }
 }

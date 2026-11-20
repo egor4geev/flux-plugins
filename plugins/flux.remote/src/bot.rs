@@ -78,6 +78,8 @@ pub struct Bot {
     pub system: SystemState,
     /// The subscription's usage as Flux told it last (`ClaudeLimits`, or `/usage` asked).
     pub limits: Option<UsageLimits>,
+    /// When Flux told them: seconds since 1970-01-01 UTC.
+    pub limits_at: i64,
     pub binding: binding::State,
     pub general: general::State,
     pub handoff: handoff::State,
@@ -104,6 +106,7 @@ impl Bot {
                 on_power: true,
             },
             limits: None,
+            limits_at: 0,
             binding: Default::default(),
             general: Default::default(),
             handoff: Default::default(),
