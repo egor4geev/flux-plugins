@@ -147,6 +147,7 @@
 "Couldn't change the mode: {0}" = "Не получилось сменить режим: {0}"
 "Mode: {0}" = "Режим: {0}"
 "Flux can't tell Claude's limits now." = "Flux сейчас не может узнать лимиты Claude."
+"Flux can't ask Claude Code now: as of {0}." = "Flux сейчас не может спросить Claude Code: данные на {0}."
 "5 hours: {0}" = "5 часов: {0}"
 "7 days: {0}" = "7 дней: {0}"
 "limit reached" = "лимит исчерпан"
